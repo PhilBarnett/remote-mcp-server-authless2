@@ -64,7 +64,8 @@ function createServer() {
 		},
 		async ({ limit }) => {
 			const auth = btoa(
-				`${env.WP_USERNAME}:${env.WP_APP_PASSWORD}`
+				`${env.WC_CONSUMER_KEY}:${env.WC_CONSUMER_SECRET}`
+);
 			);
 
 			const response = await fetch(
