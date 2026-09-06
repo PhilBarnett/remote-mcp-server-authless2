@@ -66,7 +66,6 @@ function createServer() {
 			const auth = btoa(
 				`${env.WC_CONSUMER_KEY}:${env.WC_CONSUMER_SECRET}`
 );
-			);
 
 			const response = await fetch(
 				`${env.WC_SITE}/wp-json/wc/v3/orders?per_page=${limit}&orderby=date&order=desc`,
