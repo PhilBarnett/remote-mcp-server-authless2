@@ -202,6 +202,65 @@ function safeMetaBudgetObject(object: any, objectType: "campaign" | "adset") {
 	};
 }
 
+
+const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
+const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
+
+async function assertMetaObjectOwnership(
+	objectId: string,
+	objectType: "campaign" | "adset" | "creative",
+) {
+	const { adAccountId } = getMetaConfig();
+	const configuredAccountId = adAccountId.replace(/^act_/, "");
+	const fields =
+		objectType === "adset"
+			? "id,name,account_id,campaign_id,status,effective_status"
+			: objectType === "campaign"
+				? "id,name,account_id,status,effective_status,objective,daily_budget,lifetime_budget"
+				: "id,name,account_id,status";
+
+	const object = await metaFetch(objectId, { fields });
+	if (String(object.account_id) !== configuredAccountId) {
+		throw new Error(
+			"Refusing operation: " + objectType + " does not belong to the configured Meta ad account.",
+		);
+	}
+	return object;
+}
+
+async function refuseDuplicateMetaName(
+	edge: "campaigns" | "adsets" | "ads",
+	name: string,
+) {
+	const { adAccountId } = getMetaConfig();
+	const result = await metaFetch(adAccountId + "/" + edge, {
+		fields: "id,name,status,effective_status",
+		limit: 100,
+	});
+	const duplicate = (result.data ?? []).find(
+		(item: any) => String(item.name).trim().toLowerCase() === name.trim().toLowerCase(),
+	);
+	if (duplicate) {
+		throw new Error(
+			"Refusing creation: an existing asset already uses this exact name (ID " +
+				duplicate.id +
+				").",
+		);
+	}
+}
+
+function metaDailyBudgetMinorUnits(amountAud: number) {
+	const rounded = Number(amountAud.toFixed(2));
+	if (rounded <= 0 || rounded > META_MAX_CREATION_DAILY_BUDGET_AUD) {
+		throw new Error(
+			"Daily budget must be greater than A$0 and no more than A$" +
+				META_MAX_CREATION_DAILY_BUDGET_AUD +
+				".",
+		);
+	}
+	return Math.round(rounded * 100);
+}
+
 type Ga4ServiceAccount = {
 	client_email: string;
 	private_key: string;
@@ -1197,6 +1256,291 @@ function createServer() {
 					requested_daily_budget: roundedBudget,
 					verified_daily_budget: metaBudgetAmount(verified.daily_budget),
 					unchanged_fields: ["targeting", "creative", "status", "optimisation", "bid_strategy"],
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+
+	/* Guarded Meta campaign creation tools. Every created delivery object is PAUSED. */
+
+	server.registerTool(
+		"get_meta_campaign_creation_assets",
+		{
+			description:
+				"Inspect reusable Meta pixels and ad creatives for building a new campaign. Read-only.",
+			inputSchema: z.object({
+				creative_limit: z.number().int().min(1).max(100).default(50),
+			}),
+		},
+		async ({ creative_limit }) => {
+			try {
+				const { adAccountId } = getMetaConfig();
+				const [pixelResult, creativeResult] = await Promise.all([
+					metaFetch(adAccountId + "/adspixels", {
+						fields: "id,name,last_fired_time,is_unavailable",
+						limit: 100,
+					}),
+					metaFetch(adAccountId + "/adcreatives", {
+						fields:
+							"id,name,status,object_story_id,thumbnail_url,image_hash,video_id,call_to_action_type",
+						limit: creative_limit,
+					}),
+				]);
+				return toolResult({
+					account_id: adAccountId,
+					pixels: pixelResult.data ?? [],
+					creatives: creativeResult.data ?? [],
+					note: "Only existing creatives are exposed; this tool cannot upload or modify media.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_meta_sales_campaign_paused",
+		{
+			description:
+				"Create one new Meta OUTCOME_SALES campaign in PAUSED state. Cannot activate delivery.",
+			inputSchema: z.object({
+				name: z.string().trim().min(3).max(200),
+				budget_level: z.enum(["campaign", "adset"]),
+				daily_budget_aud: z.number().positive().max(500).optional(),
+				confirmation: z.literal(META_CREATE_CONFIRMATION),
+			}),
+		},
+		async ({ name, budget_level, daily_budget_aud }) => {
+			try {
+				if (budget_level === "campaign" && daily_budget_aud === undefined) {
+					throw new Error("A campaign-level daily budget is required.");
+				}
+				if (budget_level === "adset" && daily_budget_aud !== undefined) {
+					throw new Error("Do not provide a campaign budget when budget_level is adset.");
+				}
+				await refuseDuplicateMetaName("campaigns", name);
+				const { adAccountId } = getMetaConfig();
+				const params: Record<string, string | number> = {
+					name,
+					objective: "OUTCOME_SALES",
+					buying_type: "AUCTION",
+					special_ad_categories: JSON.stringify([]),
+					status: "PAUSED",
+				};
+				if (daily_budget_aud !== undefined) {
+					params.daily_budget = metaDailyBudgetMinorUnits(daily_budget_aud);
+					params.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
+				}
+				const created = await metaPost(adAccountId + "/campaigns", params);
+				const verified = await metaFetch(created.id, {
+					fields:
+						"id,name,account_id,status,effective_status,objective,daily_budget,lifetime_budget,bid_strategy,special_ad_categories",
+				});
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					object_type: "campaign",
+					budget_level,
+					...verified,
+					daily_budget_aud: metaBudgetAmount(verified.daily_budget),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_meta_website_sales_adset_paused",
+		{
+			description:
+				"Create one PAUSED website-sales ad set under an owned PAUSED campaign, restricted to Australian targeting and an assigned Meta pixel.",
+			inputSchema: z.object({
+				campaign_id: z.string().regex(/^\d+$/),
+				name: z.string().trim().min(3).max(200),
+				pixel_id: z.string().regex(/^\d+$/),
+				conversion_event: z.enum(["PURCHASE", "LEAD"]).default("PURCHASE"),
+				daily_budget_aud: z.number().positive().max(500).optional(),
+				age_min: z.number().int().min(18).max(65).default(18),
+				age_max: z.number().int().min(18).max(65).default(65),
+				genders: z.array(z.union([z.literal(1), z.literal(2)])).max(2).optional(),
+				confirmation: z.literal(META_CREATE_CONFIRMATION),
+			}),
+		},
+		async ({
+			campaign_id,
+			name,
+			pixel_id,
+			conversion_event,
+			daily_budget_aud,
+			age_min,
+			age_max,
+			genders,
+		}) => {
+			try {
+				if (age_max < age_min) throw new Error("age_max must be at least age_min.");
+				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
+				if (campaign.objective !== "OUTCOME_SALES") {
+					throw new Error("Refusing creation: parent campaign is not OUTCOME_SALES.");
+				}
+				if (campaign.status !== "PAUSED") {
+					throw new Error("Refusing creation: parent campaign must be PAUSED.");
+				}
+
+				const { adAccountId } = getMetaConfig();
+				const pixels = await metaFetch(adAccountId + "/adspixels", {
+					fields: "id,name,is_unavailable",
+					limit: 100,
+				});
+				const pixel = (pixels.data ?? []).find((item: any) => String(item.id) === pixel_id);
+				if (!pixel || pixel.is_unavailable) {
+					throw new Error(
+						"Refusing creation: pixel is unavailable or not assigned to this ad account.",
+					);
+				}
+				await refuseDuplicateMetaName("adsets", name);
+
+				const targeting: Record<string, unknown> = {
+					geo_locations: { countries: ["AU"] },
+					age_min,
+					age_max,
+				};
+				if (genders?.length) targeting.genders = genders;
+
+				const params: Record<string, string | number> = {
+					campaign_id,
+					name,
+					status: "PAUSED",
+					billing_event: "IMPRESSIONS",
+					optimization_goal: "OFFSITE_CONVERSIONS",
+					destination_type: "WEBSITE",
+					promoted_object: JSON.stringify({
+						pixel_id,
+						custom_event_type: conversion_event,
+					}),
+					targeting: JSON.stringify(targeting),
+					bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+				};
+
+				const campaignBudget = metaBudgetAmount(campaign.daily_budget);
+				if (campaignBudget === null) {
+					if (daily_budget_aud === undefined) {
+						throw new Error(
+							"An ad-set daily budget is required because the parent has no campaign budget.",
+						);
+					}
+					params.daily_budget = metaDailyBudgetMinorUnits(daily_budget_aud);
+				} else if (daily_budget_aud !== undefined) {
+					throw new Error(
+						"Do not provide an ad-set budget when the parent uses campaign-level budgeting.",
+					);
+				}
+
+				const created = await metaPost(adAccountId + "/adsets", params);
+				const verified = await metaFetch(created.id, {
+					fields:
+						"id,name,account_id,campaign_id,status,effective_status,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,promoted_object,targeting",
+				});
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					object_type: "adset",
+					...verified,
+					daily_budget_aud: metaBudgetAmount(verified.daily_budget),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_meta_ad_from_existing_creative_paused",
+		{
+			description:
+				"Create one PAUSED Meta ad using an existing owned creative under an owned PAUSED ad set.",
+			inputSchema: z.object({
+				adset_id: z.string().regex(/^\d+$/),
+				creative_id: z.string().regex(/^\d+$/),
+				name: z.string().trim().min(3).max(200),
+				confirmation: z.literal(META_CREATE_CONFIRMATION),
+			}),
+		},
+		async ({ adset_id, creative_id, name }) => {
+			try {
+				const adset = await assertMetaObjectOwnership(adset_id, "adset");
+				if (adset.status !== "PAUSED") {
+					throw new Error("Refusing creation: parent ad set must be PAUSED.");
+				}
+				await assertMetaObjectOwnership(creative_id, "creative");
+				await refuseDuplicateMetaName("ads", name);
+				const { adAccountId } = getMetaConfig();
+				const created = await metaPost(adAccountId + "/ads", {
+					name,
+					adset_id,
+					creative: JSON.stringify({ creative_id }),
+					status: "PAUSED",
+				});
+				const verified = await metaFetch(created.id, {
+					fields:
+						"id,name,account_id,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id}",
+				});
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					object_type: "ad",
+					...verified,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_meta_campaign_draft",
+		{
+			description:
+				"Inspect one owned Meta campaign and its ad sets and ads before activation. Read-only.",
+			inputSchema: z.object({
+				campaign_id: z.string().regex(/^\d+$/),
+			}),
+		},
+		async ({ campaign_id }) => {
+			try {
+				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
+				const [adsets, ads] = await Promise.all([
+					metaFetch(campaign_id + "/adsets", {
+						fields:
+							"id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,promoted_object,targeting",
+						limit: 100,
+					}),
+					metaFetch(campaign_id + "/ads", {
+						fields:
+							"id,name,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url}",
+						limit: 100,
+					}),
+				]);
+				return toolResult({
+					campaign: {
+						...campaign,
+						daily_budget_aud: metaBudgetAmount(campaign.daily_budget),
+						lifetime_budget_aud: metaBudgetAmount(campaign.lifetime_budget),
+					},
+					adsets: (adsets.data ?? []).map((item: any) => ({
+						...item,
+						daily_budget_aud: metaBudgetAmount(item.daily_budget),
+						lifetime_budget_aud: metaBudgetAmount(item.lifetime_budget),
+					})),
+					ads: ads.data ?? [],
+					ready_for_review:
+						campaign.status === "PAUSED" &&
+						(adsets.data ?? []).length > 0 &&
+						(ads.data ?? []).length > 0,
+					activation_tool_available: false,
 				});
 			} catch (error) {
 				return toolError(error);
