@@ -6,27 +6,18 @@ import { z } from "zod";
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
 
-const GENUINE_STATUSES = new Set([
-	"processing",
-	"completed",
-	"on-hold",
-]);
+const GENUINE_STATUSES = new Set(["processing", "completed", "on-hold"]);
 
 function getAuthHeader() {
-	const auth = btoa(
-		`${env.WC_CONSUMER_KEY}:${env.WC_CONSUMER_SECRET}`,
-	);
+	const workerEnv = env as unknown as Record<string, string>;
+	const auth = btoa(`${workerEnv.WC_CONSUMER_KEY}:${workerEnv.WC_CONSUMER_SECRET}`);
 
 	return `Basic ${auth}`;
 }
 
-async function wcFetch(
-	path: string,
-	params: Record<string, string | number | undefined> = {},
-) {
-	const url = new URL(
-		`${env.WC_SITE}/wp-json/wc/v3/${path}`,
-	);
+async function wcFetch(path: string, params: Record<string, string | number | undefined> = {}) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const url = new URL(`${workerEnv.WC_SITE}/wp-json/wc/v3/${path}`);
 
 	for (const [key, value] of Object.entries(params)) {
 		if (value !== undefined) {
@@ -44,18 +35,77 @@ async function wcFetch(
 	if (!response.ok) {
 		const body = await response.text();
 
-		throw new Error(
-			`WooCommerce request failed: ${response.status} ${body}`,
-		);
+		throw new Error(`WooCommerce request failed: ${response.status} ${body}`);
 	}
 
 	return response;
 }
 
-async function getAllOrders(
-	startDate: string,
-	endDate: string,
-) {
+function getMetaConfig() {
+	const workerEnv = env as unknown as Record<string, string | undefined>;
+	const accessToken = workerEnv.META_ACCESS_TOKEN;
+	const configuredAccountId = workerEnv.META_AD_ACCOUNT_ID;
+	const apiVersion = workerEnv.META_API_VERSION;
+
+	if (!accessToken || !configuredAccountId || !apiVersion) {
+		throw new Error(
+			"Meta Ads is not configured. Set META_ACCESS_TOKEN, META_AD_ACCOUNT_ID and META_API_VERSION in Cloudflare.",
+		);
+	}
+
+	const adAccountId = configuredAccountId.startsWith("act_")
+		? configuredAccountId
+		: `act_${configuredAccountId}`;
+
+	return { accessToken, adAccountId, apiVersion };
+}
+
+async function metaFetch(path: string, params: Record<string, string | number | undefined> = {}) {
+	const { accessToken, apiVersion } = getMetaConfig();
+	const url = new URL(`https://graph.facebook.com/${apiVersion}/${path}`);
+
+	for (const [key, value] of Object.entries(params)) {
+		if (value !== undefined) {
+			url.searchParams.set(key, String(value));
+		}
+	}
+
+	const response = await fetch(url.toString(), {
+		headers: {
+			Authorization: `Bearer ${accessToken}`,
+			Accept: "application/json",
+		},
+	});
+
+	if (!response.ok) {
+		const body = await response.text();
+		throw new Error(`Meta Marketing API request failed: ${response.status} ${body}`);
+	}
+
+	return response.json<any>();
+}
+
+function metaDateRange(startDate: string, endDate: string) {
+	return JSON.stringify({ since: startDate, until: endDate });
+}
+
+const META_INSIGHT_FIELDS = [
+	"account_currency",
+	"impressions",
+	"reach",
+	"frequency",
+	"clicks",
+	"inline_link_clicks",
+	"spend",
+	"cpm",
+	"cpc",
+	"ctr",
+	"actions",
+	"action_values",
+	"cost_per_action_type",
+].join(",");
+
+async function getAllOrders(startDate: string, endDate: string) {
 	const allOrders: any[] = [];
 	const perPage = 100;
 	const maxPages = 50;
@@ -85,10 +135,7 @@ async function getAllOrders(
 function isGenuineCommercialOrder(order: any) {
 	const total = Number(order.total ?? 0);
 
-	return (
-		total > GENUINE_ORDER_MIN_TOTAL &&
-		GENUINE_STATUSES.has(order.status)
-	);
+	return total > GENUINE_ORDER_MIN_TOTAL && GENUINE_STATUSES.has(order.status);
 }
 
 function safeOrder(order: any) {
@@ -134,10 +181,7 @@ function toolError(error: unknown) {
 		content: [
 			{
 				type: "text" as const,
-				text:
-					error instanceof Error
-						? error.message
-						: String(error),
+				text: error instanceof Error ? error.message : String(error),
 			},
 		],
 		isError: true,
@@ -176,12 +220,7 @@ function createServer() {
 		"calculate",
 		{
 			inputSchema: z.object({
-				operation: z.enum([
-					"add",
-					"subtract",
-					"multiply",
-					"divide",
-				]),
+				operation: z.enum(["add", "subtract", "multiply", "divide"]),
 				a: z.number(),
 				b: z.number(),
 			}),
@@ -236,8 +275,7 @@ function createServer() {
 	server.registerTool(
 		"get_recent_orders",
 		{
-			description:
-				"Return recent Blindmotion WooCommerce orders without customer PII",
+			description: "Return recent Blindmotion WooCommerce orders without customer PII",
 			inputSchema: z.object({
 				limit: z.number().int().min(1).max(20),
 			}),
@@ -252,9 +290,7 @@ function createServer() {
 
 				const orders = await response.json<any[]>();
 
-				return toolResult(
-					orders.map(safeOrder),
-				);
+				return toolResult(orders.map(safeOrder));
 			} catch (error) {
 				return toolError(error);
 			}
@@ -277,31 +313,22 @@ function createServer() {
 		},
 		async ({ start_date, end_date }) => {
 			try {
-				const orders = await getAllOrders(
-					start_date,
-					end_date,
-				);
+				const orders = await getAllOrders(start_date, end_date);
 
-				const genuineOrders =
-					orders.filter(isGenuineCommercialOrder);
+				const genuineOrders = orders.filter(isGenuineCommercialOrder);
 
 				const revenue = genuineOrders.reduce(
-					(sum, order) =>
-						sum + Number(order.total ?? 0),
+					(sum, order) => sum + Number(order.total ?? 0),
 					0,
 				);
 
 				const discounts = genuineOrders.reduce(
-					(sum, order) =>
-						sum +
-						Number(order.discount_total ?? 0),
+					(sum, order) => sum + Number(order.discount_total ?? 0),
 					0,
 				);
 
 				const shipping = genuineOrders.reduce(
-					(sum, order) =>
-						sum +
-						Number(order.shipping_total ?? 0),
+					(sum, order) => sum + Number(order.shipping_total ?? 0),
 					0,
 				);
 
@@ -310,46 +337,28 @@ function createServer() {
 				const statusCounts: Record<string, number> = {};
 
 				for (const order of genuineOrders) {
-					statusCounts[order.status] =
-						(statusCounts[order.status] ?? 0) + 1;
+					statusCounts[order.status] = (statusCounts[order.status] ?? 0) + 1;
 				}
 
-				const sampleOrLowValueOrders =
-					orders.filter(
-						(order) =>
-							Number(order.total ?? 0) <=
-							GENUINE_ORDER_MIN_TOTAL,
-					).length;
+				const sampleOrLowValueOrders = orders.filter(
+					(order) => Number(order.total ?? 0) <= GENUINE_ORDER_MIN_TOTAL,
+				).length;
 
 				return toolResult({
 					start_date,
 					end_date,
-					commercial_start_date:
-						COMMERCIAL_START_DATE,
-					genuine_order_min_total:
-						GENUINE_ORDER_MIN_TOTAL,
-					genuine_statuses:
-						Array.from(GENUINE_STATUSES),
+					commercial_start_date: COMMERCIAL_START_DATE,
+					genuine_order_min_total: GENUINE_ORDER_MIN_TOTAL,
+					genuine_statuses: Array.from(GENUINE_STATUSES),
 					order_count: orderCount,
 					revenue: Number(revenue.toFixed(2)),
 					average_order_value:
-						orderCount > 0
-							? Number(
-									(
-										revenue /
-										orderCount
-									).toFixed(2),
-								)
-							: 0,
-					discount_total:
-						Number(discounts.toFixed(2)),
-					shipping_total:
-						Number(shipping.toFixed(2)),
+						orderCount > 0 ? Number((revenue / orderCount).toFixed(2)) : 0,
+					discount_total: Number(discounts.toFixed(2)),
+					shipping_total: Number(shipping.toFixed(2)),
 					status_counts: statusCounts,
-					sample_or_low_value_orders:
-						sampleOrLowValueOrders,
-					all_orders_in_period:
-						orders.length,
+					sample_or_low_value_orders: sampleOrLowValueOrders,
+					all_orders_in_period: orders.length,
 				});
 			} catch (error) {
 				return toolError(error);
@@ -373,12 +382,7 @@ function createServer() {
 				limit: z.number().int().min(1).max(100),
 			}),
 		},
-		async ({
-			start_date,
-			end_date,
-			status,
-			limit,
-		}) => {
+		async ({ start_date, end_date, status, limit }) => {
 			try {
 				const response = await wcFetch("orders", {
 					after: `${start_date}T00:00:00`,
@@ -391,9 +395,7 @@ function createServer() {
 
 				const orders = await response.json<any[]>();
 
-				return toolResult(
-					orders.map(safeOrder),
-				);
+				return toolResult(orders.map(safeOrder));
 			} catch (error) {
 				return toolError(error);
 			}
@@ -416,12 +418,7 @@ function createServer() {
 				limit: z.number().int().min(1).max(100),
 			}),
 		},
-		async ({
-			search,
-			status,
-			category_id,
-			limit,
-		}) => {
+		async ({ search, status, category_id, limit }) => {
 			try {
 				const response = await wcFetch("products", {
 					search,
@@ -434,32 +431,24 @@ function createServer() {
 
 				const products = await response.json<any[]>();
 
-				const safeProducts = products.map(
-					(product) => ({
-						id: product.id,
-						name: product.name,
-						slug: product.slug,
-						sku: product.sku,
-						status: product.status,
-						type: product.type,
-						price: product.price,
-						regular_price:
-							product.regular_price,
-						sale_price:
-							product.sale_price,
-						on_sale: product.on_sale,
-						stock_status:
-							product.stock_status,
-						categories:
-							product.categories?.map(
-								(category: any) => ({
-									id: category.id,
-									name: category.name,
-									slug: category.slug,
-								}),
-							),
-					}),
-				);
+				const safeProducts = products.map((product) => ({
+					id: product.id,
+					name: product.name,
+					slug: product.slug,
+					sku: product.sku,
+					status: product.status,
+					type: product.type,
+					price: product.price,
+					regular_price: product.regular_price,
+					sale_price: product.sale_price,
+					on_sale: product.on_sale,
+					stock_status: product.stock_status,
+					categories: product.categories?.map((category: any) => ({
+						id: category.id,
+						name: category.name,
+						slug: category.slug,
+					})),
+				}));
 
 				return toolResult(safeProducts);
 			} catch (error) {
@@ -483,43 +472,29 @@ function createServer() {
 		},
 		async ({ order_id }) => {
 			try {
-				const response = await wcFetch(
-					`orders/${order_id}`,
-				);
+				const response = await wcFetch(`orders/${order_id}`);
 
 				const order = await response.json<any>();
 
 				return toolResult({
 					...safeOrder(order),
 					date_paid: order.date_paid,
-					date_completed:
-						order.date_completed,
-					transaction_id:
-						order.transaction_id,
-					fee_lines:
-						order.fee_lines?.map(
-							(fee: any) => ({
-								name: fee.name,
-								total: fee.total,
-								tax: fee.total_tax,
-							}),
-						),
-					shipping_lines:
-						order.shipping_lines?.map(
-							(shipping: any) => ({
-								method_title:
-									shipping.method_title,
-								total: shipping.total,
-							}),
-						),
-					refunds:
-						order.refunds?.map(
-							(refund: any) => ({
-								id: refund.id,
-								reason: refund.reason,
-								total: refund.total,
-							}),
-						),
+					date_completed: order.date_completed,
+					transaction_id: order.transaction_id,
+					fee_lines: order.fee_lines?.map((fee: any) => ({
+						name: fee.name,
+						total: fee.total,
+						tax: fee.total_tax,
+					})),
+					shipping_lines: order.shipping_lines?.map((shipping: any) => ({
+						method_title: shipping.method_title,
+						total: shipping.total,
+					})),
+					refunds: order.refunds?.map((refund: any) => ({
+						id: refund.id,
+						reason: refund.reason,
+						total: refund.total,
+					})),
 				});
 			} catch (error) {
 				return toolError(error);
@@ -552,33 +527,21 @@ function createServer() {
 
 				const coupons = await response.json<any[]>();
 
-				const safeCoupons = coupons.map(
-					(coupon) => ({
-						id: coupon.id,
-						code: coupon.code,
-						discount_type:
-							coupon.discount_type,
-						amount: coupon.amount,
-						usage_count:
-							coupon.usage_count,
-						usage_limit:
-							coupon.usage_limit,
-						usage_limit_per_user:
-							coupon.usage_limit_per_user,
-						individual_use:
-							coupon.individual_use,
-						minimum_amount:
-							coupon.minimum_amount,
-						maximum_amount:
-							coupon.maximum_amount,
-						date_created:
-							coupon.date_created,
-						date_expires:
-							coupon.date_expires,
-						free_shipping:
-							coupon.free_shipping,
-					}),
-				);
+				const safeCoupons = coupons.map((coupon) => ({
+					id: coupon.id,
+					code: coupon.code,
+					discount_type: coupon.discount_type,
+					amount: coupon.amount,
+					usage_count: coupon.usage_count,
+					usage_limit: coupon.usage_limit,
+					usage_limit_per_user: coupon.usage_limit_per_user,
+					individual_use: coupon.individual_use,
+					minimum_amount: coupon.minimum_amount,
+					maximum_amount: coupon.maximum_amount,
+					date_created: coupon.date_created,
+					date_expires: coupon.date_expires,
+					free_shipping: coupon.free_shipping,
+				}));
 
 				return toolResult(safeCoupons);
 			} catch (error) {
@@ -606,20 +569,16 @@ function createServer() {
 				const perPage = 100;
 
 				for (let page = 1; page <= 20; page++) {
-					const response = await wcFetch(
-						"orders",
-						{
-							customer: customer_id,
-							after: `${COMMERCIAL_START_DATE}T00:00:00`,
-							per_page: perPage,
-							page,
-							orderby: "date",
-							order: "asc",
-						},
-					);
+					const response = await wcFetch("orders", {
+						customer: customer_id,
+						after: `${COMMERCIAL_START_DATE}T00:00:00`,
+						per_page: perPage,
+						page,
+						orderby: "date",
+						order: "asc",
+					});
 
-					const orders =
-						await response.json<any[]>();
+					const orders = await response.json<any[]>();
 
 					allOrders.push(...orders);
 
@@ -628,55 +587,27 @@ function createServer() {
 					}
 				}
 
-				const genuineOrders =
-					allOrders.filter(
-						isGenuineCommercialOrder,
-					);
+				const genuineOrders = allOrders.filter(isGenuineCommercialOrder);
 
-				const totalRevenue =
-					genuineOrders.reduce(
-						(sum, order) =>
-							sum +
-							Number(order.total ?? 0),
-						0,
-					);
+				const totalRevenue = genuineOrders.reduce(
+					(sum, order) => sum + Number(order.total ?? 0),
+					0,
+				);
 
 				return toolResult({
 					customer_id,
-					genuine_order_count:
-						genuineOrders.length,
-					total_revenue:
-						Number(
-							totalRevenue.toFixed(2),
-						),
+					genuine_order_count: genuineOrders.length,
+					total_revenue: Number(totalRevenue.toFixed(2)),
 					average_order_value:
 						genuineOrders.length > 0
-							? Number(
-									(
-										totalRevenue /
-										genuineOrders.length
-									).toFixed(2),
-								)
+							? Number((totalRevenue / genuineOrders.length).toFixed(2))
 							: 0,
-					first_genuine_order:
-						genuineOrders[0]
-							? safeOrder(
-									genuineOrders[0],
-								)
-							: null,
+					first_genuine_order: genuineOrders[0] ? safeOrder(genuineOrders[0]) : null,
 					most_recent_genuine_order:
 						genuineOrders.length > 0
-							? safeOrder(
-									genuineOrders[
-										genuineOrders.length -
-											1
-									],
-								)
+							? safeOrder(genuineOrders[genuineOrders.length - 1])
 							: null,
-					orders:
-						genuineOrders.map(
-							safeOrder,
-						),
+					orders: genuineOrders.map(safeOrder),
 				});
 			} catch (error) {
 				return toolError(error);
@@ -699,21 +630,11 @@ function createServer() {
 				limit: z.number().int().min(1).max(100),
 			}),
 		},
-		async ({
-			start_date,
-			end_date,
-			limit,
-		}) => {
+		async ({ start_date, end_date, limit }) => {
 			try {
-				const orders = await getAllOrders(
-					start_date,
-					end_date,
-				);
+				const orders = await getAllOrders(start_date, end_date);
 
-				const genuineOrders =
-					orders.filter(
-						isGenuineCommercialOrder,
-					);
+				const genuineOrders = orders.filter(isGenuineCommercialOrder);
 
 				const productMap = new Map<
 					string,
@@ -729,83 +650,175 @@ function createServer() {
 				>();
 
 				for (const order of genuineOrders) {
-					for (
-						const item of
-						order.line_items ?? []
-					) {
-						const key =
-							`${item.product_id}:${item.variation_id ?? 0}`;
+					for (const item of order.line_items ?? []) {
+						const key = `${item.product_id}:${item.variation_id ?? 0}`;
 
 						if (!productMap.has(key)) {
 							productMap.set(key, {
-								product_id:
-									item.product_id,
-								variation_id:
-									item.variation_id ??
-									0,
+								product_id: item.product_id,
+								variation_id: item.variation_id ?? 0,
 								name: item.name,
-								sku:
-									item.sku ?? "",
+								sku: item.sku ?? "",
 								quantity: 0,
 								revenue: 0,
-								order_ids:
-									new Set<number>(),
+								order_ids: new Set<number>(),
 							});
 						}
 
-						const product =
-							productMap.get(key)!;
+						const product = productMap.get(key)!;
 
-						product.quantity +=
-							Number(
-								item.quantity ?? 0,
-							);
+						product.quantity += Number(item.quantity ?? 0);
 
-						product.revenue +=
-							Number(
-								item.total ?? 0,
-							);
+						product.revenue += Number(item.total ?? 0);
 
-						product.order_ids.add(
-							order.id,
-						);
+						product.order_ids.add(order.id);
 					}
 				}
 
-				const products = Array.from(
-					productMap.values(),
-				)
+				const products = Array.from(productMap.values())
 					.map((product) => ({
-						product_id:
-							product.product_id,
-						variation_id:
-							product.variation_id,
+						product_id: product.product_id,
+						variation_id: product.variation_id,
 						name: product.name,
 						sku: product.sku,
-						quantity:
-							product.quantity,
-						revenue: Number(
-							product.revenue.toFixed(
-								2,
-							),
-						),
-						order_count:
-							product.order_ids.size,
+						quantity: product.quantity,
+						revenue: Number(product.revenue.toFixed(2)),
+						order_count: product.order_ids.size,
 					}))
-					.sort(
-						(a, b) =>
-							b.revenue -
-							a.revenue,
-					)
+					.sort((a, b) => b.revenue - a.revenue)
 					.slice(0, limit);
 
 				return toolResult({
 					start_date,
 					end_date,
-					genuine_order_count:
-						genuineOrders.length,
+					genuine_order_count: genuineOrders.length,
 					products,
 				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	/* Read-only Meta Ads reporting tools */
+
+	server.registerTool(
+		"get_meta_ad_account",
+		{
+			description:
+				"Confirm the configured Blindmotion Meta ad account and return non-sensitive account metadata.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const { adAccountId } = getMetaConfig();
+				const account = await metaFetch(adAccountId, {
+					fields: "id,account_id,name,account_status,currency,timezone_name,business_name,amount_spent,balance",
+				});
+				return toolResult(account);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_meta_ads_summary",
+		{
+			description:
+				"Summarise Blindmotion Meta Ads spend, reach, clicks and reported conversion actions for a date range.",
+			inputSchema: z.object({
+				start_date: z.string(),
+				end_date: z.string(),
+			}),
+		},
+		async ({ start_date, end_date }) => {
+			try {
+				const { adAccountId } = getMetaConfig();
+				const result = await metaFetch(`${adAccountId}/insights`, {
+					fields: META_INSIGHT_FIELDS,
+					level: "account",
+					time_range: metaDateRange(start_date, end_date),
+				});
+				return toolResult({ start_date, end_date, data: result.data ?? [] });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	const registerMetaPerformanceTool = (
+		name: string,
+		level: "campaign" | "adset" | "ad",
+		identityFields: string,
+		description: string,
+	) => {
+		server.registerTool(
+			name,
+			{
+				description,
+				inputSchema: z.object({
+					start_date: z.string(),
+					end_date: z.string(),
+					limit: z.number().int().min(1).max(100).default(50),
+				}),
+			},
+			async ({ start_date, end_date, limit }) => {
+				try {
+					const { adAccountId } = getMetaConfig();
+					const result = await metaFetch(`${adAccountId}/insights`, {
+						fields: `${identityFields},${META_INSIGHT_FIELDS}`,
+						level,
+						time_range: metaDateRange(start_date, end_date),
+						limit,
+					});
+					return toolResult({ start_date, end_date, level, data: result.data ?? [] });
+				} catch (error) {
+					return toolError(error);
+				}
+			},
+		);
+	};
+
+	registerMetaPerformanceTool(
+		"get_meta_campaign_performance",
+		"campaign",
+		"campaign_id,campaign_name,objective",
+		"Return read-only Meta Ads campaign performance for a date range.",
+	);
+	registerMetaPerformanceTool(
+		"get_meta_adset_performance",
+		"adset",
+		"campaign_id,campaign_name,adset_id,adset_name,objective",
+		"Return read-only Meta Ads ad-set performance for a date range.",
+	);
+	registerMetaPerformanceTool(
+		"get_meta_ad_performance",
+		"ad",
+		"campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,objective",
+		"Return read-only Meta Ads ad performance for a date range.",
+	);
+
+	server.registerTool(
+		"get_meta_daily_performance",
+		{
+			description: "Return daily Blindmotion Meta Ads account performance for a date range.",
+			inputSchema: z.object({
+				start_date: z.string(),
+				end_date: z.string(),
+			}),
+		},
+		async ({ start_date, end_date }) => {
+			try {
+				const { adAccountId } = getMetaConfig();
+				const result = await metaFetch(`${adAccountId}/insights`, {
+					fields: META_INSIGHT_FIELDS,
+					level: "account",
+					time_increment: 1,
+					time_range: metaDateRange(start_date, end_date),
+					limit: 100,
+				});
+				return toolResult({ start_date, end_date, data: result.data ?? [] });
 			} catch (error) {
 				return toolError(error);
 			}
@@ -818,11 +831,7 @@ function createServer() {
 const handler = createMcpHandler(createServer);
 
 export default {
-	fetch(
-		request: Request,
-		env: Env,
-		ctx: ExecutionContext,
-	) {
+	fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		return handler(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;
