@@ -105,6 +105,168 @@ const META_INSIGHT_FIELDS = [
 	"cost_per_action_type",
 ].join(",");
 
+type Ga4ServiceAccount = {
+	client_email: string;
+	private_key: string;
+	token_uri?: string;
+};
+
+type Ga4ReportRequest = {
+	dateRanges: Array<{ startDate: string; endDate: string }>;
+	dimensions?: Array<{ name: string }>;
+	metrics: Array<{ name: string }>;
+	limit?: string;
+	orderBys?: Array<Record<string, unknown>>;
+};
+
+let ga4AccessTokenCache: { token: string; expiresAt: number } | undefined;
+
+function base64UrlEncode(value: string | ArrayBuffer) {
+	const bytes =
+		typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function pemToArrayBuffer(pem: string) {
+	const base64 = pem.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g, "");
+	const binary = atob(base64);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+	return bytes.buffer;
+}
+
+function getGa4Config() {
+	const workerEnv = env as unknown as Record<string, string | undefined>;
+	const propertyId = workerEnv.GA4_PROPERTY_ID;
+	const serviceAccountJson = workerEnv.GA4_SERVICE_ACCOUNT_JSON;
+
+	if (!propertyId || !serviceAccountJson) {
+		throw new Error(
+			"GA4 is not configured. Set GA4_PROPERTY_ID and GA4_SERVICE_ACCOUNT_JSON in Cloudflare.",
+		);
+	}
+
+	let serviceAccount: Ga4ServiceAccount;
+	try {
+		serviceAccount = JSON.parse(serviceAccountJson) as Ga4ServiceAccount;
+	} catch {
+		throw new Error("GA4_SERVICE_ACCOUNT_JSON is not valid JSON.");
+	}
+
+	if (!serviceAccount.client_email || !serviceAccount.private_key) {
+		throw new Error("GA4_SERVICE_ACCOUNT_JSON is missing client_email or private_key.");
+	}
+
+	return { propertyId, serviceAccount };
+}
+
+async function getGa4AccessToken() {
+	if (ga4AccessTokenCache && ga4AccessTokenCache.expiresAt > Date.now() + 60_000) {
+		return ga4AccessTokenCache.token;
+	}
+
+	const { serviceAccount } = getGa4Config();
+	const now = Math.floor(Date.now() / 1000);
+	const tokenUri = serviceAccount.token_uri ?? "https://oauth2.googleapis.com/token";
+	const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+	const claims = base64UrlEncode(
+		JSON.stringify({
+			iss: serviceAccount.client_email,
+			scope: "https://www.googleapis.com/auth/analytics.readonly",
+			aud: tokenUri,
+			iat: now,
+			exp: now + 3600,
+		}),
+	);
+	const unsignedToken = `${header}.${claims}`;
+	const key = await crypto.subtle.importKey(
+		"pkcs8",
+		pemToArrayBuffer(serviceAccount.private_key),
+		{ name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+		false,
+		["sign"],
+	);
+	const signature = await crypto.subtle.sign(
+		"RSASSA-PKCS1-v1_5",
+		key,
+		new TextEncoder().encode(unsignedToken),
+	);
+	const assertion = `${unsignedToken}.${base64UrlEncode(signature)}`;
+	const response = await fetch(tokenUri, {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body: new URLSearchParams({
+			grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+			assertion,
+		}),
+	});
+
+	if (!response.ok) {
+		throw new Error(`Google OAuth request failed: ${response.status} ${await response.text()}`);
+	}
+
+	const tokenResponse = await response.json<{ access_token: string; expires_in?: number }>();
+	ga4AccessTokenCache = {
+		token: tokenResponse.access_token,
+		expiresAt: Date.now() + (tokenResponse.expires_in ?? 3600) * 1000,
+	};
+	return tokenResponse.access_token;
+}
+
+async function ga4RunReport(request: Ga4ReportRequest) {
+	const { propertyId } = getGa4Config();
+	const accessToken = await getGa4AccessToken();
+	const response = await fetch(
+		`https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`,
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify({ ...request, returnPropertyQuota: true }),
+		},
+	);
+
+	if (!response.ok) {
+		throw new Error(
+			`Google Analytics Data API request failed: ${response.status} ${await response.text()}`,
+		);
+	}
+
+	return response.json<any>();
+}
+
+function ga4ReportResult(report: any, startDate: string, endDate: string) {
+	const dimensionNames = (report.dimensionHeaders ?? []).map((header: any) => header.name);
+	const metricNames = (report.metricHeaders ?? []).map((header: any) => header.name);
+	const rows = (report.rows ?? []).map((row: any) => ({
+		...Object.fromEntries(
+			dimensionNames.map((name: string, index: number) => [
+				name,
+				row.dimensionValues?.[index]?.value ?? "",
+			]),
+		),
+		...Object.fromEntries(
+			metricNames.map((name: string, index: number) => [
+				name,
+				row.metricValues?.[index]?.value ?? "0",
+			]),
+		),
+	}));
+
+	return {
+		start_date: startDate,
+		end_date: endDate,
+		row_count: report.rowCount ?? rows.length,
+		rows,
+		property_quota: report.propertyQuota,
+	};
+}
+
 async function getAllOrders(startDate: string, endDate: string) {
 	const allOrders: any[] = [];
 	const perPage = 100;
@@ -819,6 +981,202 @@ function createServer() {
 					limit: 100,
 				});
 				return toolResult({ start_date, end_date, data: result.data ?? [] });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	/* Read-only Google Analytics 4 reporting tools */
+
+	server.registerTool(
+		"get_ga4_property",
+		{
+			description:
+				"Confirm access to the configured Blindmotion GA4 property and return a small non-sensitive activity check.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const { propertyId, serviceAccount } = getGa4Config();
+				const report = await ga4RunReport({
+					dateRanges: [{ startDate: "7daysAgo", endDate: "yesterday" }],
+					metrics: [{ name: "sessions" }, { name: "activeUsers" }],
+				});
+				return toolResult({
+					property_id: propertyId,
+					service_account: serviceAccount.client_email,
+					access_confirmed: true,
+					activity_check: ga4ReportResult(report, "7daysAgo", "yesterday"),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_ga4_summary",
+		{
+			description:
+				"Summarise Blindmotion GA4 users, sessions, engagement, ecommerce purchases and reported revenue for a date range.",
+			inputSchema: z.object({ start_date: z.string(), end_date: z.string() }),
+		},
+		async ({ start_date, end_date }) => {
+			try {
+				const report = await ga4RunReport({
+					dateRanges: [{ startDate: start_date, endDate: end_date }],
+					metrics: [
+						{ name: "totalUsers" },
+						{ name: "newUsers" },
+						{ name: "activeUsers" },
+						{ name: "sessions" },
+						{ name: "engagedSessions" },
+						{ name: "engagementRate" },
+						{ name: "screenPageViews" },
+						{ name: "keyEvents" },
+						{ name: "ecommercePurchases" },
+						{ name: "purchaseRevenue" },
+						{ name: "totalRevenue" },
+					],
+				});
+				return toolResult(ga4ReportResult(report, start_date, end_date));
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_ga4_daily_performance",
+		{
+			description:
+				"Return daily Blindmotion GA4 traffic, engagement, ecommerce purchases and revenue for a date range.",
+			inputSchema: z.object({ start_date: z.string(), end_date: z.string() }),
+		},
+		async ({ start_date, end_date }) => {
+			try {
+				const report = await ga4RunReport({
+					dateRanges: [{ startDate: start_date, endDate: end_date }],
+					dimensions: [{ name: "date" }],
+					metrics: [
+						{ name: "activeUsers" },
+						{ name: "sessions" },
+						{ name: "engagedSessions" },
+						{ name: "screenPageViews" },
+						{ name: "keyEvents" },
+						{ name: "ecommercePurchases" },
+						{ name: "purchaseRevenue" },
+					],
+					limit: "10000",
+					orderBys: [{ dimension: { dimensionName: "date" } }],
+				});
+				return toolResult(ga4ReportResult(report, start_date, end_date));
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_ga4_traffic_acquisition",
+		{
+			description:
+				"Return Blindmotion GA4 session acquisition performance by channel and source/medium for a date range.",
+			inputSchema: z.object({
+				start_date: z.string(),
+				end_date: z.string(),
+				limit: z.number().int().min(1).max(250).default(100),
+			}),
+		},
+		async ({ start_date, end_date, limit }) => {
+			try {
+				const report = await ga4RunReport({
+					dateRanges: [{ startDate: start_date, endDate: end_date }],
+					dimensions: [
+						{ name: "sessionDefaultChannelGroup" },
+						{ name: "sessionSourceMedium" },
+					],
+					metrics: [
+						{ name: "sessions" },
+						{ name: "activeUsers" },
+						{ name: "engagedSessions" },
+						{ name: "engagementRate" },
+						{ name: "keyEvents" },
+						{ name: "ecommercePurchases" },
+						{ name: "purchaseRevenue" },
+					],
+					limit: String(limit),
+					orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+				});
+				return toolResult(ga4ReportResult(report, start_date, end_date));
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_ga4_landing_pages",
+		{
+			description:
+				"Return Blindmotion GA4 landing-page traffic, engagement, ecommerce purchases and revenue for a date range.",
+			inputSchema: z.object({
+				start_date: z.string(),
+				end_date: z.string(),
+				limit: z.number().int().min(1).max(250).default(100),
+			}),
+		},
+		async ({ start_date, end_date, limit }) => {
+			try {
+				const report = await ga4RunReport({
+					dateRanges: [{ startDate: start_date, endDate: end_date }],
+					dimensions: [{ name: "landingPagePlusQueryString" }],
+					metrics: [
+						{ name: "sessions" },
+						{ name: "activeUsers" },
+						{ name: "engagedSessions" },
+						{ name: "engagementRate" },
+						{ name: "keyEvents" },
+						{ name: "ecommercePurchases" },
+						{ name: "purchaseRevenue" },
+					],
+					limit: String(limit),
+					orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+				});
+				return toolResult(ga4ReportResult(report, start_date, end_date));
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_ga4_ecommerce_performance",
+		{
+			description:
+				"Return Blindmotion GA4 ecommerce item views, cart additions, purchases and item revenue for a date range.",
+			inputSchema: z.object({
+				start_date: z.string(),
+				end_date: z.string(),
+				limit: z.number().int().min(1).max(250).default(100),
+			}),
+		},
+		async ({ start_date, end_date, limit }) => {
+			try {
+				const report = await ga4RunReport({
+					dateRanges: [{ startDate: start_date, endDate: end_date }],
+					dimensions: [{ name: "itemId" }, { name: "itemName" }],
+					metrics: [
+						{ name: "itemsViewed" },
+						{ name: "itemsAddedToCart" },
+						{ name: "itemsPurchased" },
+						{ name: "itemRevenue" },
+					],
+					limit: String(limit),
+					orderBys: [{ metric: { metricName: "itemRevenue" }, desc: true }],
+				});
+				return toolResult(ga4ReportResult(report, start_date, end_date));
 			} catch (error) {
 				return toolError(error);
 			}
