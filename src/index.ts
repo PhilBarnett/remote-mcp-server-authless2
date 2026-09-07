@@ -85,6 +85,32 @@ async function metaFetch(path: string, params: Record<string, string | number | 
 	return response.json<any>();
 }
 
+async function metaPost(path: string, params: Record<string, string | number>) {
+	const { accessToken, apiVersion } = getMetaConfig();
+	const url = new URL(`https://graph.facebook.com/${apiVersion}/${path}`);
+	const body = new URLSearchParams();
+
+	for (const [key, value] of Object.entries(params)) body.set(key, String(value));
+
+	const response = await fetch(url.toString(), {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${accessToken}`,
+			Accept: "application/json",
+			"Content-Type": "application/x-www-form-urlencoded",
+		},
+		body,
+	});
+
+	if (!response.ok) {
+		throw new Error(
+			`Meta Marketing API request failed: ${response.status} ${await response.text()}`,
+		);
+	}
+
+	return response.json<any>();
+}
+
 function metaDateRange(startDate: string, endDate: string) {
 	return JSON.stringify({ since: startDate, until: endDate });
 }
@@ -155,6 +181,25 @@ function enrichMetaInsight(row: any) {
 
 function enrichMetaInsights(rows: any[]) {
 	return rows.map(enrichMetaInsight);
+}
+
+function metaBudgetAmount(value: unknown) {
+	if (value === undefined || value === null || value === "") return null;
+	return Number((Number(value) / 100).toFixed(2));
+}
+
+function safeMetaBudgetObject(object: any, objectType: "campaign" | "adset") {
+	return {
+		object_type: objectType,
+		id: object.id,
+		name: object.name,
+		campaign_id: objectType === "adset" ? object.campaign_id : object.id,
+		status: object.status,
+		effective_status: object.effective_status,
+		daily_budget: metaBudgetAmount(object.daily_budget),
+		lifetime_budget: metaBudgetAmount(object.lifetime_budget),
+		budget_remaining: metaBudgetAmount(object.budget_remaining),
+	};
 }
 
 type Ga4ServiceAccount = {
@@ -1053,6 +1098,112 @@ function createServer() {
 		},
 	);
 
+	server.registerTool(
+		"get_meta_budget_settings",
+		{
+			description:
+				"Inspect current Meta campaign and ad-set budgets. Read-only; use this before any budget update.",
+			inputSchema: z.object({
+				status: z.enum(["ACTIVE", "PAUSED", "ALL"]).default("ACTIVE"),
+				limit: z.number().int().min(1).max(100).default(50),
+			}),
+		},
+		async ({ status, limit }) => {
+			try {
+				const { adAccountId } = getMetaConfig();
+				const params: Record<string, string | number | undefined> = {
+					fields: "id,name,status,effective_status,daily_budget,lifetime_budget,budget_remaining",
+					limit,
+				};
+				if (status !== "ALL") params.effective_status = JSON.stringify([status]);
+
+				const [campaignResult, adsetResult] = await Promise.all([
+					metaFetch(`${adAccountId}/campaigns`, params),
+					metaFetch(`${adAccountId}/adsets`, {
+						...params,
+						fields:
+							"id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,budget_remaining",
+					}),
+				]);
+
+				return toolResult({
+					currency: "AUD",
+					campaigns: (campaignResult.data ?? []).map((item: any) =>
+						safeMetaBudgetObject(item, "campaign"),
+					),
+					adsets: (adsetResult.data ?? []).map((item: any) =>
+						safeMetaBudgetObject(item, "adset"),
+					),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"update_meta_daily_budget",
+		{
+			description:
+				"Update only the daily budget of one Meta campaign or ad set after explicit confirmation. Increases are limited to 25% and A$500/day.",
+			inputSchema: z.object({
+				object_type: z.enum(["campaign", "adset"]),
+				object_id: z.string().regex(/^\d+$/),
+				new_daily_budget_aud: z.number().positive().max(500),
+				confirmation: z.literal("CONFIRM META BUDGET UPDATE"),
+			}),
+		},
+		async ({ object_type, object_id, new_daily_budget_aud }) => {
+			try {
+				const { adAccountId } = getMetaConfig();
+				const configuredAccountId = adAccountId.replace(/^act_/, "");
+				const current = await metaFetch(object_id, {
+					fields:
+						object_type === "adset"
+							? "id,name,account_id,campaign_id,status,effective_status,daily_budget,lifetime_budget"
+							: "id,name,account_id,status,effective_status,daily_budget,lifetime_budget",
+				});
+
+				if (String(current.account_id) !== configuredAccountId) {
+					throw new Error("Refusing update: object does not belong to the configured Meta ad account.");
+				}
+
+				const currentBudget = metaBudgetAmount(current.daily_budget);
+				if (currentBudget === null || currentBudget <= 0) {
+					throw new Error(
+						`Refusing update: ${object_type} does not have a daily budget at this level. Inspect its parent campaign or ad sets.`,
+					);
+				}
+
+				const roundedBudget = Number(new_daily_budget_aud.toFixed(2));
+				if (roundedBudget > currentBudget * 1.25) {
+					throw new Error(
+						`Refusing update: increases are capped at 25% per change. Current budget is A$${currentBudget.toFixed(2)}.`,
+					);
+				}
+
+				await metaPost(object_id, { daily_budget: Math.round(roundedBudget * 100) });
+				const verified = await metaFetch(object_id, {
+					fields: "id,name,account_id,status,effective_status,daily_budget,lifetime_budget",
+				});
+
+				return toolResult({
+					updated: true,
+					object_type,
+					object_id,
+					name: verified.name,
+					currency: "AUD",
+					previous_daily_budget: currentBudget,
+					requested_daily_budget: roundedBudget,
+					verified_daily_budget: metaBudgetAmount(verified.daily_budget),
+					unchanged_fields: ["targeting", "creative", "status", "optimisation", "bid_strategy"],
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	/* Read-only Google Analytics 4 reporting tools */
 
 	server.registerTool(
@@ -1103,7 +1254,6 @@ function createServer() {
 						{ name: "keyEvents" },
 						{ name: "ecommercePurchases" },
 						{ name: "purchaseRevenue" },
-						{ name: "totalRevenue" },
 					],
 				});
 				return toolResult(ga4ReportResult(report, start_date, end_date));
