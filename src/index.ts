@@ -1366,7 +1366,7 @@ function createServer() {
 				daily_budget_aud: z.number().positive().max(500).optional(),
 				age_min: z.number().int().min(18).max(65).default(18),
 				age_max: z.number().int().min(18).max(65).default(65),
-				genders: z.array(z.enum([1, 2])).max(2).optional(),
+				genders: z.array(z.union([z.literal(1), z.literal(2)])).max(2).optional(),
 				confirmation: z.literal(META_CREATE_CONFIRMATION),
 			}),
 		},
