@@ -102,8 +102,60 @@ const META_INSIGHT_FIELDS = [
 	"ctr",
 	"actions",
 	"action_values",
+	"purchase_roas",
+	"website_purchase_roas",
 	"cost_per_action_type",
 ].join(",");
+
+const META_PURCHASE_ACTION_TYPES = [
+	"offsite_conversion.fb_pixel_purchase",
+	"onsite_web_purchase",
+	"omni_purchase",
+	"purchase",
+];
+
+function getMetaMetricValue(metrics: any, actionTypes: string[]) {
+	if (!Array.isArray(metrics)) return null;
+
+	for (const actionType of actionTypes) {
+		const metric = metrics.find((item: any) => item?.action_type === actionType);
+		if (metric === undefined) continue;
+
+		const value = Number(metric.value);
+		if (Number.isFinite(value)) return value;
+	}
+
+	return null;
+}
+
+function enrichMetaInsight(row: any) {
+	const purchases = getMetaMetricValue(row.actions, META_PURCHASE_ACTION_TYPES) ?? 0;
+	const purchaseConversionValue = getMetaMetricValue(
+		row.action_values,
+		META_PURCHASE_ACTION_TYPES,
+	);
+	const reportedPurchaseRoas =
+		getMetaMetricValue(row.website_purchase_roas, META_PURCHASE_ACTION_TYPES) ??
+		getMetaMetricValue(row.purchase_roas, META_PURCHASE_ACTION_TYPES);
+	const spend = Number(row.spend ?? 0);
+	const calculatedPurchaseRoas =
+		purchaseConversionValue !== null && spend > 0 ? purchaseConversionValue / spend : null;
+
+	return {
+		...row,
+		purchase_roas_breakdown: row.purchase_roas ?? [],
+		website_purchase_roas_breakdown: row.website_purchase_roas ?? [],
+		purchases,
+		purchase_conversion_value: purchaseConversionValue,
+		purchase_roas: reportedPurchaseRoas ?? calculatedPurchaseRoas,
+		cost_per_purchase: purchases > 0 && spend > 0 ? spend / purchases : null,
+		purchase_value_reported: purchaseConversionValue !== null,
+	};
+}
+
+function enrichMetaInsights(rows: any[]) {
+	return rows.map(enrichMetaInsight);
+}
 
 type Ga4ServiceAccount = {
 	client_email: string;
@@ -888,7 +940,7 @@ function createServer() {
 		"get_meta_ads_summary",
 		{
 			description:
-				"Summarise Blindmotion Meta Ads spend, reach, clicks and reported conversion actions for a date range.",
+				"Summarise Blindmotion Meta Ads spend, reach, clicks, purchases, purchase conversion value and purchase ROAS for a date range.",
 			inputSchema: z.object({
 				start_date: z.string(),
 				end_date: z.string(),
@@ -902,7 +954,11 @@ function createServer() {
 					level: "account",
 					time_range: metaDateRange(start_date, end_date),
 				});
-				return toolResult({ start_date, end_date, data: result.data ?? [] });
+				return toolResult({
+					start_date,
+					end_date,
+					data: enrichMetaInsights(result.data ?? []),
+				});
 			} catch (error) {
 				return toolError(error);
 			}
@@ -934,7 +990,12 @@ function createServer() {
 						time_range: metaDateRange(start_date, end_date),
 						limit,
 					});
-					return toolResult({ start_date, end_date, level, data: result.data ?? [] });
+					return toolResult({
+						start_date,
+						end_date,
+						level,
+						data: enrichMetaInsights(result.data ?? []),
+					});
 				} catch (error) {
 					return toolError(error);
 				}
@@ -946,25 +1007,26 @@ function createServer() {
 		"get_meta_campaign_performance",
 		"campaign",
 		"campaign_id,campaign_name,objective",
-		"Return read-only Meta Ads campaign performance for a date range.",
+		"Return read-only Meta Ads campaign performance, including purchase value and ROAS, for a date range.",
 	);
 	registerMetaPerformanceTool(
 		"get_meta_adset_performance",
 		"adset",
 		"campaign_id,campaign_name,adset_id,adset_name,objective",
-		"Return read-only Meta Ads ad-set performance for a date range.",
+		"Return read-only Meta Ads ad-set performance, including purchase value and ROAS, for a date range.",
 	);
 	registerMetaPerformanceTool(
 		"get_meta_ad_performance",
 		"ad",
 		"campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,objective",
-		"Return read-only Meta Ads ad performance for a date range.",
+		"Return read-only Meta Ads ad performance, including purchase value and ROAS, for a date range.",
 	);
 
 	server.registerTool(
 		"get_meta_daily_performance",
 		{
-			description: "Return daily Blindmotion Meta Ads account performance for a date range.",
+			description:
+				"Return daily Blindmotion Meta Ads account performance, including purchase value and ROAS, for a date range.",
 			inputSchema: z.object({
 				start_date: z.string(),
 				end_date: z.string(),
@@ -980,7 +1042,11 @@ function createServer() {
 					time_range: metaDateRange(start_date, end_date),
 					limit: 100,
 				});
-				return toolResult({ start_date, end_date, data: result.data ?? [] });
+				return toolResult({
+					start_date,
+					end_date,
+					data: enrichMetaInsights(result.data ?? []),
+				});
 			} catch (error) {
 				return toolError(error);
 			}
