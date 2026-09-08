@@ -95,7 +95,9 @@ async function wpUploadMedia(filename: string, mimeType: string, bytes: Uint8Arr
 		body: bytes,
 	});
 	if (!response.ok) {
-		throw new Error(`WordPress media upload failed: ${response.status} ${await response.text()}`);
+		throw new Error(
+			`WordPress media upload failed: ${response.status} ${await response.text()}`,
+		);
 	}
 	return response.json<any>();
 }
@@ -110,9 +112,11 @@ function decodeBase64(value: string) {
 function hasExpectedImageSignature(bytes: Uint8Array, mimeType: string) {
 	if (mimeType === "image/jpeg") return bytes[0] === 0xff && bytes[1] === 0xd8;
 	if (mimeType === "image/png") {
-		return bytes.slice(0, 8).every(
-			(byte, index) => byte === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index],
-		);
+		return bytes
+			.slice(0, 8)
+			.every(
+				(byte, index) => byte === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index],
+			);
 	}
 	if (mimeType === "image/webp") {
 		return (
@@ -270,8 +274,8 @@ function productMetaPathTokens(customFieldKey: string, path: string) {
 		throw new Error("Custom-field path does not belong to the selected meta key.");
 	}
 	const relativePath = path.slice(customFieldKey.length).replace(/^\./, "");
-	return [...relativePath.matchAll(/(?:^|\.)([^.[\]]+)|\[(\d+)\]/g)].map((match) =>
-		match[1] ?? Number(match[2]),
+	return [...relativePath.matchAll(/(?:^|\.)([^.[\]]+)|\[(\d+)\]/g)].map(
+		(match) => match[1] ?? Number(match[2]),
 	);
 }
 
@@ -375,7 +379,11 @@ async function metaFetch(
 	return response.json<any>();
 }
 
-async function metaPost(path: string, params: Record<string, string | number>) {
+async function metaPost(
+	path: string,
+	params: Record<string, string | number>,
+	accessTokenOverride?: string,
+) {
 	const { accessToken, apiVersion } = getMetaConfig();
 	const url = new URL(`https://graph.facebook.com/${apiVersion}/${path}`);
 	const body = new URLSearchParams();
@@ -385,7 +393,7 @@ async function metaPost(path: string, params: Record<string, string | number>) {
 	const response = await fetch(url.toString(), {
 		method: "POST",
 		headers: {
-			Authorization: `Bearer ${accessToken}`,
+			Authorization: `Bearer ${accessTokenOverride ?? accessToken}`,
 			Accept: "application/json",
 			"Content-Type": "application/x-www-form-urlencoded",
 		},
@@ -493,20 +501,24 @@ function safeMetaBudgetObject(object: any, objectType: "campaign" | "adset") {
 }
 
 const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
+const META_CREATE_SPRING_FORM_CONFIRMATION = "CONFIRM CREATE SPRING META FORM";
+const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
 
 async function assertMetaObjectOwnership(
 	objectId: string,
-	objectType: "campaign" | "adset" | "creative",
+	objectType: "campaign" | "adset" | "creative" | "ad",
 ) {
 	const { adAccountId } = getMetaConfig();
 	const configuredAccountId = adAccountId.replace(/^act_/, "");
 	const fields =
-		objectType === "adset"
-			? "id,name,account_id,campaign_id,status,effective_status"
-			: objectType === "campaign"
-				? "id,name,account_id,status,effective_status,objective,daily_budget,lifetime_budget"
-				: "id,name,account_id,status";
+		objectType === "ad"
+			? "id,name,account_id,campaign_id,adset_id,status,effective_status,created_time,updated_time,creative"
+			: objectType === "adset"
+				? "id,name,account_id,campaign_id,status,effective_status"
+				: objectType === "campaign"
+					? "id,name,account_id,status,effective_status,objective,daily_budget,lifetime_budget"
+					: "id,name,account_id,status";
 
 	const object = await metaFetch(objectId, { fields });
 	if (String(object.account_id) !== configuredAccountId) {
@@ -517,6 +529,115 @@ async function assertMetaObjectOwnership(
 		);
 	}
 	return object;
+}
+
+async function getOwnedMetaBusiness() {
+	const { adAccountId } = getMetaConfig();
+	const account = await metaFetch(adAccountId, { fields: "id,name,business" });
+	if (!account.business?.id) {
+		throw new Error("Meta did not return an owning Business for the configured ad account.");
+	}
+	return account.business;
+}
+
+async function getOwnedMetaBusinessFolders(limit = 100) {
+	const business = await getOwnedMetaBusiness();
+	const topLevelResult = await metaFetch(business.id + "/creative_folders", {
+		fields: "id,name,description,parent_folder_id,media_library_url",
+		limit,
+	});
+	const folders = [...(topLevelResult.data ?? [])];
+	const seen = new Set(folders.map((item: any) => String(item.id)));
+	let frontier = [...folders];
+	for (let depth = 0; depth < 5 && frontier.length > 0 && folders.length < limit; depth++) {
+		const childResults = await Promise.all(
+			frontier.map((folder: any) =>
+				metaFetch(folder.id + "/subfolders", {
+					fields: "id,name,description,parent_folder_id,media_library_url",
+					limit,
+				}),
+			),
+		);
+		frontier = [];
+		for (const result of childResults) {
+			for (const folder of result.data ?? []) {
+				if (seen.has(String(folder.id))) continue;
+				seen.add(String(folder.id));
+				folders.push(folder);
+				frontier.push(folder);
+				if (folders.length >= limit) break;
+			}
+			if (folders.length >= limit) break;
+		}
+	}
+	return { business, folders: folders.slice(0, limit) };
+}
+
+async function assertOwnedMetaBusinessFolder(folderId: string) {
+	const { business, folders } = await getOwnedMetaBusinessFolders(500);
+	const folder = folders.find((item: any) => String(item.id) === folderId);
+	if (!folder) {
+		throw new Error(
+			"Refusing operation: Media Library folder is not owned by the Business attached to the configured ad account.",
+		);
+	}
+	return { business, folder };
+}
+
+async function getOwnedMetaBusinessVideos(folderId: string, limit = 100) {
+	const { business, folder } = await assertOwnedMetaBusinessFolder(folderId);
+	const result = await metaFetch(business.id + "/videos", {
+		fields: "id,title,description,media_library_url,width,height,length,created_time,picture,status",
+		creative_folder_id: folderId,
+		limit,
+	});
+	const videos = (result.data ?? []).map((item: any) => ({
+		...item,
+		creative_folder_id: folderId,
+	}));
+	return { business, folder, videos };
+}
+
+async function getOwnedMetaBusinessImages(folderId: string, limit = 100) {
+	const { business, folder } = await assertOwnedMetaBusinessFolder(folderId);
+	const result = await metaFetch(business.id + "/images", {
+		fields: "id,name,media_library_url,width,height,created_time,hash,url",
+		creative_folder_id: folderId,
+		limit,
+	});
+	const images = (result.data ?? []).map((item: any) => ({
+		...item,
+		creative_folder_id: folderId,
+	}));
+	return { business, folder, images };
+}
+
+async function getOwnedMetaBusinessCreatives(folderId: string, limit = 100) {
+	const { business, folder } = await assertOwnedMetaBusinessFolder(folderId);
+	const result = await metaFetch(business.id + "/creatives", {
+		fields: "id,media_library_url",
+		creative_folder_id: folderId,
+		limit,
+	});
+	return {
+		business,
+		folder,
+		creatives: (result.data ?? []).map((item: any) => ({
+			...item,
+			creative_folder_id: folderId,
+		})),
+	};
+}
+
+async function assertOwnedMetaBusinessVideo(folderId: string, videoId: string) {
+	const result = await getOwnedMetaBusinessVideos(folderId, 500);
+	const video = result.videos.find((item: any) => String(item.id) === videoId);
+	if (!video) {
+		throw new Error(
+			"Refusing creation: video is not present in the selected owned Business Media Library folder.",
+		);
+	}
+	return { ...result, video };
 }
 
 async function refuseDuplicateMetaName(
@@ -1448,10 +1569,7 @@ function createServer() {
 					}
 				}
 				const mediaByFilename = new Map(
-					mediaItems.map((media) => [
-						mediaFilenameKey(media.source_url ?? ""),
-						media,
-					]),
+					mediaItems.map((media) => [mediaFilenameKey(media.source_url ?? ""), media]),
 				);
 				for (const assignment of assignments) {
 					if (!assignment.attachment_id && assignment.source_url) {
@@ -1528,8 +1646,13 @@ function createServer() {
 					expected_attachment_id: z.number().int().positive().optional(),
 					expected_source_url: z.string().url().optional(),
 					replacement_attachment_id: z.number().int().positive().optional(),
-					replacement_filename: z.string().regex(/^[A-Za-z0-9._-]+$/).optional(),
-					replacement_mime_type: z.enum(["image/jpeg", "image/png", "image/webp"]).optional(),
+					replacement_filename: z
+						.string()
+						.regex(/^[A-Za-z0-9._-]+$/)
+						.optional(),
+					replacement_mime_type: z
+						.enum(["image/jpeg", "image/png", "image/webp"])
+						.optional(),
 					replacement_base64: z.string().min(4).max(8_000_000).optional(),
 					confirmation: z.literal("CONFIRM REPLACE PRODUCT OPTION IMAGE"),
 				})
@@ -1574,8 +1697,11 @@ function createServer() {
 				);
 				if (!meta) throw new Error("The exact product meta record was not found.");
 
-				const storedAsJson = typeof meta.value === "string" && /^[{[]/.test(meta.value.trim());
-				const parsedValue = storedAsJson ? JSON.parse(meta.value) : structuredClone(meta.value);
+				const storedAsJson =
+					typeof meta.value === "string" && /^[{[]/.test(meta.value.trim());
+				const parsedValue = storedAsJson
+					? JSON.parse(meta.value)
+					: structuredClone(meta.value);
 				const tokens = productMetaPathTokens(custom_field_key, custom_field_path);
 				const oldValue = getNestedValue(parsedValue, tokens);
 				const pairedAttachmentTokens =
@@ -1608,7 +1734,10 @@ function createServer() {
 				}
 				if (
 					typeof oldValue !== "number" &&
-					!(typeof oldValue === "string" && (/^\d+$/.test(oldValue) || /^https?:/i.test(oldValue)))
+					!(
+						typeof oldValue === "string" &&
+						(/^\d+$/.test(oldValue) || /^https?:/i.test(oldValue))
+					)
 				) {
 					throw new Error("The selected path is not a supported scalar image reference.");
 				}
@@ -1622,15 +1751,21 @@ function createServer() {
 						typeof uploaded.source_url !== "string" ||
 						!/^image\/(jpeg|png|webp)$/i.test(uploaded.mime_type ?? "")
 					) {
-						throw new Error("The replacement attachment is not a supported WordPress image.");
+						throw new Error(
+							"The replacement attachment is not a supported WordPress image.",
+						);
 					}
 				} else {
 					const bytes = decodeBase64(replacement_base64!);
 					if (!bytes.length || bytes.length > 6_000_000) {
-						throw new Error("Replacement image must decode to between 1 byte and 6 MB.");
+						throw new Error(
+							"Replacement image must decode to between 1 byte and 6 MB.",
+						);
 					}
 					if (!hasExpectedImageSignature(bytes, replacement_mime_type!)) {
-						throw new Error("Replacement bytes do not match the declared image MIME type.");
+						throw new Error(
+							"Replacement bytes do not match the declared image MIME type.",
+						);
 					}
 					uploaded = await wpUploadMedia(
 						replacement_filename!,
@@ -1691,7 +1826,9 @@ function createServer() {
 					? JSON.parse(updatedMeta.value)
 					: updatedMeta.value;
 				if (getNestedValue(updatedParsed, tokens) !== newValue) {
-					throw new Error("WooCommerce returned without verifying the new image reference.");
+					throw new Error(
+						"WooCommerce returned without verifying the new image reference.",
+					);
 				}
 				if (
 					hasPairedAttachment &&
@@ -2308,6 +2445,240 @@ function createServer() {
 	);
 
 	server.registerTool(
+		"get_meta_business_media_library",
+		{
+			description:
+				"Discover folders and videos in the Business Media Library attached to the configured Meta ad account. When folder_id is supplied, only videos explicitly returned for that owned folder are included. Read-only.",
+			inputSchema: z.object({
+				folder_id: z.string().regex(/^\d+$/).optional(),
+				folder_name: z.string().trim().min(1).max(200).optional(),
+				search: z.string().trim().max(200).optional(),
+				limit: z.number().int().min(1).max(100).default(100),
+			}),
+		},
+		async ({ folder_id, folder_name, search, limit }) => {
+			try {
+				const { business, folders } = await getOwnedMetaBusinessFolders(limit);
+				const normalizedFolderName = folder_name?.toLowerCase();
+				const matchingFolders = folders.filter(
+					(item: any) =>
+						(!folder_id || String(item.id) === folder_id) &&
+						(!normalizedFolderName ||
+							String(item.name ?? "")
+								.trim()
+								.toLowerCase() === normalizedFolderName),
+				);
+				if ((folder_id || folder_name) && matchingFolders.length !== 1) {
+					throw new Error(
+						matchingFolders.length === 0
+							? "No owned Business Media Library folder matched the supplied identifier."
+							: "Folder name is ambiguous; supply the exact folder_id.",
+					);
+				}
+
+				const selectedFolder = matchingFolders[0];
+				const [videos, images, businessCreatives] = selectedFolder
+					? await Promise.all([
+							getOwnedMetaBusinessVideos(String(selectedFolder.id), limit).then(
+								(result) => result.videos,
+							),
+							getOwnedMetaBusinessImages(String(selectedFolder.id), limit).then(
+								(result) => result.images,
+							),
+							getOwnedMetaBusinessCreatives(String(selectedFolder.id), limit).then(
+								(result) => result.creatives,
+							),
+						])
+					: [[], [], []];
+				const query = search?.toLowerCase();
+				const filteredVideos = videos.filter(
+					(item: any) =>
+						!query ||
+						[
+							String(item.name ?? ""),
+							String(item.title ?? ""),
+							String(item.description ?? ""),
+						]
+							.join(" ")
+							.toLowerCase()
+							.includes(query),
+				);
+				const filteredImages = images.filter(
+					(item: any) =>
+						!query ||
+						[String(item.name ?? ""), String(item.description ?? "")]
+							.join(" ")
+							.toLowerCase()
+							.includes(query),
+				);
+				return toolResult({
+					business,
+					folders,
+					selected_folder: selectedFolder ?? null,
+					videos: filteredVideos,
+					images: filteredImages,
+					business_creatives: businessCreatives,
+					assets: [
+						...filteredVideos.map((item: any) => ({ ...item, asset_type: "VIDEO" })),
+						...filteredImages.map((item: any) => ({ ...item, asset_type: "IMAGE" })),
+					],
+					folder_membership_verified: Boolean(selectedFolder),
+					read_only: true,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_meta_spring_instant_form_for_paused_ads",
+		{
+			description:
+				"Create one owned Spring Instant Form for use only in a separately reviewed PAUSED campaign. Meta forms are ACTIVE form definitions and do not deliver by themselves; this tool cannot create or activate an ad.",
+			inputSchema: z.object({
+				campaign_id: z.string().regex(/^\d+$/),
+				page_id: z.string().regex(/^\d+$/),
+				name: z.string().trim().min(3).max(200),
+				locale: z
+					.string()
+					.regex(/^[a-z]{2}_[A-Z]{2}$/)
+					.default("en_AU"),
+				privacy_policy_url: z.string().url(),
+				follow_up_action_url: z.string().url(),
+				question_page_custom_headline: z.string().trim().min(3).max(200),
+				custom_questions: z
+					.array(
+						z.object({
+							key: z.string().regex(/^[a-z0-9_]{1,64}$/),
+							label: z.string().trim().min(1).max(200),
+							options: z
+								.array(
+									z.object({
+										key: z.string().regex(/^[a-z0-9_]{1,64}$/),
+										value: z.string().trim().min(1).max(100),
+									}),
+								)
+								.min(2)
+								.max(20)
+								.optional(),
+						}),
+					)
+					.max(10)
+					.default([]),
+				confirmation: z.literal(META_CREATE_SPRING_FORM_CONFIRMATION),
+			}),
+		},
+		async ({
+			campaign_id,
+			page_id,
+			name,
+			locale,
+			privacy_policy_url,
+			follow_up_action_url,
+			question_page_custom_headline,
+			custom_questions,
+		}) => {
+			try {
+				const formText = [name, question_page_custom_headline].join(" ");
+				if (!/spring/i.test(formText) || /winter/i.test(formText)) {
+					throw new Error(
+						"Refusing creation: Spring form name/headline must reference spring and must not reference winter.",
+					);
+				}
+				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
+				if (campaign.status !== "PAUSED" || campaign.objective !== "OUTCOME_LEADS") {
+					throw new Error(
+						"Refusing creation: intended campaign must be a PAUSED OUTCOME_LEADS campaign.",
+					);
+				}
+				const page = await assertOwnedMetaPage(page_id);
+				const existingForms = await getOwnedMetaLeadForms(page_id, 100);
+				if (
+					existingForms.some(
+						(item: any) =>
+							String(item.name).trim().toLowerCase() === name.trim().toLowerCase(),
+					)
+				) {
+					throw new Error(
+						"Refusing creation: an Instant Form already uses this exact name.",
+					);
+				}
+				const duplicateQuestionKeys = custom_questions.filter(
+					(item, index) =>
+						custom_questions.findIndex((candidate) => candidate.key === item.key) !==
+						index,
+				);
+				if (duplicateQuestionKeys.length) {
+					throw new Error("Refusing creation: custom question keys must be unique.");
+				}
+				const reservedQuestionKeys = new Set(["full_name", "phone_number", "email"]);
+				if (custom_questions.some((item) => reservedQuestionKeys.has(item.key))) {
+					throw new Error(
+						"Refusing creation: custom question keys cannot replace required contact fields.",
+					);
+				}
+				for (const question of custom_questions) {
+					if (
+						question.options &&
+						new Set(question.options.map((option) => option.key)).size !==
+							question.options.length
+					) {
+						throw new Error(
+							`Refusing creation: option keys for ${question.key} must be unique.`,
+						);
+					}
+				}
+
+				const questions = [
+					{ type: "FULL_NAME", key: "full_name" },
+					{ type: "PHONE", key: "phone_number" },
+					{ type: "EMAIL", key: "email" },
+					...custom_questions.map((question) => ({ type: "CUSTOM", ...question })),
+				];
+				const pageAccessToken = await getOwnedMetaPageAccessToken(page_id);
+				const created = await metaPost(
+					page_id + "/leadgen_forms",
+					{
+						name,
+						locale,
+						questions: JSON.stringify(questions),
+						question_page_custom_headline,
+						privacy_policy: JSON.stringify({
+							url: privacy_policy_url,
+							link_text: "View Privacy Policy",
+						}),
+						follow_up_action_url,
+					},
+					pageAccessToken,
+				);
+				const verified = await metaFetch(
+					String(created.id),
+					{
+						fields: "id,name,status,locale,created_time,questions,privacy_policy_url,follow_up_action_url,question_page_custom_headline",
+					},
+					pageAccessToken,
+				);
+				if (verified.status !== "ACTIVE") {
+					throw new Error("Created Instant Form failed ACTIVE definition verification.");
+				}
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					delivery_possible_without_a_separate_ad: false,
+					object_type: "instant_form",
+					intended_paused_campaign: campaign,
+					page,
+					form: verified,
+					note: "Meta Instant Forms do not have a PAUSED state. This ACTIVE form definition cannot deliver on its own and must be attached only to separately reviewed PAUSED ads.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"create_meta_leads_campaign_paused",
 		{
 			description:
@@ -2772,6 +3143,257 @@ function createServer() {
 	);
 
 	server.registerTool(
+		"create_meta_instant_form_placement_video_ad_paused",
+		{
+			description:
+				"Create one new placement-customized creative from explicitly validated 4:5 and 9:16 videos in an owned Business Media Library folder, then create one PAUSED Instant-Form ad. Feed placements use 4:5; Stories and Reels use 9:16. Cannot activate delivery.",
+			inputSchema: z.object({
+				adset_id: z.string().regex(/^\d+$/),
+				page_id: z.string().regex(/^\d+$/),
+				lead_form_id: z.string().regex(/^\d+$/),
+				media_folder_id: z.string().regex(/^\d+$/),
+				media_folder_expected_name: z.string().trim().min(1).max(200),
+				asset_pair_label: z.string().trim().min(3).max(100),
+				video_4x5_id: z.string().regex(/^\d+$/),
+				video_4x5_expected_name: z.string().trim().min(1).max(300),
+				video_9x16_id: z.string().regex(/^\d+$/),
+				video_9x16_expected_name: z.string().trim().min(1).max(300),
+				name: z.string().trim().min(3).max(200),
+				primary_text: z.string().trim().min(1).max(5000),
+				headline: z.string().trim().min(1).max(255),
+				description: z.string().trim().max(255).optional(),
+				cta_type: z
+					.enum(["GET_QUOTE", "LEARN_MORE", "SIGN_UP", "APPLY_NOW"])
+					.default("GET_QUOTE"),
+				confirmation: z.literal(META_CREATE_CONFIRMATION),
+			}),
+		},
+		async ({
+			adset_id,
+			page_id,
+			lead_form_id,
+			media_folder_id,
+			media_folder_expected_name,
+			asset_pair_label,
+			video_4x5_id,
+			video_4x5_expected_name,
+			video_9x16_id,
+			video_9x16_expected_name,
+			name,
+			primary_text,
+			headline,
+			description,
+			cta_type,
+		}) => {
+			try {
+				const adCopy = [name, primary_text, headline, description ?? ""].join(" ");
+				if (!/spring/i.test(adCopy) || /winter/i.test(adCopy)) {
+					throw new Error(
+						"Refusing creation: Spring ad name/copy must reference spring and must not reference winter.",
+					);
+				}
+				if (
+					!/spring/i.test(media_folder_expected_name) ||
+					/winter/i.test(media_folder_expected_name)
+				) {
+					throw new Error(
+						"Refusing creation: expected Media Library folder must be Spring-specific.",
+					);
+				}
+				const expectedAssetNames = [video_4x5_expected_name, video_9x16_expected_name].join(
+					" ",
+				);
+				if (!/spring/i.test(expectedAssetNames) || /winter/i.test(expectedAssetNames)) {
+					throw new Error(
+						"Refusing creation: both expected video names must be Spring-specific.",
+					);
+				}
+				const adset = await assertMetaObjectOwnership(adset_id, "adset");
+				if (adset.status !== "PAUSED") {
+					throw new Error("Refusing creation: parent ad set must be PAUSED.");
+				}
+				const adsetDetails = await metaFetch(adset_id, {
+					fields: "id,name,account_id,campaign_id,status,effective_status,optimization_goal,destination_type,promoted_object",
+				});
+				if (
+					adsetDetails.destination_type !== "ON_AD" ||
+					adsetDetails.optimization_goal !== "QUALITY_LEAD"
+				) {
+					throw new Error(
+						"Refusing creation: parent ad set must be ON_AD and optimized for QUALITY_LEAD.",
+					);
+				}
+				if (String(adsetDetails.promoted_object?.page_id) !== page_id) {
+					throw new Error("Refusing creation: selected Page does not match the ad set.");
+				}
+				const campaign = await assertMetaObjectOwnership(
+					String(adsetDetails.campaign_id),
+					"campaign",
+				);
+				if (campaign.status !== "PAUSED" || campaign.objective !== "OUTCOME_LEADS") {
+					throw new Error(
+						"Refusing creation: parent campaign must be a PAUSED OUTCOME_LEADS campaign.",
+					);
+				}
+
+				const [page, form, business4x5, business9x16] = await Promise.all([
+					assertOwnedMetaPage(page_id),
+					assertOwnedActiveMetaLeadForm(page_id, lead_form_id),
+					assertOwnedMetaBusinessVideo(media_folder_id, video_4x5_id),
+					assertOwnedMetaBusinessVideo(media_folder_id, video_9x16_id),
+				]);
+				const video4x5 = business4x5.video;
+				const video9x16 = business9x16.video;
+				if (String(business4x5.folder.name).trim() !== media_folder_expected_name) {
+					throw new Error(
+						"Refusing creation: Media Library folder name does not exactly match expectation.",
+					);
+				}
+				const videoName = (video: any) => String(video.name ?? video.title ?? "").trim();
+				if (videoName(video4x5) !== video_4x5_expected_name) {
+					throw new Error(
+						"Refusing creation: 4:5 video name does not exactly match expectation.",
+					);
+				}
+				if (videoName(video9x16) !== video_9x16_expected_name) {
+					throw new Error(
+						"Refusing creation: 9:16 video name does not exactly match expectation.",
+					);
+				}
+				if (
+					!videoName(video4x5).includes(asset_pair_label) ||
+					!videoName(video9x16).includes(asset_pair_label)
+				) {
+					throw new Error(
+						"Refusing creation: both placement videos must contain the same expected asset pair label.",
+					);
+				}
+				const assertAspectRatio = (video: any, expectedRatio: number, label: string) => {
+					const width = Number(video.width);
+					const height = Number(video.height);
+					if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
+						throw new Error(
+							`Refusing creation: Meta did not provide dimensions for the ${label} video.`,
+						);
+					}
+					if (Math.abs(width / height - expectedRatio) > 0.02) {
+						throw new Error(
+							`Refusing creation: ${label} asset dimensions are ${width}x${height}, not ${label}.`,
+						);
+					}
+				};
+				assertAspectRatio(video4x5, 4 / 5, "4:5");
+				assertAspectRatio(video9x16, 9 / 16, "9:16");
+				await Promise.all([
+					refuseDuplicateMetaName("ads", name),
+					refuseDuplicateMetaName("adcreatives", name + " | Placement Creative"),
+				]);
+
+				const assetFeedSpec: Record<string, unknown> = {
+					ad_formats: ["SINGLE_VIDEO"],
+					optimization_type: "REGULAR",
+					bodies: [{ text: primary_text }],
+					titles: [{ text: headline }],
+					descriptions: description ? [{ text: description }] : [],
+					videos: [
+						{ video_id: video_4x5_id, adlabels: [{ name: "video_feed_4x5" }] },
+						{ video_id: video_9x16_id, adlabels: [{ name: "video_vertical_9x16" }] },
+					],
+					call_to_action_types: [cta_type],
+					call_to_actions: [
+						{ type: cta_type, value: { lead_gen_form_id: lead_form_id } },
+					],
+					asset_customization_rules: [
+						{
+							customization_spec: {
+								publisher_platforms: ["facebook", "instagram"],
+								facebook_positions: [
+									"feed",
+									"marketplace",
+									"video_feeds",
+									"search",
+								],
+								instagram_positions: ["stream", "explore", "profile_feed"],
+							},
+							video_label: { name: "video_feed_4x5" },
+							priority: 1,
+						},
+						{
+							customization_spec: {
+								publisher_platforms: ["facebook", "instagram"],
+								facebook_positions: ["story", "facebook_reels"],
+								instagram_positions: ["story", "reels"],
+							},
+							video_label: { name: "video_vertical_9x16" },
+							priority: 2,
+						},
+					],
+				};
+				const { adAccountId } = getMetaConfig();
+				const createdCreative = await metaPost(adAccountId + "/adcreatives", {
+					name: name + " | Placement Creative",
+					object_story_spec: JSON.stringify({ page_id }),
+					asset_feed_spec: JSON.stringify(assetFeedSpec),
+				});
+				let createdAd: any;
+				try {
+					createdAd = await metaPost(adAccountId + "/ads", {
+						name,
+						adset_id,
+						creative: JSON.stringify({ creative_id: createdCreative.id }),
+						status: "PAUSED",
+					});
+				} catch (error) {
+					if (error instanceof Error) {
+						error.message =
+							"Placement creative " +
+							createdCreative.id +
+							" was created, but PAUSED ad creation failed: " +
+							error.message;
+					}
+					throw error;
+				}
+				const verified = await metaFetch(createdAd.id, {
+					fields: "id,name,account_id,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url,object_story_spec,asset_feed_spec}",
+				});
+				const verifiedCreative = verified.creative ?? {};
+				const verifiedVideoIds = new Set(
+					(verifiedCreative.asset_feed_spec?.videos ?? []).map((item: any) =>
+						String(item.video_id),
+					),
+				);
+				if (
+					verified.status !== "PAUSED" ||
+					!verifiedVideoIds.has(video_4x5_id) ||
+					!verifiedVideoIds.has(video_9x16_id) ||
+					!collectMetaLeadFormIds(verifiedCreative).has(lead_form_id)
+				) {
+					throw new Error(
+						"Created ad failed PAUSED, placement-video, or Instant-Form verification.",
+					);
+				}
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					object_type: "ad",
+					...verified,
+					validated_page: page,
+					validated_instant_form: form,
+					validated_media_folder: business4x5.folder,
+					validated_4x5_video: video4x5,
+					validated_9x16_video: video9x16,
+					placement_mapping: {
+						feeds: video_4x5_id,
+						stories_and_reels: video_9x16_id,
+					},
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"create_meta_ad_from_existing_creative_paused",
 		{
 			description:
@@ -2835,6 +3457,112 @@ function createServer() {
 	);
 
 	server.registerTool(
+		"archive_meta_paused_draft_ads_guarded",
+		{
+			description:
+				"Archive explicitly identified incorrect Meta draft ads only after verifying exact names, ownership, PAUSED status, PAUSED parent campaign, and zero lifetime spend and impressions. Cannot archive active or previously delivered ads.",
+			inputSchema: z.object({
+				campaign_id: z.string().regex(/^\d+$/),
+				expected_campaign_name: z.string().trim().min(3).max(200),
+				ads: z
+					.array(
+						z.object({
+							ad_id: z.string().regex(/^\d+$/),
+							expected_name: z.string().trim().min(3).max(200),
+						}),
+					)
+					.min(1)
+					.max(10),
+				retirement_reason: z.literal("INCORRECT SPRING DRAFT"),
+				confirmation: z.literal(META_ARCHIVE_DRAFT_ADS_CONFIRMATION),
+			}),
+		},
+		async ({ campaign_id, expected_campaign_name, ads }) => {
+			try {
+				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
+				if (campaign.name !== expected_campaign_name || !/spring/i.test(campaign.name)) {
+					throw new Error(
+						"Refusing retirement: campaign name does not exactly match the expected Spring campaign.",
+					);
+				}
+				if (campaign.status !== "PAUSED") {
+					throw new Error("Refusing retirement: parent campaign must be PAUSED.");
+				}
+				if (new Set(ads.map((item) => item.ad_id)).size !== ads.length) {
+					throw new Error("Refusing retirement: each ad ID may appear only once.");
+				}
+
+				const validated = await Promise.all(
+					ads.map(async ({ ad_id, expected_name }) => {
+						const ad = await assertMetaObjectOwnership(ad_id, "ad");
+						if (String(ad.campaign_id) !== campaign_id) {
+							throw new Error(
+								`Refusing retirement: ad ${ad_id} is not in campaign ${campaign_id}.`,
+							);
+						}
+						if (ad.name !== expected_name) {
+							throw new Error(
+								`Refusing retirement: ad ${ad_id} name does not exactly match expectation.`,
+							);
+						}
+						if (ad.status !== "PAUSED") {
+							throw new Error(`Refusing retirement: ad ${ad_id} is not PAUSED.`);
+						}
+						const insights = await metaFetch(ad_id + "/insights", {
+							fields: "spend,impressions",
+							date_preset: "maximum",
+							limit: 100,
+						});
+						const totals = (insights.data ?? []).reduce(
+							(accumulator: { spend: number; impressions: number }, row: any) => ({
+								spend: accumulator.spend + Number(row.spend ?? 0),
+								impressions: accumulator.impressions + Number(row.impressions ?? 0),
+							}),
+							{ spend: 0, impressions: 0 },
+						);
+						if (totals.spend !== 0 || totals.impressions !== 0) {
+							throw new Error(
+								`Refusing retirement: ad ${ad_id} has delivery history (${totals.impressions} impressions, ${totals.spend} spend).`,
+							);
+						}
+						return { ad, lifetime_delivery: totals };
+					}),
+				);
+
+				const archived: any[] = [];
+				for (const item of validated) {
+					try {
+						await metaPost(item.ad.id, { status: "ARCHIVED" });
+						const verified = await metaFetch(item.ad.id, {
+							fields: "id,name,account_id,campaign_id,adset_id,status,effective_status,updated_time",
+						});
+						if (verified.status !== "ARCHIVED") {
+							throw new Error(`Ad ${item.ad.id} failed ARCHIVED verification.`);
+						}
+						archived.push({ ...verified, lifetime_delivery: item.lifetime_delivery });
+					} catch (error) {
+						return toolResult({
+							completed: false,
+							archived,
+							failed_ad_id: item.ad.id,
+							error: error instanceof Error ? error.message : String(error),
+							note: "All ads were prevalidated before retirement; a Meta API failure caused a partial archive result.",
+						});
+					}
+				}
+				return toolResult({
+					completed: true,
+					archived,
+					deleted: false,
+					activation_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"get_meta_campaign_draft",
 		{
 			description:
@@ -2852,7 +3580,7 @@ function createServer() {
 						limit: 100,
 					}),
 					metaFetch(campaign_id + "/ads", {
-						fields: "id,name,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url,object_story_spec}",
+						fields: "id,name,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url,object_story_spec,asset_feed_spec}",
 						limit: 100,
 					}),
 				]);
