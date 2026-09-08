@@ -346,7 +346,11 @@ function getMetaConfig() {
 	return { accessToken, adAccountId, apiVersion };
 }
 
-async function metaFetch(path: string, params: Record<string, string | number | undefined> = {}) {
+async function metaFetch(
+	path: string,
+	params: Record<string, string | number | undefined> = {},
+	accessTokenOverride?: string,
+) {
 	const { accessToken, apiVersion } = getMetaConfig();
 	const url = new URL(`https://graph.facebook.com/${apiVersion}/${path}`);
 
@@ -358,7 +362,7 @@ async function metaFetch(path: string, params: Record<string, string | number | 
 
 	const response = await fetch(url.toString(), {
 		headers: {
-			Authorization: `Bearer ${accessToken}`,
+			Authorization: `Bearer ${accessTokenOverride ?? accessToken}`,
 			Accept: "application/json",
 		},
 	});
@@ -555,12 +559,27 @@ async function assertOwnedMetaPage(pageId: string) {
 	return page;
 }
 
-async function getOwnedMetaLeadForms(pageId: string, limit = 100) {
+async function getOwnedMetaPageAccessToken(pageId: string) {
 	await assertOwnedMetaPage(pageId);
-	const result = await metaFetch(pageId + "/leadgen_forms", {
-		fields: "id,name,status,locale,created_time",
-		limit,
-	});
+	const page = await metaFetch(pageId, { fields: "id,name,access_token" });
+	if (!page.access_token) {
+		throw new Error(
+			"Meta did not return a Page Access Token for the selected owned Page. Confirm the configured system user is assigned to the Page with lead access.",
+		);
+	}
+	return String(page.access_token);
+}
+
+async function getOwnedMetaLeadForms(pageId: string, limit = 100) {
+	const pageAccessToken = await getOwnedMetaPageAccessToken(pageId);
+	const result = await metaFetch(
+		pageId + "/leadgen_forms",
+		{
+			fields: "id,name,status,locale,created_time",
+			limit,
+		},
+		pageAccessToken,
+	);
 	return result.data ?? [];
 }
 
@@ -577,17 +596,37 @@ async function assertOwnedActiveMetaLeadForm(pageId: string, formId: string) {
 	return form;
 }
 
-async function getOwnedMetaVideos(limit = 100) {
+async function getOwnedMetaVideos(limit = 100, pageId?: string) {
 	const { adAccountId } = getMetaConfig();
-	const result = await metaFetch(adAccountId + "/advideos", {
-		fields: "id,title,description,created_time,updated_time,length,picture,status",
+	const fields = "id,title,description,created_time,updated_time,length,picture,status";
+	const accountResult = await metaFetch(adAccountId + "/advideos", {
+		fields,
 		limit,
 	});
-	return result.data ?? [];
+	const videos = accountResult.data ?? [];
+
+	if (pageId) {
+		const pageAccessToken = await getOwnedMetaPageAccessToken(pageId);
+		const pageResult = await metaFetch(
+			pageId + "/videos",
+			{
+				fields,
+				limit,
+			},
+			pageAccessToken,
+		);
+		const byId = new Map(videos.map((item: any) => [String(item.id), item]));
+		for (const item of pageResult.data ?? []) byId.set(String(item.id), item);
+		return [...byId.values()];
+	}
+
+	return videos;
 }
 
-async function assertOwnedMetaVideo(videoId: string) {
-	const video = (await getOwnedMetaVideos(500)).find((item: any) => String(item.id) === videoId);
+async function assertOwnedMetaVideo(videoId: string, pageId?: string) {
+	const video = (await getOwnedMetaVideos(500, pageId)).find(
+		(item: any) => String(item.id) === videoId,
+	);
 	if (!video) {
 		throw new Error(
 			"Refusing creation: video is not available in the configured Meta ad account.",
@@ -2235,7 +2274,7 @@ function createServer() {
 				}
 				const [forms, videos, creativeResult] = await Promise.all([
 					page_id ? getOwnedMetaLeadForms(page_id, form_limit) : Promise.resolve([]),
-					getOwnedMetaVideos(media_limit),
+					getOwnedMetaVideos(media_limit, page_id),
 					metaFetch(adAccountId + "/adcreatives", {
 						fields: "id,name,status,object_story_id,thumbnail_url,image_hash,video_id,call_to_action_type,object_story_spec",
 						limit: media_limit,
@@ -2665,7 +2704,7 @@ function createServer() {
 				const [page, form, video] = await Promise.all([
 					assertOwnedMetaPage(page_id),
 					assertOwnedActiveMetaLeadForm(page_id, lead_form_id),
-					assertOwnedMetaVideo(video_id),
+					assertOwnedMetaVideo(video_id, page_id),
 				]);
 				await Promise.all([
 					refuseDuplicateMetaName("ads", name),
