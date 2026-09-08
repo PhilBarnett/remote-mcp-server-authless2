@@ -531,113 +531,61 @@ async function assertMetaObjectOwnership(
 	return object;
 }
 
-async function getOwnedMetaBusiness() {
-	const { adAccountId } = getMetaConfig();
-	const account = await metaFetch(adAccountId, { fields: "id,name,business" });
-	if (!account.business?.id) {
-		throw new Error("Meta did not return an owning Business for the configured ad account.");
-	}
-	return account.business;
-}
-
-async function getOwnedMetaBusinessFolders(limit = 100) {
-	const business = await getOwnedMetaBusiness();
-	const topLevelResult = await metaFetch(business.id + "/creative_folders", {
-		fields: "id,name,description,parent_folder_id,media_library_url",
-		limit,
-	});
-	const folders = [...(topLevelResult.data ?? [])];
-	const seen = new Set(folders.map((item: any) => String(item.id)));
-	let frontier = [...folders];
-	for (let depth = 0; depth < 5 && frontier.length > 0 && folders.length < limit; depth++) {
-		const childResults = await Promise.all(
-			frontier.map((folder: any) =>
-				metaFetch(folder.id + "/subfolders", {
-					fields: "id,name,description,parent_folder_id,media_library_url",
-					limit,
-				}),
-			),
+// Business Creative Asset Management is intentionally not used: this app validates
+// placement assets through the configured ad account's owned /advideos edge.
+async function getAllMetaEdgeRows(
+	path: string,
+	params: Record<string, string | number | undefined>,
+	limit: number,
+	accessTokenOverride?: string,
+) {
+	const rows: any[] = [];
+	let after: string | undefined;
+	while (rows.length < limit) {
+		const result = await metaFetch(
+			path,
+			{
+				...params,
+				limit: Math.min(100, limit - rows.length),
+				after,
+			},
+			accessTokenOverride,
 		);
-		frontier = [];
-		for (const result of childResults) {
-			for (const folder of result.data ?? []) {
-				if (seen.has(String(folder.id))) continue;
-				seen.add(String(folder.id));
-				folders.push(folder);
-				frontier.push(folder);
-				if (folders.length >= limit) break;
-			}
-			if (folders.length >= limit) break;
-		}
+		rows.push(...(result.data ?? []));
+		const nextAfter = result.paging?.cursors?.after;
+		if (!result.paging?.next || !nextAfter || nextAfter === after) break;
+		after = String(nextAfter);
 	}
-	return { business, folders: folders.slice(0, limit) };
+	return rows.slice(0, limit);
 }
 
-async function assertOwnedMetaBusinessFolder(folderId: string) {
-	const { business, folders } = await getOwnedMetaBusinessFolders(500);
-	const folder = folders.find((item: any) => String(item.id) === folderId);
-	if (!folder) {
-		throw new Error(
-			"Refusing operation: Media Library folder is not owned by the Business attached to the configured ad account.",
-		);
-	}
-	return { business, folder };
-}
-
-async function getOwnedMetaBusinessVideos(folderId: string, limit = 100) {
-	const { business, folder } = await assertOwnedMetaBusinessFolder(folderId);
-	const result = await metaFetch(business.id + "/videos", {
-		fields: "id,title,description,media_library_url,width,height,length,created_time,picture,status",
-		creative_folder_id: folderId,
-		limit,
-	});
-	const videos = (result.data ?? []).map((item: any) => ({
-		...item,
-		creative_folder_id: folderId,
-	}));
-	return { business, folder, videos };
-}
-
-async function getOwnedMetaBusinessImages(folderId: string, limit = 100) {
-	const { business, folder } = await assertOwnedMetaBusinessFolder(folderId);
-	const result = await metaFetch(business.id + "/images", {
-		fields: "id,name,media_library_url,width,height,created_time,hash,url",
-		creative_folder_id: folderId,
-		limit,
-	});
-	const images = (result.data ?? []).map((item: any) => ({
-		...item,
-		creative_folder_id: folderId,
-	}));
-	return { business, folder, images };
-}
-
-async function getOwnedMetaBusinessCreatives(folderId: string, limit = 100) {
-	const { business, folder } = await assertOwnedMetaBusinessFolder(folderId);
-	const result = await metaFetch(business.id + "/creatives", {
-		fields: "id,media_library_url",
-		creative_folder_id: folderId,
-		limit,
-	});
+function enrichMetaVideo(video: any, ownershipSource: "AD_ACCOUNT" | "PAGE") {
+	const { format, ...videoMetadata } = video;
+	const dimensions = (Array.isArray(format) ? format : [])
+		.map((item: any) => ({
+			width: Number(item.width),
+			height: Number(item.height),
+		}))
+		.filter(
+			(item: { width: number; height: number }) =>
+				Number.isFinite(item.width) &&
+				Number.isFinite(item.height) &&
+				item.width > 0 &&
+				item.height > 0,
+		)
+		.sort(
+			(a: { width: number; height: number }, b: { width: number; height: number }) =>
+				b.width * b.height - a.width * a.height,
+		)[0];
+	const width = dimensions?.width ?? null;
+	const height = dimensions?.height ?? null;
 	return {
-		business,
-		folder,
-		creatives: (result.data ?? []).map((item: any) => ({
-			...item,
-			creative_folder_id: folderId,
-		})),
+		...videoMetadata,
+		ownership_source: ownershipSource,
+		width,
+		height,
+		aspect_ratio: width && height ? Number((width / height).toFixed(6)) : null,
 	};
-}
-
-async function assertOwnedMetaBusinessVideo(folderId: string, videoId: string) {
-	const result = await getOwnedMetaBusinessVideos(folderId, 500);
-	const video = result.videos.find((item: any) => String(item.id) === videoId);
-	if (!video) {
-		throw new Error(
-			"Refusing creation: video is not present in the selected owned Business Media Library folder.",
-		);
-	}
-	return { ...result, video };
 }
 
 async function refuseDuplicateMetaName(
@@ -719,25 +667,23 @@ async function assertOwnedActiveMetaLeadForm(pageId: string, formId: string) {
 
 async function getOwnedMetaVideos(limit = 100, pageId?: string) {
 	const { adAccountId } = getMetaConfig();
-	const fields = "id,title,description,created_time,updated_time,length,picture,status";
-	const accountResult = await metaFetch(adAccountId + "/advideos", {
-		fields,
-		limit,
-	});
-	const videos = accountResult.data ?? [];
+	const fields = "id,title,description,created_time,updated_time,length,picture,status,format";
+	const accountVideos = await getAllMetaEdgeRows(adAccountId + "/advideos", { fields }, limit);
+	const videos = accountVideos.map((item: any) => enrichMetaVideo(item, "AD_ACCOUNT"));
 
 	if (pageId) {
 		const pageAccessToken = await getOwnedMetaPageAccessToken(pageId);
-		const pageResult = await metaFetch(
+		const pageVideos = await getAllMetaEdgeRows(
 			pageId + "/videos",
-			{
-				fields,
-				limit,
-			},
+			{ fields },
+			limit,
 			pageAccessToken,
 		);
 		const byId = new Map(videos.map((item: any) => [String(item.id), item]));
-		for (const item of pageResult.data ?? []) byId.set(String(item.id), item);
+		for (const item of pageVideos) {
+			const id = String(item.id);
+			if (!byId.has(id)) byId.set(id, enrichMetaVideo(item, "PAGE"));
+		}
 		return [...byId.values()];
 	}
 
@@ -752,6 +698,16 @@ async function assertOwnedMetaVideo(videoId: string, pageId?: string) {
 		throw new Error(
 			"Refusing creation: video is not available in the configured Meta ad account.",
 		);
+	}
+	return video;
+}
+
+async function assertOwnedMetaAdAccountVideo(videoId: string) {
+	const video = (await getOwnedMetaVideos(500)).find(
+		(item: any) => String(item.id) === videoId && item.ownership_source === "AD_ACCOUNT",
+	);
+	if (!video) {
+		throw new Error("Refusing creation: video is not owned by the configured Meta ad account.");
 	}
 	return video;
 }
@@ -2445,84 +2401,37 @@ function createServer() {
 	);
 
 	server.registerTool(
-		"get_meta_business_media_library",
+		"get_meta_owned_ad_videos",
 		{
 			description:
-				"Discover folders and videos in the Business Media Library attached to the configured Meta ad account. When folder_id is supplied, only videos explicitly returned for that owned folder are included. Read-only.",
+				"List videos owned by the configured Meta ad account with exact titles, IDs, upload times, durations, processing status and derived dimensions. Read-only; does not depend on Business Media Library folder access.",
 			inputSchema: z.object({
-				folder_id: z.string().regex(/^\d+$/).optional(),
-				folder_name: z.string().trim().min(1).max(200).optional(),
 				search: z.string().trim().max(200).optional(),
-				limit: z.number().int().min(1).max(100).default(100),
+				created_on_or_after: z.string().date().optional(),
+				limit: z.number().int().min(1).max(500).default(100),
 			}),
 		},
-		async ({ folder_id, folder_name, search, limit }) => {
+		async ({ search, created_on_or_after, limit }) => {
 			try {
-				const { business, folders } = await getOwnedMetaBusinessFolders(limit);
-				const normalizedFolderName = folder_name?.toLowerCase();
-				const matchingFolders = folders.filter(
-					(item: any) =>
-						(!folder_id || String(item.id) === folder_id) &&
-						(!normalizedFolderName ||
-							String(item.name ?? "")
-								.trim()
-								.toLowerCase() === normalizedFolderName),
-				);
-				if ((folder_id || folder_name) && matchingFolders.length !== 1) {
-					throw new Error(
-						matchingFolders.length === 0
-							? "No owned Business Media Library folder matched the supplied identifier."
-							: "Folder name is ambiguous; supply the exact folder_id.",
-					);
-				}
-
-				const selectedFolder = matchingFolders[0];
-				const [videos, images, businessCreatives] = selectedFolder
-					? await Promise.all([
-							getOwnedMetaBusinessVideos(String(selectedFolder.id), limit).then(
-								(result) => result.videos,
-							),
-							getOwnedMetaBusinessImages(String(selectedFolder.id), limit).then(
-								(result) => result.images,
-							),
-							getOwnedMetaBusinessCreatives(String(selectedFolder.id), limit).then(
-								(result) => result.creatives,
-							),
-						])
-					: [[], [], []];
+				const { adAccountId } = getMetaConfig();
+				const videos = await getOwnedMetaVideos(limit);
 				const query = search?.toLowerCase();
 				const filteredVideos = videos.filter(
 					(item: any) =>
-						!query ||
-						[
-							String(item.name ?? ""),
-							String(item.title ?? ""),
-							String(item.description ?? ""),
-						]
-							.join(" ")
-							.toLowerCase()
-							.includes(query),
-				);
-				const filteredImages = images.filter(
-					(item: any) =>
-						!query ||
-						[String(item.name ?? ""), String(item.description ?? "")]
-							.join(" ")
-							.toLowerCase()
-							.includes(query),
+						(!query ||
+							[String(item.title ?? ""), String(item.description ?? "")]
+								.join(" ")
+								.toLowerCase()
+								.includes(query)) &&
+						(!created_on_or_after ||
+							String(item.created_time ?? "").slice(0, 10) >= created_on_or_after),
 				);
 				return toolResult({
-					business,
-					folders,
-					selected_folder: selectedFolder ?? null,
+					account_id: adAccountId,
 					videos: filteredVideos,
-					images: filteredImages,
-					business_creatives: businessCreatives,
-					assets: [
-						...filteredVideos.map((item: any) => ({ ...item, asset_type: "VIDEO" })),
-						...filteredImages.map((item: any) => ({ ...item, asset_type: "IMAGE" })),
-					],
-					folder_membership_verified: Boolean(selectedFolder),
+					search: search ?? null,
+					created_on_or_after: created_on_or_after ?? null,
+					ownership_verified_by: "configured_ad_account_advideos",
 					read_only: true,
 				});
 			} catch (error) {
@@ -3146,18 +3055,24 @@ function createServer() {
 		"create_meta_instant_form_placement_video_ad_paused",
 		{
 			description:
-				"Create one new placement-customized creative from explicitly validated 4:5 and 9:16 videos in an owned Business Media Library folder, then create one PAUSED Instant-Form ad. Feed placements use 4:5; Stories and Reels use 9:16. Cannot activate delivery.",
+				"Create one new placement-customized creative from explicitly validated 4:5 and 9:16 videos owned by the configured ad account, then create one PAUSED Instant-Form ad. Exact titles, upload times, durations and dimensions are required. Feed placements use 4:5; Stories and Reels use 9:16. Cannot activate delivery.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				page_id: z.string().regex(/^\d+$/),
 				lead_form_id: z.string().regex(/^\d+$/),
-				media_folder_id: z.string().regex(/^\d+$/),
-				media_folder_expected_name: z.string().trim().min(1).max(200),
 				asset_pair_label: z.string().trim().min(3).max(100),
 				video_4x5_id: z.string().regex(/^\d+$/),
 				video_4x5_expected_name: z.string().trim().min(1).max(300),
+				video_4x5_expected_created_time: z.string().trim().min(20).max(40),
+				video_4x5_expected_length_seconds: z.number().positive().max(600),
+				video_4x5_expected_width: z.number().int().positive().max(10000),
+				video_4x5_expected_height: z.number().int().positive().max(10000),
 				video_9x16_id: z.string().regex(/^\d+$/),
 				video_9x16_expected_name: z.string().trim().min(1).max(300),
+				video_9x16_expected_created_time: z.string().trim().min(20).max(40),
+				video_9x16_expected_length_seconds: z.number().positive().max(600),
+				video_9x16_expected_width: z.number().int().positive().max(10000),
+				video_9x16_expected_height: z.number().int().positive().max(10000),
 				name: z.string().trim().min(3).max(200),
 				primary_text: z.string().trim().min(1).max(5000),
 				headline: z.string().trim().min(1).max(255),
@@ -3172,13 +3087,19 @@ function createServer() {
 			adset_id,
 			page_id,
 			lead_form_id,
-			media_folder_id,
-			media_folder_expected_name,
 			asset_pair_label,
 			video_4x5_id,
 			video_4x5_expected_name,
+			video_4x5_expected_created_time,
+			video_4x5_expected_length_seconds,
+			video_4x5_expected_width,
+			video_4x5_expected_height,
 			video_9x16_id,
 			video_9x16_expected_name,
+			video_9x16_expected_created_time,
+			video_9x16_expected_length_seconds,
+			video_9x16_expected_width,
+			video_9x16_expected_height,
 			name,
 			primary_text,
 			headline,
@@ -3190,14 +3111,6 @@ function createServer() {
 				if (!/spring/i.test(adCopy) || /winter/i.test(adCopy)) {
 					throw new Error(
 						"Refusing creation: Spring ad name/copy must reference spring and must not reference winter.",
-					);
-				}
-				if (
-					!/spring/i.test(media_folder_expected_name) ||
-					/winter/i.test(media_folder_expected_name)
-				) {
-					throw new Error(
-						"Refusing creation: expected Media Library folder must be Spring-specific.",
 					);
 				}
 				const expectedAssetNames = [video_4x5_expected_name, video_9x16_expected_name].join(
@@ -3236,19 +3149,12 @@ function createServer() {
 					);
 				}
 
-				const [page, form, business4x5, business9x16] = await Promise.all([
+				const [page, form, video4x5, video9x16] = await Promise.all([
 					assertOwnedMetaPage(page_id),
 					assertOwnedActiveMetaLeadForm(page_id, lead_form_id),
-					assertOwnedMetaBusinessVideo(media_folder_id, video_4x5_id),
-					assertOwnedMetaBusinessVideo(media_folder_id, video_9x16_id),
+					assertOwnedMetaAdAccountVideo(video_4x5_id),
+					assertOwnedMetaAdAccountVideo(video_9x16_id),
 				]);
-				const video4x5 = business4x5.video;
-				const video9x16 = business9x16.video;
-				if (String(business4x5.folder.name).trim() !== media_folder_expected_name) {
-					throw new Error(
-						"Refusing creation: Media Library folder name does not exactly match expectation.",
-					);
-				}
 				const videoName = (video: any) => String(video.name ?? video.title ?? "").trim();
 				if (videoName(video4x5) !== video_4x5_expected_name) {
 					throw new Error(
@@ -3260,6 +3166,9 @@ function createServer() {
 						"Refusing creation: 9:16 video name does not exactly match expectation.",
 					);
 				}
+				if (video_4x5_id === video_9x16_id) {
+					throw new Error("Refusing creation: placement videos must use different IDs.");
+				}
 				if (
 					!videoName(video4x5).includes(asset_pair_label) ||
 					!videoName(video9x16).includes(asset_pair_label)
@@ -3268,22 +3177,82 @@ function createServer() {
 						"Refusing creation: both placement videos must contain the same expected asset pair label.",
 					);
 				}
-				const assertAspectRatio = (video: any, expectedRatio: number, label: string) => {
+				const assertVideoMetadata = (
+					video: any,
+					expected: {
+						createdTime: string;
+						length: number;
+						width: number;
+						height: number;
+						ratio: number;
+					},
+					label: string,
+				) => {
 					const width = Number(video.width);
 					const height = Number(video.height);
+					const length = Number(video.length);
+					if (video.status?.video_status !== "ready") {
+						throw new Error(
+							`Refusing creation: ${label} video processing is not ready.`,
+						);
+					}
+					if (String(video.created_time ?? "") !== expected.createdTime) {
+						throw new Error(
+							`Refusing creation: ${label} video upload time does not exactly match expectation.`,
+						);
+					}
+					if (!Number.isFinite(length) || Math.abs(length - expected.length) > 0.001) {
+						throw new Error(
+							`Refusing creation: ${label} video duration does not exactly match expectation.`,
+						);
+					}
 					if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
 						throw new Error(
 							`Refusing creation: Meta did not provide dimensions for the ${label} video.`,
 						);
 					}
-					if (Math.abs(width / height - expectedRatio) > 0.02) {
+					if (width !== expected.width || height !== expected.height) {
+						throw new Error(
+							`Refusing creation: ${label} video dimensions ${width}x${height} do not exactly match expected ${expected.width}x${expected.height}.`,
+						);
+					}
+					if (Math.abs(width / height - expected.ratio) > 0.02) {
 						throw new Error(
 							`Refusing creation: ${label} asset dimensions are ${width}x${height}, not ${label}.`,
 						);
 					}
 				};
-				assertAspectRatio(video4x5, 4 / 5, "4:5");
-				assertAspectRatio(video9x16, 9 / 16, "9:16");
+				assertVideoMetadata(
+					video4x5,
+					{
+						createdTime: video_4x5_expected_created_time,
+						length: video_4x5_expected_length_seconds,
+						width: video_4x5_expected_width,
+						height: video_4x5_expected_height,
+						ratio: 4 / 5,
+					},
+					"4:5",
+				);
+				assertVideoMetadata(
+					video9x16,
+					{
+						createdTime: video_9x16_expected_created_time,
+						length: video_9x16_expected_length_seconds,
+						width: video_9x16_expected_width,
+						height: video_9x16_expected_height,
+						ratio: 9 / 16,
+					},
+					"9:16",
+				);
+				if (
+					Math.abs(Number(video4x5.length) - Number(video9x16.length)) > 0.05 ||
+					String(video4x5.created_time).slice(0, 10) !==
+						String(video9x16.created_time).slice(0, 10)
+				) {
+					throw new Error(
+						"Refusing creation: placement videos do not form a same-duration, same-upload-date pair.",
+					);
+				}
 				await Promise.all([
 					refuseDuplicateMetaName("ads", name),
 					refuseDuplicateMetaName("adcreatives", name + " | Placement Creative"),
@@ -3379,9 +3348,9 @@ function createServer() {
 					...verified,
 					validated_page: page,
 					validated_instant_form: form,
-					validated_media_folder: business4x5.folder,
 					validated_4x5_video: video4x5,
 					validated_9x16_video: video9x16,
+					ownership_verified_by: "configured_ad_account_advideos",
 					placement_mapping: {
 						feeds: video_4x5_id,
 						stories_and_reels: video_9x16_id,
