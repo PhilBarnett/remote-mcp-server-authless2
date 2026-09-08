@@ -1453,7 +1453,13 @@ function createServer() {
 					(typeof oldValue === "string" &&
 						normaliseImageUrl(oldValue) === normaliseImageUrl(expected_source_url));
 				if (!attachmentMatches || !urlMatches) {
-					throw new Error("Current image reference does not match the expected value; no write performed.");
+					const currentReference =
+						typeof oldValue === "string" || typeof oldValue === "number"
+							? String(oldValue)
+							: `[${Array.isArray(oldValue) ? "array" : typeof oldValue}]`;
+					throw new Error(
+						`Current image reference does not match the expected value; no write performed. Current stored reference: ${currentReference}`,
+					);
 				}
 				if (
 					typeof oldValue !== "number" &&
