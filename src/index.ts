@@ -270,7 +270,7 @@ function productMetaPathTokens(customFieldKey: string, path: string) {
 		throw new Error("Custom-field path does not belong to the selected meta key.");
 	}
 	const relativePath = path.slice(customFieldKey.length).replace(/^\./, "");
-	return [...relativePath.matchAll(/(?:^|\.)([^.\[\]]+)|\[(\d+)\]/g)].map((match) =>
+	return [...relativePath.matchAll(/(?:^|\.)([^.[\]]+)|\[(\d+)\]/g)].map((match) =>
 		match[1] ?? Number(match[2]),
 	);
 }
@@ -515,10 +515,13 @@ async function assertMetaObjectOwnership(
 	return object;
 }
 
-async function refuseDuplicateMetaName(edge: "campaigns" | "adsets" | "ads", name: string) {
+async function refuseDuplicateMetaName(
+	edge: "campaigns" | "adsets" | "ads" | "adcreatives",
+	name: string,
+) {
 	const { adAccountId } = getMetaConfig();
 	const result = await metaFetch(adAccountId + "/" + edge, {
-		fields: "id,name,status,effective_status",
+		fields: edge === "adcreatives" ? "id,name,status" : "id,name,status,effective_status",
 		limit: 100,
 	});
 	const duplicate = (result.data ?? []).find(
@@ -531,6 +534,81 @@ async function refuseDuplicateMetaName(edge: "campaigns" | "adsets" | "ads", nam
 				").",
 		);
 	}
+}
+
+async function getOwnedMetaPages() {
+	const { adAccountId } = getMetaConfig();
+	const result = await metaFetch(adAccountId + "/promote_pages", {
+		fields: "id,name,category",
+		limit: 100,
+	});
+	return result.data ?? [];
+}
+
+async function assertOwnedMetaPage(pageId: string) {
+	const page = (await getOwnedMetaPages()).find((item: any) => String(item.id) === pageId);
+	if (!page) {
+		throw new Error(
+			"Refusing creation: Facebook Page is not assigned to the configured Meta ad account.",
+		);
+	}
+	return page;
+}
+
+async function getOwnedMetaLeadForms(pageId: string, limit = 100) {
+	await assertOwnedMetaPage(pageId);
+	const result = await metaFetch(pageId + "/leadgen_forms", {
+		fields: "id,name,status,locale,created_time",
+		limit,
+	});
+	return result.data ?? [];
+}
+
+async function assertOwnedActiveMetaLeadForm(pageId: string, formId: string) {
+	const form = (await getOwnedMetaLeadForms(pageId, 100)).find(
+		(item: any) => String(item.id) === formId,
+	);
+	if (!form) {
+		throw new Error("Refusing creation: Instant Form does not belong to the selected Page.");
+	}
+	if (form.status !== "ACTIVE") {
+		throw new Error("Refusing creation: selected Instant Form is not ACTIVE.");
+	}
+	return form;
+}
+
+async function getOwnedMetaVideos(limit = 100) {
+	const { adAccountId } = getMetaConfig();
+	const result = await metaFetch(adAccountId + "/advideos", {
+		fields: "id,title,description,created_time,updated_time,length,picture,status",
+		limit,
+	});
+	return result.data ?? [];
+}
+
+async function assertOwnedMetaVideo(videoId: string) {
+	const video = (await getOwnedMetaVideos(500)).find((item: any) => String(item.id) === videoId);
+	if (!video) {
+		throw new Error(
+			"Refusing creation: video is not available in the configured Meta ad account.",
+		);
+	}
+	return video;
+}
+
+function collectMetaLeadFormIds(value: unknown, formIds = new Set<string>()) {
+	if (Array.isArray(value)) {
+		for (const item of value) collectMetaLeadFormIds(item, formIds);
+	} else if (value && typeof value === "object") {
+		for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+			if (key === "lead_gen_form_id" && /^\d+$/.test(String(child))) {
+				formIds.add(String(child));
+			} else {
+				collectMetaLeadFormIds(child, formIds);
+			}
+		}
+	}
+	return formIds;
 }
 
 function metaDailyBudgetMinorUnits(amountAud: number) {
@@ -2080,6 +2158,116 @@ function createServer() {
 	);
 
 	server.registerTool(
+		"get_meta_lead_campaign_assets",
+		{
+			description:
+				"List owned Facebook Pages, active Instant Forms, account videos and existing creatives for a paused Meta lead campaign. Read-only; optional search filters video and creative names.",
+			inputSchema: z.object({
+				page_id: z.string().regex(/^\d+$/).optional(),
+				search: z.string().trim().max(100).optional(),
+				form_limit: z.number().int().min(1).max(100).default(100),
+				media_limit: z.number().int().min(1).max(100).default(100),
+			}),
+		},
+		async ({ page_id, search, form_limit, media_limit }) => {
+			try {
+				const { adAccountId } = getMetaConfig();
+				const pages = await getOwnedMetaPages();
+				if (page_id && !pages.some((item: any) => String(item.id) === page_id)) {
+					throw new Error("Selected Facebook Page is not assigned to this ad account.");
+				}
+				const [forms, videos, creativeResult] = await Promise.all([
+					page_id ? getOwnedMetaLeadForms(page_id, form_limit) : Promise.resolve([]),
+					getOwnedMetaVideos(media_limit),
+					metaFetch(adAccountId + "/adcreatives", {
+						fields: "id,name,status,object_story_id,thumbnail_url,image_hash,video_id,call_to_action_type,object_story_spec",
+						limit: media_limit,
+					}),
+				]);
+				const query = search?.toLowerCase();
+				const matches = (item: any) =>
+					!query ||
+					[
+						String(item.title ?? ""),
+						String(item.name ?? ""),
+						String(item.description ?? ""),
+					]
+						.join(" ")
+						.toLowerCase()
+						.includes(query);
+				return toolResult({
+					account_id: adAccountId,
+					pages,
+					selected_page_id: page_id ?? null,
+					instant_forms: forms.filter((item: any) => item.status === "ACTIVE"),
+					videos: videos.filter(matches),
+					creatives: (creativeResult.data ?? []).filter(matches),
+					search: search ?? null,
+					note: "Meta's Marketing API does not reliably expose Media Library folder membership. Search matches asset titles, descriptions and creative names; existing creatives can be reused directly.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_meta_leads_campaign_paused",
+		{
+			description:
+				"Create one new Meta OUTCOME_LEADS campaign in PAUSED state. Cannot activate delivery.",
+			inputSchema: z.object({
+				name: z.string().trim().min(3).max(200),
+				budget_level: z.enum(["campaign", "adset"]),
+				daily_budget_aud: z.number().positive().max(500).optional(),
+				confirmation: z.literal(META_CREATE_CONFIRMATION),
+			}),
+		},
+		async ({ name, budget_level, daily_budget_aud }) => {
+			try {
+				if (budget_level === "campaign" && daily_budget_aud === undefined) {
+					throw new Error("A campaign-level daily budget is required.");
+				}
+				if (budget_level === "adset" && daily_budget_aud !== undefined) {
+					throw new Error("Do not provide a campaign budget when budget_level is adset.");
+				}
+				await refuseDuplicateMetaName("campaigns", name);
+				const { adAccountId } = getMetaConfig();
+				const params: Record<string, string | number> = {
+					name,
+					objective: "OUTCOME_LEADS",
+					buying_type: "AUCTION",
+					special_ad_categories: JSON.stringify([]),
+					status: "PAUSED",
+				};
+				if (daily_budget_aud !== undefined) {
+					params.daily_budget = metaDailyBudgetMinorUnits(daily_budget_aud);
+					params.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
+				}
+				const created = await metaPost(adAccountId + "/campaigns", params);
+				const verified = await metaFetch(created.id, {
+					fields: "id,name,account_id,status,effective_status,objective,daily_budget,lifetime_budget,bid_strategy,special_ad_categories",
+				});
+				if (verified.status !== "PAUSED" || verified.objective !== "OUTCOME_LEADS") {
+					throw new Error(
+						"Created campaign failed the PAUSED OUTCOME_LEADS verification.",
+					);
+				}
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					object_type: "campaign",
+					budget_level,
+					...verified,
+					daily_budget_aud: metaBudgetAmount(verified.daily_budget),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"create_meta_sales_campaign_paused",
 		{
 			description:
@@ -2123,6 +2311,127 @@ function createServer() {
 					budget_level,
 					...verified,
 					daily_budget_aud: metaBudgetAmount(verified.daily_budget),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_meta_instant_form_adset_paused",
+		{
+			description:
+				"Create one PAUSED ON_AD Instant-Form lead ad set under an owned PAUSED OUTCOME_LEADS campaign. Targeting is hard-limited to a Sydney radius of no more than 50 km; the selected active form is ownership-checked for subsequent creative creation.",
+			inputSchema: z.object({
+				campaign_id: z.string().regex(/^\d+$/),
+				name: z.string().trim().min(3).max(200),
+				page_id: z.string().regex(/^\d+$/),
+				lead_form_id: z.string().regex(/^\d+$/),
+				daily_budget_aud: z.number().positive().max(500).optional(),
+				sydney_radius_km: z.number().int().min(1).max(50).default(50),
+				age_min: z.number().int().min(18).max(65).default(35),
+				age_max: z.number().int().min(18).max(65).default(65),
+				genders: z
+					.array(z.union([z.literal(1), z.literal(2)]))
+					.max(2)
+					.optional(),
+				confirmation: z.literal(META_CREATE_CONFIRMATION),
+			}),
+		},
+		async ({
+			campaign_id,
+			name,
+			page_id,
+			lead_form_id,
+			daily_budget_aud,
+			sydney_radius_km,
+			age_min,
+			age_max,
+			genders,
+		}) => {
+			try {
+				if (age_max < age_min) throw new Error("age_max must be at least age_min.");
+				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
+				if (campaign.objective !== "OUTCOME_LEADS") {
+					throw new Error("Refusing creation: parent campaign is not OUTCOME_LEADS.");
+				}
+				if (campaign.status !== "PAUSED") {
+					throw new Error("Refusing creation: parent campaign must be PAUSED.");
+				}
+
+				const page = await assertOwnedMetaPage(page_id);
+				const form = await assertOwnedActiveMetaLeadForm(page_id, lead_form_id);
+				await refuseDuplicateMetaName("adsets", name);
+				const targeting: Record<string, unknown> = {
+					geo_locations: {
+						cities: [
+							{
+								key: "114925",
+								radius: sydney_radius_km,
+								distance_unit: "kilometer",
+							},
+						],
+						location_types: ["home", "recent"],
+					},
+					age_min,
+					age_max,
+					targeting_automation: {
+						advantage_audience: 1,
+						individual_setting: { age: 1, gender: 1, geo: 0 },
+					},
+				};
+				if (genders?.length) targeting.genders = genders;
+
+				const params: Record<string, string | number> = {
+					campaign_id,
+					name,
+					status: "PAUSED",
+					billing_event: "IMPRESSIONS",
+					optimization_goal: "QUALITY_LEAD",
+					destination_type: "ON_AD",
+					promoted_object: JSON.stringify({ page_id }),
+					targeting: JSON.stringify(targeting),
+					bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+				};
+
+				const campaignBudget = metaBudgetAmount(campaign.daily_budget);
+				if (campaignBudget === null) {
+					if (daily_budget_aud === undefined) {
+						throw new Error(
+							"An ad-set daily budget is required because the parent has no campaign budget.",
+						);
+					}
+					params.daily_budget = metaDailyBudgetMinorUnits(daily_budget_aud);
+				} else if (daily_budget_aud !== undefined) {
+					throw new Error(
+						"Do not provide an ad-set budget when the parent uses campaign-level budgeting.",
+					);
+				}
+
+				const { adAccountId } = getMetaConfig();
+				const created = await metaPost(adAccountId + "/adsets", params);
+				const verified = await metaFetch(created.id, {
+					fields: "id,name,account_id,campaign_id,status,effective_status,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,promoted_object,targeting",
+				});
+				if (
+					verified.status !== "PAUSED" ||
+					verified.destination_type !== "ON_AD" ||
+					verified.optimization_goal !== "QUALITY_LEAD"
+				) {
+					throw new Error(
+						"Created ad set failed PAUSED ON_AD QUALITY_LEAD verification.",
+					);
+				}
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					object_type: "adset",
+					...verified,
+					daily_budget_aud: metaBudgetAmount(verified.daily_budget),
+					validated_page: page,
+					validated_instant_form: form,
+					note: "Meta associates the Instant Form with each ad creative, not the ad set. The form was ownership/status checked here and must be supplied again when creating the ad.",
 				});
 			} catch (error) {
 				return toolError(error);
@@ -2237,24 +2546,175 @@ function createServer() {
 	);
 
 	server.registerTool(
+		"create_meta_instant_form_video_ad_paused",
+		{
+			description:
+				"Create a new owned video creative linked to an active Instant Form, then create one PAUSED ad under an owned PAUSED ON_AD lead ad set. Cannot activate delivery.",
+			inputSchema: z.object({
+				adset_id: z.string().regex(/^\d+$/),
+				page_id: z.string().regex(/^\d+$/),
+				lead_form_id: z.string().regex(/^\d+$/),
+				video_id: z.string().regex(/^\d+$/),
+				name: z.string().trim().min(3).max(200),
+				primary_text: z.string().trim().min(1).max(5000),
+				headline: z.string().trim().min(1).max(255),
+				description: z.string().trim().max(255).optional(),
+				cta_type: z
+					.enum(["GET_QUOTE", "LEARN_MORE", "SIGN_UP", "APPLY_NOW"])
+					.default("GET_QUOTE"),
+				confirmation: z.literal(META_CREATE_CONFIRMATION),
+			}),
+		},
+		async ({
+			adset_id,
+			page_id,
+			lead_form_id,
+			video_id,
+			name,
+			primary_text,
+			headline,
+			description,
+			cta_type,
+		}) => {
+			try {
+				await assertMetaObjectOwnership(adset_id, "adset");
+				const adset = await metaFetch(adset_id, {
+					fields: "id,name,account_id,campaign_id,status,effective_status,optimization_goal,destination_type,promoted_object",
+				});
+				if (adset.status !== "PAUSED") {
+					throw new Error("Refusing creation: parent ad set must be PAUSED.");
+				}
+				if (
+					adset.destination_type !== "ON_AD" ||
+					adset.optimization_goal !== "QUALITY_LEAD"
+				) {
+					throw new Error(
+						"Refusing creation: parent ad set must be ON_AD and optimized for QUALITY_LEAD.",
+					);
+				}
+				if (String(adset.promoted_object?.page_id) !== page_id) {
+					throw new Error("Refusing creation: selected Page does not match the ad set.");
+				}
+				const campaign = await assertMetaObjectOwnership(
+					String(adset.campaign_id),
+					"campaign",
+				);
+				if (campaign.status !== "PAUSED" || campaign.objective !== "OUTCOME_LEADS") {
+					throw new Error(
+						"Refusing creation: parent campaign must be a PAUSED OUTCOME_LEADS campaign.",
+					);
+				}
+
+				const [page, form, video] = await Promise.all([
+					assertOwnedMetaPage(page_id),
+					assertOwnedActiveMetaLeadForm(page_id, lead_form_id),
+					assertOwnedMetaVideo(video_id),
+				]);
+				await Promise.all([
+					refuseDuplicateMetaName("ads", name),
+					refuseDuplicateMetaName("adcreatives", name + " | Creative"),
+				]);
+
+				const videoData: Record<string, unknown> = {
+					video_id,
+					message: primary_text,
+					title: headline,
+					call_to_action: {
+						type: cta_type,
+						value: { lead_gen_form_id: lead_form_id },
+					},
+				};
+				if (description) videoData.link_description = description;
+
+				const { adAccountId } = getMetaConfig();
+				const createdCreative = await metaPost(adAccountId + "/adcreatives", {
+					name: name + " | Creative",
+					object_story_spec: JSON.stringify({
+						page_id,
+						video_data: videoData,
+					}),
+				});
+				let createdAd: any;
+				try {
+					createdAd = await metaPost(adAccountId + "/ads", {
+						name,
+						adset_id,
+						creative: JSON.stringify({ creative_id: createdCreative.id }),
+						status: "PAUSED",
+					});
+				} catch (error) {
+					if (error instanceof Error) {
+						error.message =
+							"Creative " +
+							createdCreative.id +
+							" was created, but PAUSED ad creation failed: " +
+							error.message;
+						throw error;
+					}
+					throw error;
+				}
+
+				const verified = await metaFetch(createdAd.id, {
+					fields: "id,name,account_id,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url,object_story_spec}",
+				});
+				if (verified.status !== "PAUSED") {
+					throw new Error("Created ad failed PAUSED verification.");
+				}
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					object_type: "ad",
+					...verified,
+					validated_page: page,
+					validated_instant_form: form,
+					validated_video: video,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"create_meta_ad_from_existing_creative_paused",
 		{
 			description:
-				"Create one PAUSED Meta ad using an existing owned creative under an owned PAUSED ad set.",
+				"Create one PAUSED Meta ad using an existing owned creative under an owned PAUSED ad set. For Instant-Form ads, expected_lead_form_id verifies the creative is linked to the intended owned active form.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				creative_id: z.string().regex(/^\d+$/),
+				expected_lead_form_id: z.string().regex(/^\d+$/).optional(),
 				name: z.string().trim().min(3).max(200),
 				confirmation: z.literal(META_CREATE_CONFIRMATION),
 			}),
 		},
-		async ({ adset_id, creative_id, name }) => {
+		async ({ adset_id, creative_id, expected_lead_form_id, name }) => {
 			try {
 				const adset = await assertMetaObjectOwnership(adset_id, "adset");
 				if (adset.status !== "PAUSED") {
 					throw new Error("Refusing creation: parent ad set must be PAUSED.");
 				}
 				await assertMetaObjectOwnership(creative_id, "creative");
+				if (expected_lead_form_id) {
+					const adsetDetails = await metaFetch(adset_id, {
+						fields: "id,campaign_id,destination_type,promoted_object",
+					});
+					if (adsetDetails.destination_type !== "ON_AD") {
+						throw new Error(
+							"Refusing creation: expected_lead_form_id can only be used with an ON_AD ad set.",
+						);
+					}
+					const pageId = String(adsetDetails.promoted_object?.page_id ?? "");
+					await assertOwnedActiveMetaLeadForm(pageId, expected_lead_form_id);
+					const creative = await metaFetch(creative_id, {
+						fields: "id,name,account_id,status,object_story_spec,asset_feed_spec",
+					});
+					if (!collectMetaLeadFormIds(creative).has(expected_lead_form_id)) {
+						throw new Error(
+							"Refusing creation: existing creative is not linked to the expected Instant Form.",
+						);
+					}
+				}
 				await refuseDuplicateMetaName("ads", name);
 				const { adAccountId } = getMetaConfig();
 				const created = await metaPost(adAccountId + "/ads", {
@@ -2296,7 +2756,7 @@ function createServer() {
 						limit: 100,
 					}),
 					metaFetch(campaign_id + "/ads", {
-						fields: "id,name,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url}",
+						fields: "id,name,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url,object_story_spec}",
 						limit: 100,
 					}),
 				]);
