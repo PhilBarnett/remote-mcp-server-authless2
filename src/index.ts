@@ -1359,8 +1359,6 @@ async function getZipGripAssetState() {
 			campaign_asset.asset, campaign_asset.field_type, campaign_asset.status,
 			campaign_asset.source, campaign_asset.primary_status,
 			campaign_asset.primary_status_reasons,
-			campaign_asset.policy_summary.approval_status,
-			campaign_asset.policy_summary.review_status,
 			asset.id, asset.resource_name, asset.name, asset.type,
 			asset.text_asset.text, asset.image_asset.full_size.url,
 			asset.image_asset.full_size.width_pixels,
