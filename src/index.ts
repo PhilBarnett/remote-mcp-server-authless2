@@ -41,6 +41,20 @@ async function wcFetch(path: string, params: Record<string, string | number | un
 	return response;
 }
 
+async function wpFetch(path: string) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const url = new URL(`${workerEnv.WC_SITE}/wp-json/wp/v2/${path}`);
+	const response = await fetch(url.toString(), {
+		headers: { Accept: "application/json" },
+	});
+
+	if (!response.ok) {
+		throw new Error(`WordPress request failed: ${response.status} ${await response.text()}`);
+	}
+
+	return response;
+}
+
 function getMetaConfig() {
 	const workerEnv = env as unknown as Record<string, string | undefined>;
 	const accessToken = workerEnv.META_ACCESS_TOKEN;
@@ -769,6 +783,92 @@ function createServer() {
 				}));
 
 				return toolResult(safeProducts);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+
+	server.registerTool(
+		"get_product_images",
+		{
+			description:
+				"Audit Blindmotion WooCommerce featured and gallery images with read-only WordPress attachment metadata, including original dimensions and aspect ratio.",
+			inputSchema: z.object({
+				product_id: z.number().int().positive().optional(),
+				search: z.string().optional(),
+				status: z.string().optional(),
+				category_id: z.number().int().optional(),
+				limit: z.number().int().min(1).max(100).default(100),
+			}),
+		},
+		async ({ product_id, search, status, category_id, limit }) => {
+			try {
+				const response = product_id
+					? await wcFetch(`products/${product_id}`)
+					: await wcFetch("products", {
+							search,
+							status,
+							category: category_id,
+							per_page: limit,
+							orderby: "title",
+							order: "asc",
+						});
+				const payload = await response.json<any>();
+				const products = Array.isArray(payload) ? payload : [payload];
+
+				const results = await Promise.all(
+					products.map(async (product: any) => {
+						const images = await Promise.all(
+							(product.images ?? []).map(async (image: any, index: number) => {
+								try {
+									const mediaResponse = await wpFetch(`media/${image.id}`);
+									const media = await mediaResponse.json<any>();
+									const width = Number(media.media_details?.width ?? 0) || null;
+									const height = Number(media.media_details?.height ?? 0) || null;
+									return {
+										role: index === 0 ? "featured" : "gallery",
+										position: index,
+										attachment_id: image.id,
+										name: image.name,
+										alt: image.alt,
+										filename: media.media_details?.file?.split("/").pop() ?? null,
+										source_url: media.source_url ?? image.src,
+										mime_type: media.mime_type ?? null,
+										width,
+										height,
+										aspect_ratio:
+											width && height ? Number((width / height).toFixed(4)) : null,
+										is_square: width && height ? width === height : null,
+										file_size_bytes: media.media_details?.filesize ?? null,
+									};
+								} catch (error) {
+									return {
+										role: index === 0 ? "featured" : "gallery",
+										position: index,
+										attachment_id: image.id,
+										name: image.name,
+										alt: image.alt,
+										source_url: image.src,
+										metadata_error: error instanceof Error ? error.message : String(error),
+									};
+								}
+							}),
+						);
+
+						return {
+							product_id: product.id,
+							name: product.name,
+							slug: product.slug,
+							status: product.status,
+							image_count: images.length,
+							images,
+						};
+					}),
+				);
+
+				return toolResult(results);
 			} catch (error) {
 				return toolError(error);
 			}
