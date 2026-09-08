@@ -67,6 +67,8 @@ const IMAGE_KEY_PATTERN =
 	/(?:^|[_\-.])(image|images|img|photo|picture|thumbnail|thumb|icon|swatch|media|upload)(?:$|[_\-.])/i;
 const NON_IMAGE_VALUE_KEY_PATTERN =
 	/(?:^|[_\-.])(title|desc|description|label|text|name|caption|alt|width|height|size|price|percent|percentage)(?:$|[_\-.])/i;
+const IMAGE_DISPLAY_FLAG_KEY_PATTERN =
+	/(?:^|[_\-.])(large|show|enable|enabled|display|use)_images?(?:$|[_\-.])/i;
 const IMAGE_URL_PATTERN =
 	/https?:\\?\/\\?\/[^\s"'<>]+?\.(?:avif|gif|jpe?g|png|webp|svg)(?:\?[^\s"'<>]*)?/gi;
 const SERIALIZED_IMAGE_ID_PATTERN =
@@ -77,17 +79,32 @@ function normaliseImageUrl(value: string) {
 }
 
 function isImageValuePath(path: string) {
-	return IMAGE_KEY_PATTERN.test(path) && !NON_IMAGE_VALUE_KEY_PATTERN.test(path);
+	return (
+		IMAGE_KEY_PATTERN.test(path) &&
+		!NON_IMAGE_VALUE_KEY_PATTERN.test(path) &&
+		!IMAGE_DISPLAY_FLAG_KEY_PATTERN.test(path)
+	);
 }
 
 function collectProductImageReferences(metaData: any[] | undefined) {
 	const references: ProductImageReference[] = [];
 	const seen = new Set<string>();
+	const referenceByPath = new Map<string, ProductImageReference>();
 
 	function addReference(reference: ProductImageReference) {
+		const existing = referenceByPath.get(reference.custom_field_path);
+		if (existing) {
+			// Product-option plugins commonly repeat a choice as both an attachment ID
+			// and a thumbnail URL. Keep one reference and prefer the resolvable ID.
+			existing.attachment_id ??= reference.attachment_id;
+			existing.source_url ??= reference.source_url;
+			return;
+		}
+
 		const identity = `${reference.custom_field_path}|${reference.attachment_id ?? ""}|${reference.source_url ?? ""}`;
 		if (!seen.has(identity)) {
 			seen.add(identity);
+			referenceByPath.set(reference.custom_field_path, reference);
 			references.push(reference);
 		}
 	}
