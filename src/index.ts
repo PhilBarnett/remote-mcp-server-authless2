@@ -1124,7 +1124,7 @@ function zipGripPmaxPlan(dailyBudgetAud: number) {
 	const budgetResource = `customers/${customerId}/campaignBudgets/-1`;
 	const campaignResource = `customers/${customerId}/campaigns/-2`;
 	const assetGroupResource = `customers/${customerId}/assetGroups/-3`;
-	const rootFilterResource = `customers/${customerId}/assetGroupListingGroupFilters/-4`;
+	const rootFilterResource = `customers/${customerId}/assetGroupListingGroupFilters/-3~-4`;
 
 	const mutateOperations = [
 		{
@@ -1206,7 +1206,7 @@ function zipGripPmaxPlan(dailyBudgetAud: number) {
 		{
 			assetGroupListingGroupFilterOperation: {
 				create: {
-					resourceName: `customers/${customerId}/assetGroupListingGroupFilters/-5`,
+					resourceName: `customers/${customerId}/assetGroupListingGroupFilters/-3~-5`,
 					assetGroup: assetGroupResource,
 					parentListingGroupFilter: rootFilterResource,
 					type: "UNIT_INCLUDED",
@@ -1218,7 +1218,7 @@ function zipGripPmaxPlan(dailyBudgetAud: number) {
 		{
 			assetGroupListingGroupFilterOperation: {
 				create: {
-					resourceName: `customers/${customerId}/assetGroupListingGroupFilters/-6`,
+					resourceName: `customers/${customerId}/assetGroupListingGroupFilters/-3~-6`,
 					assetGroup: assetGroupResource,
 					parentListingGroupFilter: rootFilterResource,
 					type: "UNIT_EXCLUDED",
