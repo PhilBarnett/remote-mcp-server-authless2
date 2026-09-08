@@ -1039,7 +1039,7 @@ async function googleAdsSearch(query: string) {
 					"Content-Type": "application/json",
 					Accept: "application/json",
 				},
-				body: JSON.stringify({ query, pageToken, pageSize: 1000 }),
+				body: JSON.stringify({ query, pageToken }),
 			},
 		);
 
