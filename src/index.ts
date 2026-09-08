@@ -1592,10 +1592,10 @@ function createServer() {
 			description:
 				"Install or update only the isolated blindmotion-visualizer WordPress plugin through the locked Blindmotion WordPress bridge. Validates a ZIP signature, exact SHA-256 digest, semantic version, fixed slug/main file and expected installed version; cannot write another plugin.",
 			inputSchema: z.object({
-				target_version: z.string().regex(/^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$/),
+				target_version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/),
 				expected_current_version: z
 					.string()
-					.regex(/^(?:NONE|\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?)$/),
+					.regex(/^(?:NONE|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/),
 				archive_sha256: z.string().regex(/^[a-f0-9]{64}$/),
 				plugin_zip_base64: z.string().min(100).max(8_000_000),
 				confirmation: z.literal(VISUALIZER_PLUGIN_CONFIRMATION),
