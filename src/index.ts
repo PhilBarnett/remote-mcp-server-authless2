@@ -1488,9 +1488,10 @@ function createServer() {
 					custom_field_path: z.string().min(1),
 					expected_attachment_id: z.number().int().positive().optional(),
 					expected_source_url: z.string().url().optional(),
-					replacement_filename: z.string().regex(/^[A-Za-z0-9._-]+$/),
-					replacement_mime_type: z.enum(["image/jpeg", "image/png", "image/webp"]),
-					replacement_base64: z.string().min(4).max(8_000_000),
+					replacement_attachment_id: z.number().int().positive().optional(),
+					replacement_filename: z.string().regex(/^[A-Za-z0-9._-]+$/).optional(),
+					replacement_mime_type: z.enum(["image/jpeg", "image/png", "image/webp"]).optional(),
+					replacement_base64: z.string().min(4).max(8_000_000).optional(),
 					confirmation: z.literal("CONFIRM REPLACE PRODUCT OPTION IMAGE"),
 				})
 				.refine(
@@ -1498,6 +1499,20 @@ function createServer() {
 						value.expected_attachment_id !== undefined ||
 						value.expected_source_url !== undefined,
 					{ message: "An expected current attachment ID or URL is required." },
+				)
+				.refine(
+					(value) => {
+						const reusingAttachment = value.replacement_attachment_id !== undefined;
+						const uploadSupplied =
+							value.replacement_filename !== undefined &&
+							value.replacement_mime_type !== undefined &&
+							value.replacement_base64 !== undefined;
+						return reusingAttachment !== uploadSupplied;
+					},
+					{
+						message:
+							"Provide either replacement_attachment_id or a complete filename/MIME/base64 upload payload.",
+					},
 				),
 		},
 		async ({
@@ -1507,6 +1522,7 @@ function createServer() {
 			custom_field_path,
 			expected_attachment_id,
 			expected_source_url,
+			replacement_attachment_id,
 			replacement_filename,
 			replacement_mime_type,
 			replacement_base64,
@@ -1523,9 +1539,21 @@ function createServer() {
 				const parsedValue = storedAsJson ? JSON.parse(meta.value) : structuredClone(meta.value);
 				const tokens = productMetaPathTokens(custom_field_key, custom_field_path);
 				const oldValue = getNestedValue(parsedValue, tokens);
+				const pairedAttachmentTokens =
+					tokens[tokens.length - 1] === "image"
+						? [...tokens.slice(0, -1), "attachment"]
+						: undefined;
+				const oldPairedAttachment = pairedAttachmentTokens
+					? getNestedValue(parsedValue, pairedAttachmentTokens)
+					: undefined;
+				const hasPairedAttachment =
+					pairedAttachmentTokens !== undefined &&
+					Number.isInteger(Number(oldPairedAttachment)) &&
+					Number(oldPairedAttachment) > 0;
 				const attachmentMatches =
 					expected_attachment_id === undefined ||
-					Number(oldValue) === expected_attachment_id;
+					Number(hasPairedAttachment ? oldPairedAttachment : oldValue) ===
+						expected_attachment_id;
 				const urlMatches =
 					expected_source_url === undefined ||
 					(typeof oldValue === "string" &&
@@ -1546,18 +1574,31 @@ function createServer() {
 					throw new Error("The selected path is not a supported scalar image reference.");
 				}
 
-				const bytes = decodeBase64(replacement_base64);
-				if (!bytes.length || bytes.length > 6_000_000) {
-					throw new Error("Replacement image must decode to between 1 byte and 6 MB.");
+				let uploaded: any;
+				if (replacement_attachment_id !== undefined) {
+					const mediaResponse = await wpFetch(`media/${replacement_attachment_id}`);
+					uploaded = await mediaResponse.json<any>();
+					if (
+						!uploaded?.id ||
+						typeof uploaded.source_url !== "string" ||
+						!/^image\/(jpeg|png|webp)$/i.test(uploaded.mime_type ?? "")
+					) {
+						throw new Error("The replacement attachment is not a supported WordPress image.");
+					}
+				} else {
+					const bytes = decodeBase64(replacement_base64!);
+					if (!bytes.length || bytes.length > 6_000_000) {
+						throw new Error("Replacement image must decode to between 1 byte and 6 MB.");
+					}
+					if (!hasExpectedImageSignature(bytes, replacement_mime_type!)) {
+						throw new Error("Replacement bytes do not match the declared image MIME type.");
+					}
+					uploaded = await wpUploadMedia(
+						replacement_filename!,
+						replacement_mime_type!,
+						bytes,
+					);
 				}
-				if (!hasExpectedImageSignature(bytes, replacement_mime_type)) {
-					throw new Error("Replacement bytes do not match the declared image MIME type.");
-				}
-				const uploaded = await wpUploadMedia(
-					replacement_filename,
-					replacement_mime_type,
-					bytes,
-				);
 				const newValue =
 					typeof oldValue === "number"
 						? uploaded.id
@@ -1565,6 +1606,9 @@ function createServer() {
 							? String(uploaded.id)
 							: uploaded.source_url;
 				setNestedValue(parsedValue, tokens, newValue);
+				if (hasPairedAttachment && pairedAttachmentTokens) {
+					setNestedValue(parsedValue, pairedAttachmentTokens, uploaded.id);
+				}
 
 				const backupKey = "_blindmotion_mcp_image_replacement_backups";
 				const backupMeta = (product.meta_data ?? []).find(
@@ -1579,6 +1623,9 @@ function createServer() {
 					custom_field_key,
 					custom_field_path,
 					old_value: oldValue,
+					old_attachment_id: hasPairedAttachment
+						? Number(oldPairedAttachment)
+						: undefined,
 					new_attachment_id: uploaded.id,
 					new_source_url: uploaded.source_url,
 				};
@@ -1607,6 +1654,15 @@ function createServer() {
 				if (getNestedValue(updatedParsed, tokens) !== newValue) {
 					throw new Error("WooCommerce returned without verifying the new image reference.");
 				}
+				if (
+					hasPairedAttachment &&
+					pairedAttachmentTokens &&
+					Number(getNestedValue(updatedParsed, pairedAttachmentTokens)) !== uploaded.id
+				) {
+					throw new Error(
+						"WooCommerce returned without verifying the paired WAPF attachment ID.",
+					);
+				}
 
 				return toolResult({
 					replaced: true,
@@ -1617,6 +1673,7 @@ function createServer() {
 					old_value: oldValue,
 					new_value: newValue,
 					new_attachment: mediaMetadata(uploaded),
+					paired_attachment_updated: hasPairedAttachment,
 					backup,
 					original_attachment_deleted: false,
 				});
