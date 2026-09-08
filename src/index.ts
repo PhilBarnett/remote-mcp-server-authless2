@@ -922,6 +922,167 @@ async function ga4RunReport(request: Ga4ReportRequest) {
 	return response.json<any>();
 }
 
+type GoogleAdsConfig = {
+	developerToken: string;
+	loginCustomerId: string;
+	customerId: string;
+	serviceAccount: Ga4ServiceAccount;
+};
+
+let googleAdsAccessTokenCache: { token: string; expiresAt: number } | undefined;
+
+function getGoogleAdsConfig(): GoogleAdsConfig {
+	const workerEnv = env as unknown as Record<string, string | undefined>;
+	const developerToken = workerEnv.GOOGLE_ADS_DEVELOPER_TOKEN;
+	const loginCustomerId = workerEnv.GOOGLE_ADS_LOGIN_CUSTOMER_ID?.replace(/-/g, "");
+	const customerId = workerEnv.GOOGLE_ADS_CUSTOMER_ID?.replace(/-/g, "");
+	const serviceAccountJson = workerEnv.GOOGLE_ADS_SERVICE_ACCOUNT_JSON;
+
+	if (!developerToken || !loginCustomerId || !customerId || !serviceAccountJson) {
+		throw new Error(
+			"Google Ads is not configured. Set GOOGLE_ADS_DEVELOPER_TOKEN, GOOGLE_ADS_LOGIN_CUSTOMER_ID, GOOGLE_ADS_CUSTOMER_ID and GOOGLE_ADS_SERVICE_ACCOUNT_JSON in Cloudflare.",
+		);
+	}
+	if (!/^\d{10}$/.test(loginCustomerId) || !/^\d{10}$/.test(customerId)) {
+		throw new Error("Google Ads customer IDs must contain exactly 10 digits.");
+	}
+
+	let serviceAccount: Ga4ServiceAccount;
+	try {
+		serviceAccount = JSON.parse(serviceAccountJson) as Ga4ServiceAccount;
+	} catch {
+		throw new Error("GOOGLE_ADS_SERVICE_ACCOUNT_JSON is not valid JSON.");
+	}
+	if (!serviceAccount.client_email || !serviceAccount.private_key) {
+		throw new Error("GOOGLE_ADS_SERVICE_ACCOUNT_JSON is missing client_email or private_key.");
+	}
+
+	return { developerToken, loginCustomerId, customerId, serviceAccount };
+}
+
+async function getGoogleAdsAccessToken() {
+	if (googleAdsAccessTokenCache && googleAdsAccessTokenCache.expiresAt > Date.now() + 60_000) {
+		return googleAdsAccessTokenCache.token;
+	}
+
+	const { serviceAccount } = getGoogleAdsConfig();
+	const now = Math.floor(Date.now() / 1000);
+	const tokenUri = serviceAccount.token_uri ?? "https://oauth2.googleapis.com/token";
+	const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+	const claims = base64UrlEncode(
+		JSON.stringify({
+			iss: serviceAccount.client_email,
+			scope: "https://www.googleapis.com/auth/adwords",
+			aud: tokenUri,
+			iat: now,
+			exp: now + 3600,
+		}),
+	);
+	const unsignedToken = `${header}.${claims}`;
+	const key = await crypto.subtle.importKey(
+		"pkcs8",
+		pemToArrayBuffer(serviceAccount.private_key),
+		{ name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+		false,
+		["sign"],
+	);
+	const signature = await crypto.subtle.sign(
+		"RSASSA-PKCS1-v1_5",
+		key,
+		new TextEncoder().encode(unsignedToken),
+	);
+	const assertion = `${unsignedToken}.${base64UrlEncode(signature)}`;
+	const response = await fetch(tokenUri, {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body: new URLSearchParams({
+			grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+			assertion,
+		}),
+	});
+
+	if (!response.ok) {
+		throw new Error(
+			`Google Ads OAuth request failed: ${response.status} ${await response.text()}`,
+		);
+	}
+
+	const tokenResponse = await response.json<{ access_token: string; expires_in?: number }>();
+	googleAdsAccessTokenCache = {
+		token: tokenResponse.access_token,
+		expiresAt: Date.now() + (tokenResponse.expires_in ?? 3600) * 1000,
+	};
+	return tokenResponse.access_token;
+}
+
+function assertGoogleAdsDate(value: string, name: string) {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+		throw new Error(`${name} must use YYYY-MM-DD format.`);
+	}
+}
+
+async function googleAdsSearch(query: string) {
+	const { developerToken, loginCustomerId, customerId } = getGoogleAdsConfig();
+	const accessToken = await getGoogleAdsAccessToken();
+	const results: any[] = [];
+	let pageToken: string | undefined;
+
+	do {
+		const response = await fetch(
+			`https://googleads.googleapis.com/v25/customers/${customerId}/googleAds:search`,
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${accessToken}`,
+					"developer-token": developerToken,
+					"login-customer-id": loginCustomerId,
+					"Content-Type": "application/json",
+					Accept: "application/json",
+				},
+				body: JSON.stringify({ query, pageToken, pageSize: 1000 }),
+			},
+		);
+
+		if (!response.ok) {
+			throw new Error(
+				`Google Ads API request failed: ${response.status} ${await response.text()}`,
+			);
+		}
+
+		const page = await response.json<{ results?: any[]; nextPageToken?: string }>();
+		results.push(...(page.results ?? []));
+		pageToken = page.nextPageToken;
+	} while (pageToken && results.length < 10_000);
+
+	return results;
+}
+
+function googleAdsMetrics(metrics: any = {}) {
+	const cost = Number(metrics.costMicros ?? 0) / 1_000_000;
+	const conversions = Number(metrics.conversions ?? 0);
+	const conversionValue = Number(metrics.conversionsValue ?? 0);
+	return {
+		impressions: Number(metrics.impressions ?? 0),
+		clicks: Number(metrics.clicks ?? 0),
+		cost_aud: cost,
+		ctr: Number(metrics.ctr ?? 0),
+		average_cpc_aud: Number(metrics.averageCpc ?? 0) / 1_000_000,
+		conversions,
+		conversion_value: conversionValue,
+		all_conversions: Number(metrics.allConversions ?? 0),
+		all_conversion_value: Number(metrics.allConversionsValue ?? 0),
+		cost_per_conversion_aud: conversions > 0 ? cost / conversions : null,
+		reported_roas: cost > 0 ? conversionValue / cost : null,
+	};
+}
+
+function normalizeGoogleAdsRows(rows: any[]) {
+	return rows.map((row) => ({
+		...row,
+		...(row.metrics ? { metrics: googleAdsMetrics(row.metrics) } : {}),
+	}));
+}
+
 function ga4ReportResult(report: any, startDate: string, endDate: string) {
 	const dimensionNames = (report.dimensionHeaders ?? []).map((header: any) => header.name);
 	const metricNames = (report.metricHeaders ?? []).map((header: any) => header.name);
@@ -3809,6 +3970,248 @@ function createServer() {
 						(ads.data ?? []).length > 0,
 					activation_tool_available: false,
 				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	/* Read-only Google Ads reporting tools */
+
+	const googleAdsDateSchema = {
+		start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+		end_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+	};
+	const googleAdsMetricFields =
+		"metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.ctr, metrics.average_cpc, metrics.conversions, metrics.conversions_value, metrics.all_conversions, metrics.all_conversions_value";
+
+	server.registerTool(
+		"get_google_ads_account",
+		{
+			description:
+				"Confirm read-only access to the configured Blindmotion Google Ads production account and return non-sensitive account metadata.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const { customerId, loginCustomerId, serviceAccount } = getGoogleAdsConfig();
+				const rows = await googleAdsSearch(`
+					SELECT customer.id, customer.descriptive_name, customer.currency_code,
+						customer.time_zone, customer.manager, customer.test_account,
+						customer.auto_tagging_enabled
+					FROM customer LIMIT 1
+				`);
+				return toolResult({
+					access_confirmed: true,
+					manager_customer_id: loginCustomerId,
+					customer_id: customerId,
+					service_account: serviceAccount.client_email,
+					account: rows[0]?.customer ?? null,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_google_ads_summary",
+		{
+			description:
+				"Summarise Blindmotion Google Ads impressions, clicks, spend, conversions, conversion value and reported ROAS for a date range.",
+			inputSchema: z.object(googleAdsDateSchema),
+		},
+		async ({ start_date, end_date }) => {
+			try {
+				assertGoogleAdsDate(start_date, "start_date");
+				assertGoogleAdsDate(end_date, "end_date");
+				const rows = await googleAdsSearch(`
+					SELECT customer.id, ${googleAdsMetricFields}
+					FROM customer
+					WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
+				`);
+				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	const registerGoogleAdsPerformanceTool = (
+		name: string,
+		resource: "campaign" | "ad_group" | "ad_group_ad",
+		identityFields: string,
+		description: string,
+	) => {
+		server.registerTool(
+			name,
+			{
+				description,
+				inputSchema: z.object({
+					...googleAdsDateSchema,
+					limit: z.number().int().min(1).max(1000).default(100),
+				}),
+			},
+			async ({ start_date, end_date, limit }) => {
+				try {
+					assertGoogleAdsDate(start_date, "start_date");
+					assertGoogleAdsDate(end_date, "end_date");
+					const rows = await googleAdsSearch(`
+						SELECT ${identityFields}, ${googleAdsMetricFields}
+						FROM ${resource}
+						WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
+						ORDER BY metrics.cost_micros DESC
+						LIMIT ${limit}
+					`);
+					return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
+				} catch (error) {
+					return toolError(error);
+				}
+			},
+		);
+	};
+
+	registerGoogleAdsPerformanceTool(
+		"get_google_ads_campaign_performance",
+		"campaign",
+		"campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type",
+		"Return read-only Blindmotion Google Ads campaign performance for a date range.",
+	);
+	registerGoogleAdsPerformanceTool(
+		"get_google_ads_ad_group_performance",
+		"ad_group",
+		"campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group.status, ad_group.type",
+		"Return read-only Blindmotion Google Ads ad-group performance for a date range.",
+	);
+	registerGoogleAdsPerformanceTool(
+		"get_google_ads_ad_performance",
+		"ad_group_ad",
+		"campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.type, ad_group_ad.status",
+		"Return read-only Blindmotion Google Ads individual-ad performance for a date range.",
+	);
+
+	server.registerTool(
+		"get_google_ads_keyword_performance",
+		{
+			description:
+				"Return read-only Google Ads keyword performance including keyword text and match type for a date range.",
+			inputSchema: z.object({
+				...googleAdsDateSchema,
+				limit: z.number().int().min(1).max(1000).default(250),
+			}),
+		},
+		async ({ start_date, end_date, limit }) => {
+			try {
+				const rows = await googleAdsSearch(`
+					SELECT campaign.id, campaign.name, ad_group.id, ad_group.name,
+						ad_group_criterion.criterion_id, ad_group_criterion.status,
+						ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+						${googleAdsMetricFields}
+					FROM keyword_view
+					WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
+					ORDER BY metrics.cost_micros DESC LIMIT ${limit}
+				`);
+				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_google_ads_search_terms",
+		{
+			description:
+				"Return actual Google search terms that triggered Blindmotion ads, with performance metrics, for a date range.",
+			inputSchema: z.object({
+				...googleAdsDateSchema,
+				limit: z.number().int().min(1).max(1000).default(250),
+			}),
+		},
+		async ({ start_date, end_date, limit }) => {
+			try {
+				const rows = await googleAdsSearch(`
+					SELECT campaign.id, campaign.name, ad_group.id, ad_group.name,
+						search_term_view.search_term, search_term_view.status,
+						${googleAdsMetricFields}
+					FROM search_term_view
+					WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
+					ORDER BY metrics.cost_micros DESC LIMIT ${limit}
+				`);
+				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_google_ads_conversion_performance",
+		{
+			description:
+				"Return Google Ads conversions and conversion value grouped by conversion action for a date range.",
+			inputSchema: z.object(googleAdsDateSchema),
+		},
+		async ({ start_date, end_date }) => {
+			try {
+				const rows = await googleAdsSearch(`
+					SELECT segments.conversion_action_name, segments.conversion_action_category,
+						metrics.conversions, metrics.conversions_value,
+						metrics.all_conversions, metrics.all_conversions_value
+					FROM customer
+					WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
+					ORDER BY metrics.all_conversions DESC
+				`);
+				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_google_ads_product_performance",
+		{
+			description:
+				"Return read-only Shopping and Performance Max product performance by Merchant Center item for a date range.",
+			inputSchema: z.object({
+				...googleAdsDateSchema,
+				limit: z.number().int().min(1).max(1000).default(250),
+			}),
+		},
+		async ({ start_date, end_date, limit }) => {
+			try {
+				const rows = await googleAdsSearch(`
+					SELECT campaign.id, campaign.name, segments.product_item_id,
+						segments.product_title, segments.product_brand,
+						segments.product_type_l1, ${googleAdsMetricFields}
+					FROM shopping_performance_view
+					WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
+					ORDER BY metrics.cost_micros DESC LIMIT ${limit}
+				`);
+				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_google_ads_daily_performance",
+		{
+			description:
+				"Return daily Blindmotion Google Ads spend, traffic, conversions and conversion value for a date range.",
+			inputSchema: z.object(googleAdsDateSchema),
+		},
+		async ({ start_date, end_date }) => {
+			try {
+				const rows = await googleAdsSearch(`
+					SELECT segments.date, ${googleAdsMetricFields}
+					FROM customer
+					WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
+					ORDER BY segments.date ASC
+				`);
+				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
 			} catch (error) {
 				return toolError(error);
 			}
