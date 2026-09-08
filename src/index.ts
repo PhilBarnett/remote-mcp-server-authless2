@@ -966,6 +966,59 @@ function createServer() {
 			try {
 				const mediaById = new Map<number, Promise<any>>();
 				const mediaByUrl = new Map<string, Promise<any | null>>();
+				let mediaCatalogPromise: Promise<Map<string, any>> | undefined;
+
+				const preloadMediaByIds = async (attachmentIds: number[]) => {
+					const missingIds = [...new Set(attachmentIds)].filter(
+						(attachmentId) => !mediaById.has(attachmentId),
+					);
+					for (let index = 0; index < missingIds.length; index += 100) {
+						const batch = missingIds.slice(index, index + 100);
+						const response = await wpFetch(
+							`media?include=${batch.join(",")}&per_page=100`,
+						);
+						const mediaItems = await response.json<any[]>();
+						for (const media of mediaItems) {
+							mediaById.set(media.id, Promise.resolve(media));
+						}
+					}
+				};
+
+				const getMediaCatalog = () => {
+					if (!mediaCatalogPromise) {
+						mediaCatalogPromise = (async () => {
+							const firstResponse = await wpFetch("media?per_page=100&page=1");
+							const firstPage = await firstResponse.json<any[]>();
+							const reportedPages = Number(
+								firstResponse.headers.get("X-WP-TotalPages") ?? 1,
+							);
+							// Keep the catalogue scan safely below Cloudflare's subrequest ceiling.
+							const totalPages = Math.min(Math.max(reportedPages, 1), 40);
+							const mediaItems = [...firstPage];
+							for (let page = 2; page <= totalPages; page += 5) {
+								const pageNumbers = Array.from(
+									{ length: Math.min(5, totalPages - page + 1) },
+									(_, offset) => page + offset,
+								);
+								const responses = await Promise.all(
+									pageNumbers.map((pageNumber) =>
+										wpFetch(`media?per_page=100&page=${pageNumber}`),
+									),
+								);
+								for (const response of responses) {
+									mediaItems.push(...(await response.json<any[]>()));
+								}
+							}
+							return new Map(
+								mediaItems.map((media) => [
+									mediaFilenameKey(media.source_url ?? ""),
+									media,
+								]),
+							);
+						})();
+					}
+					return mediaCatalogPromise;
+				};
 
 				const getMediaById = (attachmentId: number) => {
 					if (!mediaById.has(attachmentId)) {
@@ -985,21 +1038,8 @@ function createServer() {
 							sourceUrl,
 							(async () => {
 								const filename = mediaFilenameKey(sourceUrl);
-								const searchTerm = filename
-									.replace(/\.[^.]+$/, "")
-									.replace(/[-_]+/g, " ");
-								if (!filename || !searchTerm) return null;
-								const response = await wpFetch(
-									`media?search=${encodeURIComponent(searchTerm)}&per_page=100`,
-								);
-								const candidates = await response.json<any[]>();
-								return (
-									candidates.find(
-										(candidate) =>
-											mediaFilenameKey(candidate.source_url ?? "") ===
-											filename,
-									) ?? null
-								);
+								if (!filename) return null;
+								return (await getMediaCatalog()).get(filename) ?? null;
 							})(),
 						);
 					}
@@ -1018,6 +1058,17 @@ function createServer() {
 						});
 				const payload = await response.json<any>();
 				const products = Array.isArray(payload) ? payload : [payload];
+				const customReferencesByProduct = new Map<number, ProductImageReference[]>();
+				const attachmentIds: number[] = [];
+				for (const product of products) {
+					for (const image of product.images ?? []) attachmentIds.push(image.id);
+					const references = collectProductImageReferences(product.meta_data);
+					customReferencesByProduct.set(product.id, references);
+					for (const reference of references) {
+						if (reference.attachment_id) attachmentIds.push(reference.attachment_id);
+					}
+				}
+				await preloadMediaByIds(attachmentIds);
 
 				const results = await Promise.all(
 					products.map(async (product: any) => {
@@ -1046,9 +1097,8 @@ function createServer() {
 							}),
 						);
 
-						const customFieldReferences = collectProductImageReferences(
-							product.meta_data,
-						);
+						const customFieldReferences =
+							customReferencesByProduct.get(product.id) ?? [];
 						const customFieldImages = await Promise.all(
 							customFieldReferences.map(async (reference) => {
 								try {
