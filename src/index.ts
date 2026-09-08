@@ -55,6 +55,129 @@ async function wpFetch(path: string) {
 	return response;
 }
 
+type ProductImageReference = {
+	role: "custom_field";
+	custom_field_key: string;
+	custom_field_path: string;
+	attachment_id?: number;
+	source_url?: string;
+};
+
+const IMAGE_KEY_PATTERN =
+	/(?:^|[_\-.])(image|images|img|photo|picture|thumbnail|thumb|icon|swatch|media|upload)(?:$|[_\-.])/i;
+const IMAGE_URL_PATTERN =
+	/https?:\\?\/\\?\/[^\s"'<>]+?\.(?:avif|gif|jpe?g|png|webp|svg)(?:\?[^\s"'<>]*)?/gi;
+
+function normaliseImageUrl(value: string) {
+	return value.replace(/\\\//g, "/").replace(/&amp;/g, "&");
+}
+
+function collectProductImageReferences(metaData: any[] | undefined) {
+	const references: ProductImageReference[] = [];
+	const seen = new Set<string>();
+
+	function addReference(reference: ProductImageReference) {
+		const identity = `${reference.custom_field_path}|${reference.attachment_id ?? ""}|${reference.source_url ?? ""}`;
+		if (!seen.has(identity)) {
+			seen.add(identity);
+			references.push(reference);
+		}
+	}
+
+	function visit(value: unknown, customFieldKey: string, path: string) {
+		const imageContext = IMAGE_KEY_PATTERN.test(path);
+
+		if (typeof value === "number" && Number.isInteger(value) && value > 0 && imageContext) {
+			addReference({
+				role: "custom_field",
+				custom_field_key: customFieldKey,
+				custom_field_path: path,
+				attachment_id: value,
+			});
+			return;
+		}
+
+		if (typeof value === "string") {
+			for (const match of value.matchAll(IMAGE_URL_PATTERN)) {
+				addReference({
+					role: "custom_field",
+					custom_field_key: customFieldKey,
+					custom_field_path: path,
+					source_url: normaliseImageUrl(match[0]),
+				});
+			}
+
+			if (imageContext && /^\d+$/.test(value)) {
+				addReference({
+					role: "custom_field",
+					custom_field_key: customFieldKey,
+					custom_field_path: path,
+					attachment_id: Number(value),
+				});
+			}
+
+			if (imageContext) {
+				for (const match of value.matchAll(/(?:i:\d+;|s:\d+:\")?(\d{2,})(?:\";)?/g)) {
+					addReference({
+						role: "custom_field",
+						custom_field_key: customFieldKey,
+						custom_field_path: path,
+						attachment_id: Number(match[1]),
+					});
+				}
+			}
+			return;
+		}
+
+		if (Array.isArray(value)) {
+			value.forEach((item, index) => visit(item, customFieldKey, `${path}[${index}]`));
+			return;
+		}
+
+		if (value && typeof value === "object") {
+			for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+				visit(child, customFieldKey, `${path}.${key}`);
+			}
+		}
+	}
+
+	for (const meta of metaData ?? []) {
+		const key = String(meta?.key ?? "unknown");
+		visit(meta?.value, key, key);
+	}
+
+	return references;
+}
+
+function mediaMetadata(media: any, fallback: Record<string, unknown> = {}) {
+	const width = Number(media.media_details?.width ?? 0) || null;
+	const height = Number(media.media_details?.height ?? 0) || null;
+	return {
+		...fallback,
+		attachment_id: media.id ?? fallback.attachment_id ?? null,
+		name: media.slug ?? media.title?.rendered ?? null,
+		alt: media.alt_text ?? null,
+		filename: media.media_details?.file?.split("/").pop() ?? null,
+		source_url: media.source_url ?? fallback.source_url ?? null,
+		mime_type: media.mime_type ?? null,
+		width,
+		height,
+		aspect_ratio: width && height ? Number((width / height).toFixed(4)) : null,
+		is_square: width && height ? width === height : null,
+		file_size_bytes: media.media_details?.filesize ?? null,
+	};
+}
+
+function mediaFilenameKey(url: string) {
+	try {
+		return decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "")
+			.replace(/-\d+x\d+(?=\.[^.]+$)/, "")
+			.toLowerCase();
+	} catch {
+		return "";
+	}
+}
+
 function getMetaConfig() {
 	const workerEnv = env as unknown as Record<string, string | undefined>;
 	const accessToken = workerEnv.META_ACCESS_TOKEN;
@@ -216,7 +339,6 @@ function safeMetaBudgetObject(object: any, objectType: "campaign" | "adset") {
 	};
 }
 
-
 const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
 
@@ -236,16 +358,15 @@ async function assertMetaObjectOwnership(
 	const object = await metaFetch(objectId, { fields });
 	if (String(object.account_id) !== configuredAccountId) {
 		throw new Error(
-			"Refusing operation: " + objectType + " does not belong to the configured Meta ad account.",
+			"Refusing operation: " +
+				objectType +
+				" does not belong to the configured Meta ad account.",
 		);
 	}
 	return object;
 }
 
-async function refuseDuplicateMetaName(
-	edge: "campaigns" | "adsets" | "ads",
-	name: string,
-) {
+async function refuseDuplicateMetaName(edge: "campaigns" | "adsets" | "ads", name: string) {
 	const { adAccountId } = getMetaConfig();
 	const result = await metaFetch(adAccountId + "/" + edge, {
 		fields: "id,name,status,effective_status",
@@ -789,12 +910,11 @@ function createServer() {
 		},
 	);
 
-
 	server.registerTool(
 		"get_product_images",
 		{
 			description:
-				"Audit Blindmotion WooCommerce featured and gallery images with read-only WordPress attachment metadata, including original dimensions and aspect ratio.",
+				"Audit Blindmotion WooCommerce featured, gallery and custom-field/product-option images with read-only WordPress attachment metadata, including original dimensions and aspect ratio.",
 			inputSchema: z.object({
 				product_id: z.number().int().positive().optional(),
 				search: z.string().optional(),
@@ -805,6 +925,48 @@ function createServer() {
 		},
 		async ({ product_id, search, status, category_id, limit }) => {
 			try {
+				const mediaById = new Map<number, Promise<any>>();
+				const mediaByUrl = new Map<string, Promise<any | null>>();
+
+				const getMediaById = (attachmentId: number) => {
+					if (!mediaById.has(attachmentId)) {
+						mediaById.set(
+							attachmentId,
+							wpFetch(`media/${attachmentId}`).then((response) =>
+								response.json<any>(),
+							),
+						);
+					}
+					return mediaById.get(attachmentId)!;
+				};
+
+				const getMediaByUrl = (sourceUrl: string) => {
+					if (!mediaByUrl.has(sourceUrl)) {
+						mediaByUrl.set(
+							sourceUrl,
+							(async () => {
+								const filename = mediaFilenameKey(sourceUrl);
+								const searchTerm = filename
+									.replace(/\.[^.]+$/, "")
+									.replace(/[-_]+/g, " ");
+								if (!filename || !searchTerm) return null;
+								const response = await wpFetch(
+									`media?search=${encodeURIComponent(searchTerm)}&per_page=100`,
+								);
+								const candidates = await response.json<any[]>();
+								return (
+									candidates.find(
+										(candidate) =>
+											mediaFilenameKey(candidate.source_url ?? "") ===
+											filename,
+									) ?? null
+								);
+							})(),
+						);
+					}
+					return mediaByUrl.get(sourceUrl)!;
+				};
+
 				const response = product_id
 					? await wcFetch(`products/${product_id}`)
 					: await wcFetch("products", {
@@ -820,29 +982,16 @@ function createServer() {
 
 				const results = await Promise.all(
 					products.map(async (product: any) => {
-						const images = await Promise.all(
+						const standardImages = await Promise.all(
 							(product.images ?? []).map(async (image: any, index: number) => {
 								try {
-									const mediaResponse = await wpFetch(`media/${image.id}`);
-									const media = await mediaResponse.json<any>();
-									const width = Number(media.media_details?.width ?? 0) || null;
-									const height = Number(media.media_details?.height ?? 0) || null;
-									return {
+									const media = await getMediaById(image.id);
+									return mediaMetadata(media, {
 										role: index === 0 ? "featured" : "gallery",
 										position: index,
 										attachment_id: image.id,
-										name: image.name,
-										alt: image.alt,
-										filename: media.media_details?.file?.split("/").pop() ?? null,
-										source_url: media.source_url ?? image.src,
-										mime_type: media.mime_type ?? null,
-										width,
-										height,
-										aspect_ratio:
-											width && height ? Number((width / height).toFixed(4)) : null,
-										is_square: width && height ? width === height : null,
-										file_size_bytes: media.media_details?.filesize ?? null,
-									};
+										source_url: image.src,
+									});
 								} catch (error) {
 									return {
 										role: index === 0 ? "featured" : "gallery",
@@ -851,11 +1000,42 @@ function createServer() {
 										name: image.name,
 										alt: image.alt,
 										source_url: image.src,
-										metadata_error: error instanceof Error ? error.message : String(error),
+										metadata_error:
+											error instanceof Error ? error.message : String(error),
 									};
 								}
 							}),
 						);
+
+						const customFieldReferences = collectProductImageReferences(
+							product.meta_data,
+						);
+						const customFieldImages = await Promise.all(
+							customFieldReferences.map(async (reference) => {
+								try {
+									const media = reference.attachment_id
+										? await getMediaById(reference.attachment_id)
+										: reference.source_url
+											? await getMediaByUrl(reference.source_url)
+											: null;
+									if (!media) {
+										return {
+											...reference,
+											metadata_error:
+												"WordPress Media Library attachment could not be resolved",
+										};
+									}
+									return mediaMetadata(media, reference);
+								} catch (error) {
+									return {
+										...reference,
+										metadata_error:
+											error instanceof Error ? error.message : String(error),
+									};
+								}
+							}),
+						);
+						const images = [...standardImages, ...customFieldImages];
 
 						return {
 							product_id: product.id,
@@ -863,6 +1043,8 @@ function createServer() {
 							slug: product.slug,
 							status: product.status,
 							image_count: images.length,
+							standard_image_count: standardImages.length,
+							custom_field_image_count: customFieldImages.length,
 							images,
 						};
 					}),
@@ -1280,8 +1462,7 @@ function createServer() {
 					metaFetch(`${adAccountId}/campaigns`, params),
 					metaFetch(`${adAccountId}/adsets`, {
 						...params,
-						fields:
-							"id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,budget_remaining",
+						fields: "id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,budget_remaining",
 					}),
 				]);
 
@@ -1324,7 +1505,9 @@ function createServer() {
 				});
 
 				if (String(current.account_id) !== configuredAccountId) {
-					throw new Error("Refusing update: object does not belong to the configured Meta ad account.");
+					throw new Error(
+						"Refusing update: object does not belong to the configured Meta ad account.",
+					);
 				}
 
 				const currentBudget = metaBudgetAmount(current.daily_budget);
@@ -1355,14 +1538,19 @@ function createServer() {
 					previous_daily_budget: currentBudget,
 					requested_daily_budget: roundedBudget,
 					verified_daily_budget: metaBudgetAmount(verified.daily_budget),
-					unchanged_fields: ["targeting", "creative", "status", "optimisation", "bid_strategy"],
+					unchanged_fields: [
+						"targeting",
+						"creative",
+						"status",
+						"optimisation",
+						"bid_strategy",
+					],
 				});
 			} catch (error) {
 				return toolError(error);
 			}
 		},
 	);
-
 
 	/* Guarded Meta campaign creation tools. Every created delivery object is PAUSED. */
 
@@ -1384,8 +1572,7 @@ function createServer() {
 						limit: 100,
 					}),
 					metaFetch(adAccountId + "/adcreatives", {
-						fields:
-							"id,name,status,object_story_id,thumbnail_url,image_hash,video_id,call_to_action_type",
+						fields: "id,name,status,object_story_id,thumbnail_url,image_hash,video_id,call_to_action_type",
 						limit: creative_limit,
 					}),
 				]);
@@ -1436,8 +1623,7 @@ function createServer() {
 				}
 				const created = await metaPost(adAccountId + "/campaigns", params);
 				const verified = await metaFetch(created.id, {
-					fields:
-						"id,name,account_id,status,effective_status,objective,daily_budget,lifetime_budget,bid_strategy,special_ad_categories",
+					fields: "id,name,account_id,status,effective_status,objective,daily_budget,lifetime_budget,bid_strategy,special_ad_categories",
 				});
 				return toolResult({
 					created: true,
@@ -1466,7 +1652,10 @@ function createServer() {
 				daily_budget_aud: z.number().positive().max(500).optional(),
 				age_min: z.number().int().min(18).max(65).default(18),
 				age_max: z.number().int().min(18).max(65).default(65),
-				genders: z.array(z.union([z.literal(1), z.literal(2)])).max(2).optional(),
+				genders: z
+					.array(z.union([z.literal(1), z.literal(2)]))
+					.max(2)
+					.optional(),
 				confirmation: z.literal(META_CREATE_CONFIRMATION),
 			}),
 		},
@@ -1541,8 +1730,7 @@ function createServer() {
 
 				const created = await metaPost(adAccountId + "/adsets", params);
 				const verified = await metaFetch(created.id, {
-					fields:
-						"id,name,account_id,campaign_id,status,effective_status,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,promoted_object,targeting",
+					fields: "id,name,account_id,campaign_id,status,effective_status,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,promoted_object,targeting",
 				});
 				return toolResult({
 					created: true,
@@ -1585,8 +1773,7 @@ function createServer() {
 					status: "PAUSED",
 				});
 				const verified = await metaFetch(created.id, {
-					fields:
-						"id,name,account_id,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id}",
+					fields: "id,name,account_id,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id}",
 				});
 				return toolResult({
 					created: true,
@@ -1614,13 +1801,11 @@ function createServer() {
 				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
 				const [adsets, ads] = await Promise.all([
 					metaFetch(campaign_id + "/adsets", {
-						fields:
-							"id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,promoted_object,targeting",
+						fields: "id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,promoted_object,targeting",
 						limit: 100,
 					}),
 					metaFetch(campaign_id + "/ads", {
-						fields:
-							"id,name,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url}",
+						fields: "id,name,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url}",
 						limit: 100,
 					}),
 				]);
