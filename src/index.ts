@@ -6,6 +6,16 @@ import { z } from "zod";
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
 
+const GOOGLE_ADS_ZIPGRIP_CONFIRMATION = "CONFIRM CREATE PAUSED ZIPGRIP PMAX";
+const GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID = "6610097637";
+const GOOGLE_ADS_ZIPGRIP_MERCHANT_ID = "5320593492";
+const GOOGLE_ADS_ZIPGRIP_ITEM_ID = "gla_1301";
+const GOOGLE_ADS_ZIPGRIP_FEED_LABEL = "AU";
+const GOOGLE_ADS_ZIPGRIP_CAMPAIGN_NAME = "BM Online PMax — ZipGrip";
+const GOOGLE_ADS_ZIPGRIP_FINAL_URL = "https://online.blindmotion.com.au/zipsided-outdoor-blinds/";
+const GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID = "2036";
+const GOOGLE_ADS_ENGLISH_LANGUAGE_ID = "1000";
+
 const GENUINE_STATUSES = new Set(["processing", "completed", "on-hold"]);
 
 function getAuthHeader() {
@@ -1055,6 +1065,189 @@ async function googleAdsSearch(query: string) {
 	} while (pageToken && results.length < 10_000);
 
 	return results;
+}
+
+async function googleAdsMutate(mutateOperations: any[], validateOnly: boolean) {
+	const { developerToken, loginCustomerId, customerId } = getGoogleAdsConfig();
+	const accessToken = await getGoogleAdsAccessToken();
+	const response = await fetch(
+		`https://googleads.googleapis.com/v25/customers/${customerId}/googleAds:mutate`,
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+				"developer-token": developerToken,
+				"login-customer-id": loginCustomerId,
+				"Content-Type": "application/json",
+				Accept: "application/json",
+			},
+			body: JSON.stringify({
+				mutateOperations,
+				partialFailure: false,
+				validateOnly,
+				responseContentType: "MUTABLE_RESOURCE",
+			}),
+		},
+	);
+
+	if (!response.ok) {
+		throw new Error(
+			`Google Ads ${validateOnly ? "validation" : "mutation"} failed: ${response.status} ${await response.text()}`,
+		);
+	}
+
+	return response.json<any>();
+}
+
+function assertZipGripGoogleAdsAccount() {
+	const { customerId } = getGoogleAdsConfig();
+	if (customerId !== GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID) {
+		throw new Error(
+			`Refusing ZipGrip creation: configured customer ${customerId} is not the locked Blindmotion customer ${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}.`,
+		);
+	}
+}
+
+async function findExistingZipGripCampaign() {
+	return googleAdsSearch(`
+		SELECT campaign.id, campaign.resource_name, campaign.name, campaign.status,
+			campaign.advertising_channel_type
+		FROM campaign
+		WHERE campaign.name = '${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_NAME}'
+			AND campaign.status != 'REMOVED'
+		LIMIT 1
+	`);
+}
+
+function zipGripPmaxPlan(dailyBudgetAud: number) {
+	const { customerId } = getGoogleAdsConfig();
+	const budgetResource = `customers/${customerId}/campaignBudgets/-1`;
+	const campaignResource = `customers/${customerId}/campaigns/-2`;
+	const assetGroupResource = `customers/${customerId}/assetGroups/-3`;
+	const rootFilterResource = `customers/${customerId}/assetGroupListingGroupFilters/-4`;
+
+	const mutateOperations = [
+		{
+			campaignBudgetOperation: {
+				create: {
+					resourceName: budgetResource,
+					name: `${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_NAME} budget`,
+					amountMicros: String(Math.round(dailyBudgetAud * 1_000_000)),
+					deliveryMethod: "STANDARD",
+					explicitlyShared: false,
+				},
+			},
+		},
+		{
+			campaignOperation: {
+				create: {
+					resourceName: campaignResource,
+					name: GOOGLE_ADS_ZIPGRIP_CAMPAIGN_NAME,
+					status: "PAUSED",
+					advertisingChannelType: "PERFORMANCE_MAX",
+					campaignBudget: budgetResource,
+					maximizeConversionValue: {},
+					shoppingSetting: {
+						merchantId: GOOGLE_ADS_ZIPGRIP_MERCHANT_ID,
+						feedLabel: GOOGLE_ADS_ZIPGRIP_FEED_LABEL,
+					},
+					assetAutomationSettings: [
+						{
+							assetAutomationType: "FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION",
+							assetAutomationStatus: "OPTED_OUT",
+						},
+					],
+					containsEuPoliticalAdvertising: "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+				},
+			},
+		},
+		{
+			campaignCriterionOperation: {
+				create: {
+					campaign: campaignResource,
+					location: {
+						geoTargetConstant: `geoTargetConstants/${GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID}`,
+					},
+				},
+			},
+		},
+		{
+			campaignCriterionOperation: {
+				create: {
+					campaign: campaignResource,
+					language: {
+						languageConstant: `languageConstants/${GOOGLE_ADS_ENGLISH_LANGUAGE_ID}`,
+					},
+				},
+			},
+		},
+		{
+			assetGroupOperation: {
+				create: {
+					resourceName: assetGroupResource,
+					campaign: campaignResource,
+					name: "ZipGrip blinds",
+					finalUrls: [GOOGLE_ADS_ZIPGRIP_FINAL_URL],
+					finalMobileUrls: [GOOGLE_ADS_ZIPGRIP_FINAL_URL],
+					status: "PAUSED",
+				},
+			},
+		},
+		{
+			assetGroupListingGroupFilterOperation: {
+				create: {
+					resourceName: rootFilterResource,
+					assetGroup: assetGroupResource,
+					type: "SUBDIVISION",
+					listingSource: "SHOPPING",
+				},
+			},
+		},
+		{
+			assetGroupListingGroupFilterOperation: {
+				create: {
+					resourceName: `customers/${customerId}/assetGroupListingGroupFilters/-5`,
+					assetGroup: assetGroupResource,
+					parentListingGroupFilter: rootFilterResource,
+					type: "UNIT_INCLUDED",
+					listingSource: "SHOPPING",
+					caseValue: { productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID } },
+				},
+			},
+		},
+		{
+			assetGroupListingGroupFilterOperation: {
+				create: {
+					resourceName: `customers/${customerId}/assetGroupListingGroupFilters/-6`,
+					assetGroup: assetGroupResource,
+					parentListingGroupFilter: rootFilterResource,
+					type: "UNIT_EXCLUDED",
+					listingSource: "SHOPPING",
+					caseValue: { productItemId: {} },
+				},
+			},
+		},
+	];
+
+	return {
+		customer_id: customerId,
+		campaign_name: GOOGLE_ADS_ZIPGRIP_CAMPAIGN_NAME,
+		campaign_status: "PAUSED",
+		asset_group_status: "PAUSED",
+		daily_budget_aud: dailyBudgetAud,
+		bidding: "MAXIMIZE_CONVERSION_VALUE_WITHOUT_TARGET_ROAS",
+		merchant_id: GOOGLE_ADS_ZIPGRIP_MERCHANT_ID,
+		feed_label: GOOGLE_ADS_ZIPGRIP_FEED_LABEL,
+		included_item_id: GOOGLE_ADS_ZIPGRIP_ITEM_ID,
+		all_other_items: "EXCLUDED",
+		final_url_expansion: "OPTED_OUT",
+		location: "Australia",
+		language: "English",
+		final_url: GOOGLE_ADS_ZIPGRIP_FINAL_URL,
+		creative_assets_created: false,
+		activation_tool_available: false,
+		mutateOperations,
+	};
 }
 
 function googleAdsMetrics(metrics: any = {}) {
@@ -4212,6 +4405,124 @@ function createServer() {
 					ORDER BY segments.date ASC
 				`);
 				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	/* Guarded Google Ads creation tools. They can only build a PAUSED ZipGrip draft. */
+
+	const zipGripBudgetSchema = z
+		.number()
+		.min(5)
+		.max(50)
+		.default(20)
+		.describe("Daily campaign budget in AUD, hard-limited to A$5–A$50.");
+
+	server.registerTool(
+		"preview_google_ads_zipgrip_pmax_paused",
+		{
+			description:
+				"Preview and API-validate the fixed Blindmotion ZipGrip retail Performance Max draft. Read-only: validateOnly is used and no Google Ads resources are created.",
+			inputSchema: z.object({
+				daily_budget_aud: zipGripBudgetSchema,
+			}),
+		},
+		async ({ daily_budget_aud }) => {
+			try {
+				assertZipGripGoogleAdsAccount();
+				const existing = await findExistingZipGripCampaign();
+				if (existing.length > 0) {
+					return toolResult({
+						valid_for_creation: false,
+						reason: "A non-removed campaign already uses the locked campaign name.",
+						existing_campaign: existing[0]?.campaign ?? existing[0],
+						activation_tool_available: false,
+					});
+				}
+
+				const plan = zipGripPmaxPlan(daily_budget_aud);
+				await googleAdsMutate(plan.mutateOperations, true);
+				const { mutateOperations: _operations, ...safePlan } = plan;
+				return toolResult({
+					valid_for_creation: true,
+					api_validation_passed: true,
+					created: false,
+					...safePlan,
+					confirmation_required: GOOGLE_ADS_ZIPGRIP_CONFIRMATION,
+					note: "This is a product-filtered retail campaign skeleton. Add and review creative assets before any separately implemented activation step.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_google_ads_zipgrip_pmax_paused",
+		{
+			description:
+				"Create the fixed Blindmotion ZipGrip retail Performance Max campaign skeleton, asset group and gla_1301-only listing partition. Campaign and asset group are always PAUSED; this tool cannot enable delivery.",
+			inputSchema: z.object({
+				daily_budget_aud: zipGripBudgetSchema,
+				confirmation: z.literal(GOOGLE_ADS_ZIPGRIP_CONFIRMATION),
+			}),
+		},
+		async ({ daily_budget_aud }) => {
+			try {
+				assertZipGripGoogleAdsAccount();
+				const existing = await findExistingZipGripCampaign();
+				if (existing.length > 0) {
+					throw new Error(
+						"Refusing creation: a non-removed BM Online PMax — ZipGrip campaign already exists.",
+					);
+				}
+
+				const plan = zipGripPmaxPlan(daily_budget_aud);
+				await googleAdsMutate(plan.mutateOperations, true);
+				const mutation = await googleAdsMutate(plan.mutateOperations, false);
+				const campaigns = await findExistingZipGripCampaign();
+				const campaign = campaigns[0]?.campaign;
+				if (
+					campaigns.length !== 1 ||
+					campaign?.status !== "PAUSED" ||
+					campaign?.advertisingChannelType !== "PERFORMANCE_MAX"
+				) {
+					throw new Error(
+						"Creation returned, but the campaign failed the unique PAUSED Performance Max verification.",
+					);
+				}
+
+				const assetGroups = await googleAdsSearch(`
+					SELECT asset_group.id, asset_group.resource_name, asset_group.name,
+						asset_group.status, asset_group.final_urls, campaign.id
+					FROM asset_group
+					WHERE campaign.id = ${campaign.id}
+					LIMIT 10
+				`);
+				if (assetGroups.length !== 1 || assetGroups[0]?.assetGroup?.status !== "PAUSED") {
+					throw new Error(
+						"Campaign was created, but its asset group failed the unique PAUSED verification. Manual review is required.",
+					);
+				}
+
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					api_validation_passed_before_creation: true,
+					campaign,
+					asset_group: assetGroups[0].assetGroup,
+					merchant_id: plan.merchant_id,
+					feed_label: plan.feed_label,
+					included_item_id: plan.included_item_id,
+					all_other_items: plan.all_other_items,
+					daily_budget_aud,
+					creative_assets_created: false,
+					activation_tool_available: false,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
+					note: "The campaign is structurally created but intentionally incomplete for delivery until creative assets are added and reviewed.",
+				});
 			} catch (error) {
 				return toolError(error);
 			}
