@@ -13,6 +13,11 @@ const GOOGLE_ADS_ZIPGRIP_ITEM_ID = "gla_1301";
 const GOOGLE_ADS_ZIPGRIP_FEED_LABEL = "AU";
 const GOOGLE_ADS_ZIPGRIP_CAMPAIGN_NAME = "BM Online PMax — ZipGrip";
 const GOOGLE_ADS_ZIPGRIP_FINAL_URL = "https://online.blindmotion.com.au/zipsided-outdoor-blinds/";
+const GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID = "24223451940";
+const GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID = "6745778074";
+const GOOGLE_ADS_ZIPGRIP_TEXT_CONFIRMATION = "CONFIRM ADD PAUSED ZIPGRIP TEXT ASSETS";
+const GOOGLE_ADS_ZIPGRIP_IMAGE_CONFIRMATION = "CONFIRM ADD PAUSED ZIPGRIP IMAGE ASSETS";
+const GOOGLE_ADS_ZIPGRIP_VIDEO_CONFIRMATION = "CONFIRM LINK PAUSED ZIPGRIP YOUTUBE ASSETS";
 const GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID = "2036";
 const GOOGLE_ADS_ENGLISH_LANGUAGE_ID = "1000";
 
@@ -1248,6 +1253,321 @@ function zipGripPmaxPlan(dailyBudgetAud: number) {
 		activation_tool_available: false,
 		mutateOperations,
 	};
+}
+
+const ZIPGRIP_ASSET_REQUIREMENTS = {
+	HEADLINE: { min: 3, max: 15, character_limit: 30 },
+	LONG_HEADLINE: { min: 1, max: 5, character_limit: 90 },
+	DESCRIPTION: { min: 2, max: 5, character_limit: 90 },
+	MARKETING_IMAGE: {
+		min: 1,
+		max: 20,
+		aspect_ratio: 1.91,
+		minimum_dimensions: "600x314",
+		max_bytes: 5_120_000,
+	},
+	SQUARE_MARKETING_IMAGE: {
+		min: 1,
+		max: 20,
+		aspect_ratio: 1,
+		minimum_dimensions: "300x300",
+		max_bytes: 5_120_000,
+	},
+	PORTRAIT_MARKETING_IMAGE: {
+		min: 0,
+		max: 20,
+		aspect_ratio: 0.8,
+		minimum_dimensions: "480x600",
+		max_bytes: 5_120_000,
+	},
+	BUSINESS_NAME: { min: 1, max: 1, character_limit: 25 },
+	LOGO: { min: 1, max: 5, aspect_ratio: 1, minimum_dimensions: "128x128", max_bytes: 5_120_000 },
+	LANDSCAPE_LOGO: {
+		min: 0,
+		max: 20,
+		aspect_ratio: 4,
+		minimum_dimensions: "512x128",
+		max_bytes: 5_120_000,
+	},
+	YOUTUBE_VIDEO: { min: 0, max: 15, minimum_duration_seconds: 10 },
+} as const;
+
+function zipGripCampaignResource() {
+	return `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/campaigns/${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID}`;
+}
+
+function zipGripAssetGroupResource() {
+	return `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroups/${GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID}`;
+}
+
+async function getZipGripAssetState() {
+	assertZipGripGoogleAdsAccount();
+	const groups = await googleAdsSearch(`
+		SELECT campaign.id, campaign.resource_name, campaign.name, campaign.status,
+			campaign.advertising_channel_type, campaign.brand_guidelines_enabled,
+			asset_group.id, asset_group.resource_name, asset_group.name, asset_group.status,
+			asset_group.final_urls, asset_group.ad_strength, asset_group.primary_status,
+			asset_group.primary_status_reasons
+		FROM asset_group
+		WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID}
+			AND asset_group.id = ${GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID}
+		LIMIT 1
+	`);
+	if (groups.length !== 1) {
+		throw new Error(
+			"The locked ZipGrip campaign and asset group could not be uniquely verified.",
+		);
+	}
+	const campaign = groups[0]?.campaign;
+	const assetGroup = groups[0]?.assetGroup;
+	if (
+		String(campaign?.id) !== GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID ||
+		campaign?.name !== GOOGLE_ADS_ZIPGRIP_CAMPAIGN_NAME ||
+		campaign?.status !== "PAUSED" ||
+		campaign?.advertisingChannelType !== "PERFORMANCE_MAX" ||
+		String(assetGroup?.id) !== GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID ||
+		assetGroup?.status !== "PAUSED"
+	) {
+		throw new Error(
+			"Refusing asset access: the locked campaign and asset group are not the expected PAUSED ZipGrip resources.",
+		);
+	}
+
+	const assetGroupAssets = await googleAdsSearch(`
+		SELECT asset_group_asset.resource_name, asset_group_asset.asset_group,
+			asset_group_asset.asset, asset_group_asset.field_type,
+			asset_group_asset.status, asset_group_asset.source,
+			asset_group_asset.primary_status, asset_group_asset.primary_status_reasons,
+			asset_group_asset.primary_status_details,
+			asset_group_asset.policy_summary.approval_status,
+			asset_group_asset.policy_summary.review_status,
+			asset.id, asset.resource_name, asset.name, asset.type,
+			asset.text_asset.text, asset.image_asset.full_size.url,
+			asset.image_asset.full_size.width_pixels,
+			asset.image_asset.full_size.height_pixels,
+			asset.image_asset.file_size,
+			asset.youtube_video_asset.youtube_video_id,
+			asset.youtube_video_asset.youtube_video_title
+		FROM asset_group_asset
+		WHERE asset_group.id = ${GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID}
+			AND asset_group_asset.status != 'REMOVED'
+		ORDER BY asset_group_asset.field_type, asset.id
+	`);
+
+	const campaignAssets = await googleAdsSearch(`
+		SELECT campaign_asset.resource_name, campaign_asset.campaign,
+			campaign_asset.asset, campaign_asset.field_type, campaign_asset.status,
+			campaign_asset.source, campaign_asset.primary_status,
+			campaign_asset.primary_status_reasons,
+			campaign_asset.policy_summary.approval_status,
+			campaign_asset.policy_summary.review_status,
+			asset.id, asset.resource_name, asset.name, asset.type,
+			asset.text_asset.text, asset.image_asset.full_size.url,
+			asset.image_asset.full_size.width_pixels,
+			asset.image_asset.full_size.height_pixels,
+			asset.image_asset.file_size
+		FROM campaign_asset
+		WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID}
+			AND campaign_asset.status != 'REMOVED'
+		ORDER BY campaign_asset.field_type, asset.id
+	`);
+
+	const counts: Record<string, number> = {};
+	for (const row of assetGroupAssets) {
+		const fieldType = row.assetGroupAsset?.fieldType;
+		if (fieldType) counts[fieldType] = (counts[fieldType] ?? 0) + 1;
+	}
+	for (const row of campaignAssets) {
+		const fieldType = row.campaignAsset?.fieldType;
+		if (fieldType) counts[fieldType] = (counts[fieldType] ?? 0) + 1;
+	}
+
+	const brandGuidelinesEnabled = Boolean(campaign?.brandGuidelinesEnabled);
+	const requiredTypes = [
+		"HEADLINE",
+		"LONG_HEADLINE",
+		"DESCRIPTION",
+		"MARKETING_IMAGE",
+		"SQUARE_MARKETING_IMAGE",
+		"BUSINESS_NAME",
+		"LOGO",
+	] as const;
+	const completeness = Object.fromEntries(
+		requiredTypes.map((fieldType) => {
+			const requirement = ZIPGRIP_ASSET_REQUIREMENTS[fieldType];
+			const count = counts[fieldType] ?? 0;
+			return [
+				fieldType,
+				{
+					count,
+					minimum: requirement.min,
+					maximum: requirement.max,
+					meets_minimum: count >= requirement.min,
+					missing: Math.max(0, requirement.min - count),
+					link_level:
+						brandGuidelinesEnabled &&
+						(fieldType === "BUSINESS_NAME" || fieldType === "LOGO")
+							? "CAMPAIGN"
+							: "ASSET_GROUP",
+				},
+			];
+		}),
+	);
+
+	return {
+		campaign,
+		asset_group: assetGroup,
+		brand_guidelines_enabled: brandGuidelinesEnabled,
+		brand_asset_link_level: brandGuidelinesEnabled ? "CAMPAIGN" : "ASSET_GROUP",
+		asset_group_assets: assetGroupAssets,
+		campaign_brand_assets: campaignAssets.filter((row) =>
+			["BUSINESS_NAME", "LOGO", "LANDSCAPE_LOGO"].includes(row.campaignAsset?.fieldType),
+		),
+		counts,
+		completeness,
+		minimum_complete: Object.values(completeness).every((value) => value.meets_minimum),
+		requirements: ZIPGRIP_ASSET_REQUIREMENTS,
+		activation_tool_available: false,
+	};
+}
+
+function googleAdsAssetResource(assetId: string) {
+	return `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assets/${assetId}`;
+}
+
+function buildAssetLinkOperation(
+	assetResource: string,
+	fieldType: string,
+	brandGuidelinesEnabled: boolean,
+) {
+	const isBrandAsset = ["BUSINESS_NAME", "LOGO", "LANDSCAPE_LOGO"].includes(fieldType);
+	if (brandGuidelinesEnabled && isBrandAsset) {
+		return {
+			campaignAssetOperation: {
+				create: {
+					campaign: zipGripCampaignResource(),
+					asset: assetResource,
+					fieldType,
+					status: "ENABLED",
+				},
+			},
+		};
+	}
+	return {
+		assetGroupAssetOperation: {
+			create: {
+				assetGroup: zipGripAssetGroupResource(),
+				asset: assetResource,
+				fieldType,
+				status: "ENABLED",
+			},
+		},
+	};
+}
+
+async function reusableTextAssets() {
+	const rows = await googleAdsSearch(`
+		SELECT asset.id, asset.resource_name, asset.name, asset.text_asset.text
+		FROM asset
+		WHERE asset.type = 'TEXT'
+		LIMIT 10000
+	`);
+	return new Map(
+		rows
+			.filter((row) => typeof row.asset?.textAsset?.text === "string")
+			.map((row) => [row.asset.textAsset.text, row.asset.resourceName] as const),
+	);
+}
+
+async function reusableYoutubeAssets() {
+	const rows = await googleAdsSearch(`
+		SELECT asset.id, asset.resource_name, asset.name,
+			asset.youtube_video_asset.youtube_video_id,
+			asset.youtube_video_asset.youtube_video_title
+		FROM asset
+		WHERE asset.type = 'YOUTUBE_VIDEO'
+		LIMIT 10000
+	`);
+	return new Map(
+		rows
+			.filter((row) => typeof row.asset?.youtubeVideoAsset?.youtubeVideoId === "string")
+			.map(
+				(row) =>
+					[row.asset.youtubeVideoAsset.youtubeVideoId, row.asset.resourceName] as const,
+			),
+	);
+}
+
+function imageDimensions(bytes: Uint8Array, mimeType: "image/jpeg" | "image/png") {
+	if (!hasExpectedImageSignature(bytes, mimeType)) {
+		throw new Error(`Image data does not match declared MIME type ${mimeType}.`);
+	}
+	if (mimeType === "image/png") {
+		if (bytes.length < 24) throw new Error("PNG data is truncated.");
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		return { width: view.getUint32(16), height: view.getUint32(20) };
+	}
+	let offset = 2;
+	while (offset + 9 < bytes.length) {
+		if (bytes[offset] !== 0xff) {
+			offset++;
+			continue;
+		}
+		const marker = bytes[offset + 1];
+		if (marker === 0xd8 || marker === 0xd9) {
+			offset += 2;
+			continue;
+		}
+		if (offset + 3 >= bytes.length) break;
+		const length = (bytes[offset + 2] << 8) | bytes[offset + 3];
+		if (length < 2 || offset + 2 + length > bytes.length) break;
+		if (
+			(marker >= 0xc0 && marker <= 0xc3) ||
+			(marker >= 0xc5 && marker <= 0xc7) ||
+			(marker >= 0xc9 && marker <= 0xcb) ||
+			(marker >= 0xcd && marker <= 0xcf)
+		) {
+			return {
+				height: (bytes[offset + 5] << 8) | bytes[offset + 6],
+				width: (bytes[offset + 7] << 8) | bytes[offset + 8],
+			};
+		}
+		offset += 2 + length;
+	}
+	throw new Error("JPEG dimensions could not be read.");
+}
+
+function validateZipGripImage(
+	bytes: Uint8Array,
+	mimeType: "image/jpeg" | "image/png",
+	fieldType:
+		| "MARKETING_IMAGE"
+		| "SQUARE_MARKETING_IMAGE"
+		| "PORTRAIT_MARKETING_IMAGE"
+		| "LOGO"
+		| "LANDSCAPE_LOGO",
+) {
+	if (bytes.length > 5_120_000) throw new Error("Image exceeds Google's 5,120 KB limit.");
+	const dimensions = imageDimensions(bytes, mimeType);
+	const rules = {
+		MARKETING_IMAGE: { ratio: 1.91, minWidth: 600, minHeight: 314 },
+		SQUARE_MARKETING_IMAGE: { ratio: 1, minWidth: 300, minHeight: 300 },
+		PORTRAIT_MARKETING_IMAGE: { ratio: 0.8, minWidth: 480, minHeight: 600 },
+		LOGO: { ratio: 1, minWidth: 128, minHeight: 128 },
+		LANDSCAPE_LOGO: { ratio: 4, minWidth: 512, minHeight: 128 },
+	}[fieldType];
+	if (dimensions.width < rules.minWidth || dimensions.height < rules.minHeight) {
+		throw new Error(
+			`${fieldType} is ${dimensions.width}x${dimensions.height}; minimum is ${rules.minWidth}x${rules.minHeight}.`,
+		);
+	}
+	const ratio = dimensions.width / dimensions.height;
+	if (Math.abs(ratio - rules.ratio) > 0.02) {
+		throw new Error(
+			`${fieldType} aspect ratio is ${ratio.toFixed(3)}; required ratio is ${rules.ratio}.`,
+		);
+	}
+	return { ...dimensions, bytes: bytes.length, aspect_ratio: ratio };
 }
 
 function googleAdsMetrics(metrics: any = {}) {
@@ -4522,6 +4842,425 @@ function createServer() {
 					activation_tool_available: false,
 					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
 					note: "The campaign is structurally created but intentionally incomplete for delivery until creative assets are added and reviewed.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	// Guarded ZipGrip asset management. Every write is locked to the known
+	// PAUSED campaign and asset group, uses validateOnly, and cannot activate delivery.
+	server.registerTool(
+		"inspect_google_ads_zipgrip_asset_group",
+		{
+			description:
+				"Read-only inspection of the locked ZipGrip PMax campaign and asset group, including current assets, Google ad strength, policy/serving status, requirements and completeness gaps.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const state = await getZipGripAssetState();
+				return toolResult({
+					...state,
+					created_or_modified: false,
+					asset_strength_note:
+						"Google's ad_strength and primary_status are output-only feedback. Completeness is also calculated from live non-removed asset links.",
+					activation_prerequisite:
+						"Activation remains out of scope until clean post-fix ZipGrip purchase tracking has been observed and the campaign is separately reviewed.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	const zipGripTextBatchSchema = z
+		.object({
+			headlines: z.array(z.string().trim().min(1).max(30)).max(15).default([]),
+			long_headlines: z.array(z.string().trim().min(1).max(90)).max(5).default([]),
+			descriptions: z.array(z.string().trim().min(1).max(90)).max(5).default([]),
+			business_name: z.string().trim().min(1).max(25).optional(),
+			confirmation: z.literal(GOOGLE_ADS_ZIPGRIP_TEXT_CONFIRMATION),
+		})
+		.superRefine((value, context) => {
+			if (
+				value.headlines.length +
+					value.long_headlines.length +
+					value.descriptions.length +
+					(value.business_name ? 1 : 0) ===
+				0
+			) {
+				context.addIssue({ code: "custom", message: "Supply at least one text asset." });
+			}
+			for (const [field, values] of [
+				["headlines", value.headlines],
+				["long_headlines", value.long_headlines],
+				["descriptions", value.descriptions],
+			] as const) {
+				if (new Set(values).size !== values.length) {
+					context.addIssue({
+						code: "custom",
+						path: [field],
+						message: `Duplicate ${field.replace("_", " ")} are not allowed.`,
+					});
+				}
+			}
+		});
+
+	server.registerTool(
+		"add_google_ads_zipgrip_text_assets_guarded",
+		{
+			description:
+				"Create or reuse text assets and link them only to the locked PAUSED ZipGrip campaign/asset group. Enforces limits, paused-state verification, exact confirmation and validateOnly preflight. Cannot activate delivery.",
+			inputSchema: zipGripTextBatchSchema,
+		},
+		async ({ headlines, long_headlines, descriptions, business_name }) => {
+			try {
+				const before = await getZipGripAssetState();
+				const requested = [
+					...headlines.map((text) => ({ fieldType: "HEADLINE", text })),
+					...long_headlines.map((text) => ({ fieldType: "LONG_HEADLINE", text })),
+					...descriptions.map((text) => ({ fieldType: "DESCRIPTION", text })),
+					...(business_name ? [{ fieldType: "BUSINESS_NAME", text: business_name }] : []),
+				];
+				const linked = new Set([
+					...before.asset_group_assets.map(
+						(row: any) =>
+							`${row.assetGroupAsset?.fieldType}\u0000${row.asset?.textAsset?.text ?? ""}`,
+					),
+					...before.campaign_brand_assets.map(
+						(row: any) =>
+							`${row.campaignAsset?.fieldType}\u0000${row.asset?.textAsset?.text ?? ""}`,
+					),
+				]);
+				const additions = requested.filter(
+					(item) => !linked.has(`${item.fieldType}\u0000${item.text}`),
+				);
+				if (additions.length === 0) {
+					return toolResult({
+						created_or_linked: false,
+						reason: "Every supplied text/field-type pair is already linked.",
+						activation_performed: false,
+					});
+				}
+				for (const fieldType of [
+					"HEADLINE",
+					"LONG_HEADLINE",
+					"DESCRIPTION",
+					"BUSINESS_NAME",
+				] as const) {
+					const total =
+						(before.counts[fieldType] ?? 0) +
+						additions.filter((item) => item.fieldType === fieldType).length;
+					if (total > ZIPGRIP_ASSET_REQUIREMENTS[fieldType].max) {
+						throw new Error(
+							`${fieldType} would exceed Google's maximum of ${ZIPGRIP_ASSET_REQUIREMENTS[fieldType].max}.`,
+						);
+					}
+				}
+
+				const reusable = await reusableTextAssets();
+				const operations: any[] = [];
+				const summary: any[] = [];
+				let temporaryId = -1000;
+				for (const item of additions) {
+					let assetResource = reusable.get(item.text);
+					const reused = Boolean(assetResource);
+					if (!assetResource) {
+						const currentId = temporaryId--;
+						assetResource = googleAdsAssetResource(String(currentId));
+						operations.push({
+							assetOperation: {
+								create: {
+									resourceName: assetResource,
+									name: `ZipGrip ${item.fieldType} ${Math.abs(currentId)}`,
+									textAsset: { text: item.text },
+								},
+							},
+						});
+					}
+					operations.push(
+						buildAssetLinkOperation(
+							assetResource,
+							item.fieldType,
+							before.brand_guidelines_enabled,
+						),
+					);
+					summary.push({
+						field_type: item.fieldType,
+						text: item.text,
+						reused_existing_asset: reused,
+						link_level:
+							before.brand_guidelines_enabled && item.fieldType === "BUSINESS_NAME"
+								? "CAMPAIGN"
+								: "ASSET_GROUP",
+					});
+				}
+				await googleAdsMutate(operations, true);
+				const mutation = await googleAdsMutate(operations, false);
+				const after = await getZipGripAssetState();
+				return toolResult({
+					created_or_linked: true,
+					api_validation_passed_before_creation: true,
+					activation_performed: false,
+					assets: summary,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
+					completeness: after.completeness,
+					google_ad_strength: after.asset_group?.adStrength,
+					activation_tool_available: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	const zipGripImageFieldTypeSchema = z.enum([
+		"MARKETING_IMAGE",
+		"SQUARE_MARKETING_IMAGE",
+		"PORTRAIT_MARKETING_IMAGE",
+		"LOGO",
+		"LANDSCAPE_LOGO",
+	]);
+	const zipGripImageItemSchema = z
+		.object({
+			field_type: zipGripImageFieldTypeSchema,
+			name: z.string().trim().min(1).max(100),
+			mime_type: z.enum(["image/jpeg", "image/png"]).optional(),
+			image_base64: z.string().min(100).max(7_000_000).optional(),
+			existing_asset_id: z
+				.string()
+				.regex(/^[1-9][0-9]*$/)
+				.optional(),
+		})
+		.superRefine((value, context) => {
+			const completeUpload = Boolean(value.image_base64 && value.mime_type);
+			const anyUpload = value.image_base64 !== undefined || value.mime_type !== undefined;
+			const reuse = value.existing_asset_id !== undefined;
+			if (reuse === anyUpload || (anyUpload && !completeUpload)) {
+				context.addIssue({
+					code: "custom",
+					message:
+						"Provide either existing_asset_id, or both mime_type and image_base64.",
+				});
+			}
+		});
+
+	server.registerTool(
+		"add_google_ads_zipgrip_image_assets_guarded",
+		{
+			description:
+				"Upload JPEG/PNG assets or link existing Google Ads image assets only to the locked PAUSED ZipGrip campaign/asset group. Validates dimensions, ratio, size, limits, paused state, exact confirmation and validateOnly preflight. Cannot activate delivery.",
+			inputSchema: z.object({
+				images: z.array(zipGripImageItemSchema).min(1).max(20),
+				confirmation: z.literal(GOOGLE_ADS_ZIPGRIP_IMAGE_CONFIRMATION),
+			}),
+		},
+		async ({ images }) => {
+			try {
+				const before = await getZipGripAssetState();
+				const requestedCounts: Record<string, number> = {};
+				for (const image of images) {
+					requestedCounts[image.field_type] =
+						(requestedCounts[image.field_type] ?? 0) + 1;
+				}
+				for (const [fieldType, adding] of Object.entries(requestedCounts)) {
+					const typedField = fieldType as
+						| "MARKETING_IMAGE"
+						| "SQUARE_MARKETING_IMAGE"
+						| "PORTRAIT_MARKETING_IMAGE"
+						| "LOGO"
+						| "LANDSCAPE_LOGO";
+					if (
+						(before.counts[fieldType] ?? 0) + adding >
+						ZIPGRIP_ASSET_REQUIREMENTS[typedField].max
+					) {
+						throw new Error(
+							`${fieldType} would exceed Google's maximum of ${ZIPGRIP_ASSET_REQUIREMENTS[typedField].max}.`,
+						);
+					}
+				}
+
+				const existingLinks = new Set([
+					...before.asset_group_assets.map(
+						(row: any) =>
+							`${row.assetGroupAsset?.fieldType}\u0000${row.asset?.resourceName}`,
+					),
+					...before.campaign_brand_assets.map(
+						(row: any) =>
+							`${row.campaignAsset?.fieldType}\u0000${row.asset?.resourceName}`,
+					),
+				]);
+				const operations: any[] = [];
+				const summary: any[] = [];
+				let temporaryId = -2000;
+				for (const image of images) {
+					let assetResource: string;
+					let imageInfo: any;
+					if (image.existing_asset_id) {
+						assetResource = googleAdsAssetResource(image.existing_asset_id);
+						const rows = await googleAdsSearch(`
+							SELECT asset.id, asset.resource_name, asset.name, asset.type,
+								asset.image_asset.full_size.width_pixels,
+								asset.image_asset.full_size.height_pixels,
+								asset.image_asset.file_size
+							FROM asset
+							WHERE asset.id = ${image.existing_asset_id}
+							LIMIT 1
+						`);
+						if (rows.length !== 1 || rows[0]?.asset?.type !== "IMAGE") {
+							throw new Error(
+								`Existing asset ${image.existing_asset_id} is not a uniquely verified image asset.`,
+							);
+						}
+						if (existingLinks.has(`${image.field_type}\u0000${assetResource}`)) {
+							throw new Error(
+								`Asset ${image.existing_asset_id} is already linked as ${image.field_type}.`,
+							);
+						}
+						imageInfo = rows[0].asset.imageAsset?.fullSize;
+					} else {
+						const bytes = decodeBase64(image.image_base64!);
+						imageInfo = validateZipGripImage(bytes, image.mime_type!, image.field_type);
+						const digest = await sha256Hex(bytes);
+						const currentId = temporaryId--;
+						assetResource = googleAdsAssetResource(String(currentId));
+						operations.push({
+							assetOperation: {
+								create: {
+									resourceName: assetResource,
+									name: `${image.name.slice(0, 82)} ${digest.slice(0, 12)}`,
+									imageAsset: { data: image.image_base64 },
+								},
+							},
+						});
+					}
+					operations.push(
+						buildAssetLinkOperation(
+							assetResource,
+							image.field_type,
+							before.brand_guidelines_enabled,
+						),
+					);
+					summary.push({
+						field_type: image.field_type,
+						name: image.name,
+						existing_asset_id: image.existing_asset_id ?? null,
+						image: imageInfo,
+						link_level:
+							before.brand_guidelines_enabled &&
+							["LOGO", "LANDSCAPE_LOGO"].includes(image.field_type)
+								? "CAMPAIGN"
+								: "ASSET_GROUP",
+					});
+				}
+				await googleAdsMutate(operations, true);
+				const mutation = await googleAdsMutate(operations, false);
+				const after = await getZipGripAssetState();
+				return toolResult({
+					created_or_linked: true,
+					api_validation_passed_before_creation: true,
+					activation_performed: false,
+					images: summary,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
+					completeness: after.completeness,
+					google_ad_strength: after.asset_group?.adStrength,
+					activation_tool_available: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"link_google_ads_zipgrip_youtube_assets_guarded",
+		{
+			description:
+				"Create or reuse YouTube assets and link them only to the locked PAUSED ZipGrip asset group. Enforces ID/count rules, paused-state verification, exact confirmation and validateOnly preflight. Cannot upload to YouTube or activate delivery.",
+			inputSchema: z.object({
+				videos: z
+					.array(
+						z.object({
+							youtube_video_id: z.string().regex(/^[A-Za-z0-9_-]{11}$/),
+							name: z.string().trim().min(1).max(100),
+						}),
+					)
+					.min(1)
+					.max(15),
+				confirmation: z.literal(GOOGLE_ADS_ZIPGRIP_VIDEO_CONFIRMATION),
+			}),
+		},
+		async ({ videos }) => {
+			try {
+				const before = await getZipGripAssetState();
+				if (new Set(videos.map((video) => video.youtube_video_id)).size !== videos.length) {
+					throw new Error("Duplicate YouTube video IDs are not allowed.");
+				}
+				const linkedVideoIds = new Set(
+					before.asset_group_assets
+						.filter((row: any) => row.assetGroupAsset?.fieldType === "YOUTUBE_VIDEO")
+						.map((row: any) => row.asset?.youtubeVideoAsset?.youtubeVideoId),
+				);
+				const additions = videos.filter(
+					(video) => !linkedVideoIds.has(video.youtube_video_id),
+				);
+				if (additions.length === 0) {
+					return toolResult({
+						created_or_linked: false,
+						reason: "Every supplied YouTube video is already linked.",
+						activation_performed: false,
+					});
+				}
+				if (
+					(before.counts.YOUTUBE_VIDEO ?? 0) + additions.length >
+					ZIPGRIP_ASSET_REQUIREMENTS.YOUTUBE_VIDEO.max
+				) {
+					throw new Error(
+						"The request would exceed Google's limit of 15 YouTube videos.",
+					);
+				}
+
+				const reusable = await reusableYoutubeAssets();
+				const operations: any[] = [];
+				const summary: any[] = [];
+				let temporaryId = -3000;
+				for (const video of additions) {
+					let assetResource = reusable.get(video.youtube_video_id);
+					const reused = Boolean(assetResource);
+					if (!assetResource) {
+						const currentId = temporaryId--;
+						assetResource = googleAdsAssetResource(String(currentId));
+						operations.push({
+							assetOperation: {
+								create: {
+									resourceName: assetResource,
+									name: `ZipGrip YouTube ${video.name}`.slice(0, 128),
+									youtubeVideoAsset: { youtubeVideoId: video.youtube_video_id },
+								},
+							},
+						});
+					}
+					operations.push(buildAssetLinkOperation(assetResource, "YOUTUBE_VIDEO", false));
+					summary.push({
+						youtube_video_id: video.youtube_video_id,
+						name: video.name,
+						reused_existing_asset: reused,
+					});
+				}
+				await googleAdsMutate(operations, true);
+				const mutation = await googleAdsMutate(operations, false);
+				const after = await getZipGripAssetState();
+				return toolResult({
+					created_or_linked: true,
+					api_validation_passed_before_creation: true,
+					activation_performed: false,
+					videos: summary,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
+					completeness: after.completeness,
+					google_ad_strength: after.asset_group?.adStrength,
+					activation_tool_available: false,
 				});
 			} catch (error) {
 				return toolError(error);
