@@ -18,6 +18,15 @@ npm create cloudflare@latest -- my-mcp-server --template=cloudflare/ai/demos/rem
 
 To add your own [tools](https://developers.cloudflare.com/agents/model-context-protocol/protocol/tools/) to the MCP server, register each tool on the `McpServer` created in the `createServer()` function in `src/index.ts` using `server.registerTool(...)`.
 
+## Guarded ZipGrip Performance Max builder
+
+The server includes two narrowly scoped Google Ads tools for customer `6610097637`:
+
+- `preview_google_ads_zipgrip_pmax_paused` checks for a duplicate campaign and sends the complete request to Google Ads with `validateOnly: true`.
+- `create_google_ads_zipgrip_pmax_paused` requires the exact confirmation phrase `CONFIRM CREATE PAUSED ZIPGRIP PMAX`, repeats validation, and atomically creates a paused campaign skeleton restricted to Merchant Center item `gla_1301`.
+
+The campaign name, account, Merchant Center account, AU feed label, product item, Australia/English targeting, landing page, and paused statuses are fixed. Daily budget is limited to A$5–A$50. Final URL expansion is opted out, all non-ZipGrip products are excluded, and no activation tool is provided.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
