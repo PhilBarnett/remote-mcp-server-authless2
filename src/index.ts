@@ -5183,7 +5183,8 @@ function createServer() {
 					),
 				]);
 				const assetOperations: any[] = [];
-				const linkOperations: any[] = [];
+				const assetGroupLinkOperations: any[] = [];
+				const campaignLinkOperations: any[] = [];
 				const textSummary: any[] = [];
 				const imageSummary: any[] = [];
 				let textTemporaryId = -4000;
@@ -5205,13 +5206,16 @@ function createServer() {
 							},
 						});
 					}
-					linkOperations.push(
-						buildAssetLinkOperation(
-							assetResource,
-							item.fieldType,
-							before.brand_guidelines_enabled,
-						),
+					const linkOperation = buildAssetLinkOperation(
+						assetResource,
+						item.fieldType,
+						before.brand_guidelines_enabled,
 					);
+					if (linkOperation.campaignAssetOperation) {
+						campaignLinkOperations.push(linkOperation);
+					} else {
+						assetGroupLinkOperations.push(linkOperation);
+					}
 					textSummary.push({
 						field_type: item.fieldType,
 						text: item.text,
@@ -5260,13 +5264,16 @@ function createServer() {
 							},
 						});
 					}
-					linkOperations.push(
-						buildAssetLinkOperation(
-							assetResource,
-							image.field_type,
-							before.brand_guidelines_enabled,
-						),
+					const linkOperation = buildAssetLinkOperation(
+						assetResource,
+						image.field_type,
+						before.brand_guidelines_enabled,
 					);
+					if (linkOperation.campaignAssetOperation) {
+						campaignLinkOperations.push(linkOperation);
+					} else {
+						assetGroupLinkOperations.push(linkOperation);
+					}
 					imageSummary.push({
 						field_type: image.field_type,
 						name: image.name,
@@ -5276,8 +5283,13 @@ function createServer() {
 				}
 
 				// Google evaluates the required PMax bundle atomically only when every
-				// AssetOperation precedes every operation that links those assets.
-				const operations = [...assetOperations, ...linkOperations];
+				// AssetOperation comes first and every AssetGroupAssetOperation remains
+				// consecutive, before the campaign-level brand links.
+				const operations = [
+					...assetOperations,
+					...assetGroupLinkOperations,
+					...campaignLinkOperations,
+				];
 				await googleAdsMutate(operations, true);
 				const mutation = await googleAdsMutate(operations, false);
 				const after = await getZipGripAssetState();
