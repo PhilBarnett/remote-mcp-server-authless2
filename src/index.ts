@@ -65,11 +65,19 @@ type ProductImageReference = {
 
 const IMAGE_KEY_PATTERN =
 	/(?:^|[_\-.])(image|images|img|photo|picture|thumbnail|thumb|icon|swatch|media|upload)(?:$|[_\-.])/i;
+const NON_IMAGE_VALUE_KEY_PATTERN =
+	/(?:^|[_\-.])(title|desc|description|label|text|name|caption|alt|width|height|size|price|percent|percentage)(?:$|[_\-.])/i;
 const IMAGE_URL_PATTERN =
 	/https?:\\?\/\\?\/[^\s"'<>]+?\.(?:avif|gif|jpe?g|png|webp|svg)(?:\?[^\s"'<>]*)?/gi;
+const SERIALIZED_IMAGE_ID_PATTERN =
+	/s:\d+:"([^";]*(?:image|images|img|photo|picture|thumbnail|thumb|icon|swatch|media|upload)[^";]*)";(?:i:(\d+);|s:\d+:"(\d+)";)/gi;
 
 function normaliseImageUrl(value: string) {
 	return value.replace(/\\\//g, "/").replace(/&amp;/g, "&");
+}
+
+function isImageValuePath(path: string) {
+	return IMAGE_KEY_PATTERN.test(path) && !NON_IMAGE_VALUE_KEY_PATTERN.test(path);
 }
 
 function collectProductImageReferences(metaData: any[] | undefined) {
@@ -85,7 +93,7 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 	}
 
 	function visit(value: unknown, customFieldKey: string, path: string) {
-		const imageContext = IMAGE_KEY_PATTERN.test(path);
+		const imageContext = isImageValuePath(path);
 
 		if (typeof value === "number" && Number.isInteger(value) && value > 0 && imageContext) {
 			addReference({
@@ -107,22 +115,36 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 				});
 			}
 
-			if (imageContext && /^\d+$/.test(value)) {
+			const trimmedValue = value.trim();
+			if (imageContext && /^\d+$/.test(trimmedValue)) {
 				addReference({
 					role: "custom_field",
 					custom_field_key: customFieldKey,
 					custom_field_path: path,
-					attachment_id: Number(value),
+					attachment_id: Number(trimmedValue),
 				});
 			}
 
-			if (imageContext) {
-				for (const match of value.matchAll(/(?:i:\d+;|s:\d+:\")?(\d{2,})(?:\";)?/g)) {
+			// Follow structured JSON rather than scraping arbitrary numbers from text.
+			if (/^[{[]/.test(trimmedValue)) {
+				try {
+					visit(JSON.parse(trimmedValue), customFieldKey, path);
+				} catch {
+					// Not valid JSON; explicit URLs and serialized image keys are handled below.
+				}
+			}
+
+			// In PHP-serialized option data, accept only numeric values whose own key
+			// is explicitly image-related. Numbers in prose must never become media IDs.
+			for (const match of value.matchAll(SERIALIZED_IMAGE_ID_PATTERN)) {
+				const serializedKey = match[1];
+				const serializedId = match[2] ?? match[3];
+				if (serializedId && isImageValuePath(serializedKey)) {
 					addReference({
 						role: "custom_field",
 						custom_field_key: customFieldKey,
-						custom_field_path: path,
-						attachment_id: Number(match[1]),
+						custom_field_path: `${path}.${serializedKey}`,
+						attachment_id: Number(serializedId),
 					});
 				}
 			}
