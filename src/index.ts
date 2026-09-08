@@ -58,6 +58,23 @@ async function wcWrite(path: string, body: unknown) {
 	return response;
 }
 
+async function wcCreate(path: string, body: unknown) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const response = await fetch(`${workerEnv.WC_SITE}/wp-json/wc/v3/${path}`, {
+		method: "POST",
+		headers: {
+			Authorization: getAuthHeader(),
+			Accept: "application/json",
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(body),
+	});
+	if (!response.ok) {
+		throw new Error(`WooCommerce create failed: ${response.status} ${await response.text()}`);
+	}
+	return response;
+}
+
 async function wpFetch(path: string) {
 	const workerEnv = env as unknown as Record<string, string>;
 	const url = new URL(`${workerEnv.WC_SITE}/wp-json/wp/v2/${path}`);
@@ -80,6 +97,37 @@ function getWpWriteAuthHeader() {
 		);
 	}
 	return `Basic ${btoa(`${workerEnv.WP_USERNAME}:${workerEnv.WP_APPLICATION_PASSWORD}`)}`;
+}
+
+async function wpMcpWrite(path: string, body: unknown) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const response = await fetch(`${workerEnv.WC_SITE}/wp-json/blindmotion-mcp/v1/${path}`, {
+		method: "POST",
+		headers: {
+			Authorization: getWpWriteAuthHeader(),
+			Accept: "application/json",
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(body),
+	});
+	if (!response.ok) {
+		throw new Error(
+			`Blindmotion WordPress bridge failed: ${response.status} ${await response.text()}`,
+		);
+	}
+	return response;
+}
+
+const CLONE_PRODUCT_CONFIRMATION = "CONFIRM CLONE PRODUCT AS DRAFT";
+const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
+const VISUALIZER_PLUGIN_SLUG = "blindmotion-visualizer";
+const VISUALIZER_PLUGIN_MAIN_FILE = "blindmotion-visualizer/blindmotion-visualizer.php";
+
+async function sha256Hex(bytes: Uint8Array) {
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(
+		"",
+	);
 }
 
 async function wpUploadMedia(filename: string, mimeType: string, bytes: Uint8Array) {
@@ -1247,6 +1295,196 @@ function createServer() {
 				}));
 
 				return toolResult(safeProducts);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"clone_product_as_draft_guarded",
+		{
+			description:
+				"Clone one exactly identified WooCommerce product while forcing the new product to DRAFT and hidden catalogue visibility. The source is never modified and activation/publication is impossible.",
+			inputSchema: z.object({
+				source_product_id: z.number().int().positive(),
+				expected_source_name: z.string().trim().min(1).max(200),
+				new_name: z.string().trim().min(3).max(200),
+				confirmation: z.literal(CLONE_PRODUCT_CONFIRMATION),
+			}),
+		},
+		async ({ source_product_id, expected_source_name, new_name }) => {
+			try {
+				if (new_name === expected_source_name) {
+					throw new Error(
+						"Refusing clone: the new name must differ from the source name.",
+					);
+				}
+				const sourceResponse = await wcFetch(`products/${source_product_id}`);
+				const source = await sourceResponse.json<any>();
+				if (source.name !== expected_source_name) {
+					throw new Error(
+						`Refusing clone: product ${source_product_id} is named "${source.name}", not the expected source name.`,
+					);
+				}
+				const existingResponse = await wcFetch("products", {
+					search: new_name,
+					status: "any",
+					per_page: 100,
+				});
+				const existing = (await existingResponse.json<any[]>()).find(
+					(product) =>
+						String(product.name).trim().toLowerCase() === new_name.toLowerCase(),
+				);
+				if (existing) {
+					throw new Error(
+						`Refusing clone: product ${existing.id} already has the exact target name "${new_name}".`,
+					);
+				}
+
+				const copyFields = [
+					"type",
+					"description",
+					"short_description",
+					"regular_price",
+					"sale_price",
+					"date_on_sale_from",
+					"date_on_sale_to",
+					"virtual",
+					"downloadable",
+					"downloads",
+					"download_limit",
+					"download_expiry",
+					"external_url",
+					"button_text",
+					"tax_status",
+					"tax_class",
+					"manage_stock",
+					"stock_quantity",
+					"backorders",
+					"sold_individually",
+					"weight",
+					"dimensions",
+					"shipping_class",
+					"reviews_allowed",
+					"upsell_ids",
+					"cross_sell_ids",
+					"categories",
+					"tags",
+					"images",
+					"attributes",
+					"default_attributes",
+					"grouped_products",
+					"menu_order",
+				] as const;
+				const clonePayload: Record<string, unknown> = {
+					name: new_name,
+					status: "draft",
+					catalog_visibility: "hidden",
+					sku: "",
+				};
+				for (const field of copyFields) {
+					if (source[field] !== undefined && source[field] !== null) {
+						clonePayload[field] = source[field];
+					}
+				}
+				clonePayload.meta_data = (source.meta_data ?? [])
+					.filter((meta: any) => !["_edit_lock", "_edit_last"].includes(String(meta.key)))
+					.map((meta: any) => ({ key: meta.key, value: meta.value }));
+				const createdResponse = await wcCreate("products", clonePayload);
+				const created = await createdResponse.json<any>();
+				const verificationResponse = await wcFetch(`products/${created.id}`);
+				const verified = await verificationResponse.json<any>();
+				if (
+					verified.status !== "draft" ||
+					verified.catalog_visibility !== "hidden" ||
+					verified.name !== new_name
+				) {
+					throw new Error(
+						`Clone ${created.id} failed draft/hidden/name verification. It must be reviewed manually; source product was not modified.`,
+					);
+				}
+				return toolResult({
+					created: true,
+					source_modified: false,
+					source: { id: source.id, name: source.name, status: source.status },
+					clone: {
+						id: verified.id,
+						name: verified.name,
+						slug: verified.slug,
+						status: verified.status,
+						catalog_visibility: verified.catalog_visibility,
+						type: verified.type,
+						meta_record_count: verified.meta_data?.length ?? 0,
+					},
+					publication_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"install_update_blindmotion_visualizer_plugin_guarded",
+		{
+			description:
+				"Install or update only the isolated blindmotion-visualizer WordPress plugin through the locked Blindmotion WordPress bridge. Validates a ZIP signature, exact SHA-256 digest, semantic version, fixed slug/main file and expected installed version; cannot write another plugin.",
+			inputSchema: z.object({
+				target_version: z.string().regex(/^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$/),
+				expected_current_version: z
+					.string()
+					.regex(/^(?:NONE|\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?)$/),
+				archive_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+				plugin_zip_base64: z.string().min(100).max(8_000_000),
+				confirmation: z.literal(VISUALIZER_PLUGIN_CONFIRMATION),
+			}),
+		},
+		async ({ target_version, expected_current_version, archive_sha256, plugin_zip_base64 }) => {
+			try {
+				const bytes = decodeBase64(plugin_zip_base64);
+				if (bytes.length < 64 || bytes.length > 6_000_000) {
+					throw new Error("Visualizer ZIP must decode to between 64 bytes and 6 MB.");
+				}
+				if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+					throw new Error("Visualizer package is not a ZIP archive.");
+				}
+				const calculatedSha256 = await sha256Hex(bytes);
+				if (calculatedSha256 !== archive_sha256) {
+					throw new Error("Visualizer ZIP SHA-256 does not match the confirmed digest.");
+				}
+				const bridgeResponse = await wpMcpWrite("visualizer-plugin", {
+					action: expected_current_version === "NONE" ? "install" : "update",
+					plugin_slug: VISUALIZER_PLUGIN_SLUG,
+					main_file: VISUALIZER_PLUGIN_MAIN_FILE,
+					target_version,
+					expected_current_version,
+					archive_sha256,
+					archive_base64: plugin_zip_base64,
+					activate: true,
+				});
+				const verified = await bridgeResponse.json<any>();
+				if (
+					verified.plugin_slug !== VISUALIZER_PLUGIN_SLUG ||
+					verified.main_file !== VISUALIZER_PLUGIN_MAIN_FILE ||
+					verified.version !== target_version ||
+					verified.archive_sha256 !== archive_sha256 ||
+					verified.active !== true
+				) {
+					throw new Error(
+						"WordPress bridge response failed visualizer identity/version/digest verification.",
+					);
+				}
+				return toolResult({
+					completed: true,
+					plugin_slug: verified.plugin_slug,
+					main_file: verified.main_file,
+					previous_version: verified.previous_version ?? null,
+					version: verified.version,
+					archive_sha256: verified.archive_sha256,
+					active: verified.active,
+					rollback_available: verified.rollback_available === true,
+				});
 			} catch (error) {
 				return toolError(error);
 			}
