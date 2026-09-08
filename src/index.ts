@@ -5182,7 +5182,8 @@ function createServer() {
 							`${row.campaignAsset?.fieldType}\u0000${row.asset?.resourceName}`,
 					),
 				]);
-				const operations: any[] = [];
+				const assetOperations: any[] = [];
+				const linkOperations: any[] = [];
 				const textSummary: any[] = [];
 				const imageSummary: any[] = [];
 				let textTemporaryId = -4000;
@@ -5194,7 +5195,7 @@ function createServer() {
 					if (!assetResource) {
 						const currentId = textTemporaryId--;
 						assetResource = googleAdsAssetResource(String(currentId));
-						operations.push({
+						assetOperations.push({
 							assetOperation: {
 								create: {
 									resourceName: assetResource,
@@ -5204,7 +5205,7 @@ function createServer() {
 							},
 						});
 					}
-					operations.push(
+					linkOperations.push(
 						buildAssetLinkOperation(
 							assetResource,
 							item.fieldType,
@@ -5249,7 +5250,7 @@ function createServer() {
 						const digest = await sha256Hex(bytes);
 						const currentId = imageTemporaryId--;
 						assetResource = googleAdsAssetResource(String(currentId));
-						operations.push({
+						assetOperations.push({
 							assetOperation: {
 								create: {
 									resourceName: assetResource,
@@ -5259,7 +5260,7 @@ function createServer() {
 							},
 						});
 					}
-					operations.push(
+					linkOperations.push(
 						buildAssetLinkOperation(
 							assetResource,
 							image.field_type,
@@ -5274,6 +5275,9 @@ function createServer() {
 					});
 				}
 
+				// Google evaluates the required PMax bundle atomically only when every
+				// AssetOperation precedes every operation that links those assets.
+				const operations = [...assetOperations, ...linkOperations];
 				await googleAdsMutate(operations, true);
 				const mutation = await googleAdsMutate(operations, false);
 				const after = await getZipGripAssetState();
