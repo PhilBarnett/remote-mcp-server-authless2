@@ -41,6 +41,23 @@ async function wcFetch(path: string, params: Record<string, string | number | un
 	return response;
 }
 
+async function wcWrite(path: string, body: unknown) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const response = await fetch(`${workerEnv.WC_SITE}/wp-json/wc/v3/${path}`, {
+		method: "PUT",
+		headers: {
+			Authorization: getAuthHeader(),
+			Accept: "application/json",
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(body),
+	});
+	if (!response.ok) {
+		throw new Error(`WooCommerce write failed: ${response.status} ${await response.text()}`);
+	}
+	return response;
+}
+
 async function wpFetch(path: string) {
 	const workerEnv = env as unknown as Record<string, string>;
 	const url = new URL(`${workerEnv.WC_SITE}/wp-json/wp/v2/${path}`);
@@ -55,8 +72,60 @@ async function wpFetch(path: string) {
 	return response;
 }
 
+function getWpWriteAuthHeader() {
+	const workerEnv = env as unknown as Record<string, string | undefined>;
+	if (!workerEnv.WP_USERNAME || !workerEnv.WP_APPLICATION_PASSWORD) {
+		throw new Error(
+			"WordPress media writes are not configured. Set WP_USERNAME and WP_APPLICATION_PASSWORD in Cloudflare.",
+		);
+	}
+	return `Basic ${btoa(`${workerEnv.WP_USERNAME}:${workerEnv.WP_APPLICATION_PASSWORD}`)}`;
+}
+
+async function wpUploadMedia(filename: string, mimeType: string, bytes: Uint8Array) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const response = await fetch(`${workerEnv.WC_SITE}/wp-json/wp/v2/media`, {
+		method: "POST",
+		headers: {
+			Authorization: getWpWriteAuthHeader(),
+			Accept: "application/json",
+			"Content-Type": mimeType,
+			"Content-Disposition": `attachment; filename="${filename.replace(/["\\\r\n]/g, "-")}"`,
+		},
+		body: bytes,
+	});
+	if (!response.ok) {
+		throw new Error(`WordPress media upload failed: ${response.status} ${await response.text()}`);
+	}
+	return response.json<any>();
+}
+
+function decodeBase64(value: string) {
+	const binary = atob(value);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+	return bytes;
+}
+
+function hasExpectedImageSignature(bytes: Uint8Array, mimeType: string) {
+	if (mimeType === "image/jpeg") return bytes[0] === 0xff && bytes[1] === 0xd8;
+	if (mimeType === "image/png") {
+		return bytes.slice(0, 8).every(
+			(byte, index) => byte === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index],
+		);
+	}
+	if (mimeType === "image/webp") {
+		return (
+			String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" &&
+			String.fromCharCode(...bytes.slice(8, 12)) === "WEBP"
+		);
+	}
+	return false;
+}
+
 type ProductImageReference = {
 	role: "custom_field";
+	meta_data_id?: number;
 	custom_field_key: string;
 	custom_field_path: string;
 	attachment_id?: number;
@@ -92,7 +161,8 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 	const referenceByPath = new Map<string, ProductImageReference>();
 
 	function addReference(reference: ProductImageReference) {
-		const existing = referenceByPath.get(reference.custom_field_path);
+		const pathIdentity = `${reference.meta_data_id ?? ""}|${reference.custom_field_path}`;
+		const existing = referenceByPath.get(pathIdentity);
 		if (existing) {
 			// Product-option plugins commonly repeat a choice as both an attachment ID
 			// and a thumbnail URL. Keep one reference and prefer the resolvable ID.
@@ -101,20 +171,21 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 			return;
 		}
 
-		const identity = `${reference.custom_field_path}|${reference.attachment_id ?? ""}|${reference.source_url ?? ""}`;
+		const identity = `${pathIdentity}|${reference.attachment_id ?? ""}|${reference.source_url ?? ""}`;
 		if (!seen.has(identity)) {
 			seen.add(identity);
-			referenceByPath.set(reference.custom_field_path, reference);
+			referenceByPath.set(pathIdentity, reference);
 			references.push(reference);
 		}
 	}
 
-	function visit(value: unknown, customFieldKey: string, path: string) {
+	function visit(value: unknown, customFieldKey: string, path: string, metaDataId?: number) {
 		const imageContext = isImageValuePath(path);
 
 		if (typeof value === "number" && Number.isInteger(value) && value > 0 && imageContext) {
 			addReference({
 				role: "custom_field",
+				meta_data_id: metaDataId,
 				custom_field_key: customFieldKey,
 				custom_field_path: path,
 				attachment_id: value,
@@ -126,6 +197,7 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 			for (const match of value.matchAll(IMAGE_URL_PATTERN)) {
 				addReference({
 					role: "custom_field",
+					meta_data_id: metaDataId,
 					custom_field_key: customFieldKey,
 					custom_field_path: path,
 					source_url: normaliseImageUrl(match[0]),
@@ -136,6 +208,7 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 			if (imageContext && /^\d+$/.test(trimmedValue)) {
 				addReference({
 					role: "custom_field",
+					meta_data_id: metaDataId,
 					custom_field_key: customFieldKey,
 					custom_field_path: path,
 					attachment_id: Number(trimmedValue),
@@ -145,7 +218,7 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 			// Follow structured JSON rather than scraping arbitrary numbers from text.
 			if (/^[{[]/.test(trimmedValue)) {
 				try {
-					visit(JSON.parse(trimmedValue), customFieldKey, path);
+					visit(JSON.parse(trimmedValue), customFieldKey, path, metaDataId);
 				} catch {
 					// Not valid JSON; explicit URLs and serialized image keys are handled below.
 				}
@@ -159,6 +232,7 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 				if (serializedId && isImageValuePath(serializedKey)) {
 					addReference({
 						role: "custom_field",
+						meta_data_id: metaDataId,
 						custom_field_key: customFieldKey,
 						custom_field_path: `${path}.${serializedKey}`,
 						attachment_id: Number(serializedId),
@@ -169,23 +243,59 @@ function collectProductImageReferences(metaData: any[] | undefined) {
 		}
 
 		if (Array.isArray(value)) {
-			value.forEach((item, index) => visit(item, customFieldKey, `${path}[${index}]`));
+			value.forEach((item, index) =>
+				visit(item, customFieldKey, `${path}[${index}]`, metaDataId),
+			);
 			return;
 		}
 
 		if (value && typeof value === "object") {
 			for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-				visit(child, customFieldKey, `${path}.${key}`);
+				visit(child, customFieldKey, `${path}.${key}`, metaDataId);
 			}
 		}
 	}
 
 	for (const meta of metaData ?? []) {
 		const key = String(meta?.key ?? "unknown");
-		visit(meta?.value, key, key);
+		visit(meta?.value, key, key, Number(meta?.id) || undefined);
 	}
 
 	return references;
+}
+
+function productMetaPathTokens(customFieldKey: string, path: string) {
+	if (path === customFieldKey) return [];
+	if (!path.startsWith(`${customFieldKey}.`) && !path.startsWith(`${customFieldKey}[`)) {
+		throw new Error("Custom-field path does not belong to the selected meta key.");
+	}
+	const relativePath = path.slice(customFieldKey.length).replace(/^\./, "");
+	return [...relativePath.matchAll(/(?:^|\.)([^.\[\]]+)|\[(\d+)\]/g)].map((match) =>
+		match[1] ?? Number(match[2]),
+	);
+}
+
+function getNestedValue(root: any, tokens: Array<string | number>) {
+	let current = root;
+	for (const token of tokens) {
+		if (current === null || current === undefined || !(token in Object(current))) {
+			throw new Error("Custom-field path no longer exists on the product.");
+		}
+		current = current[token];
+	}
+	return current;
+}
+
+function setNestedValue(root: any, tokens: Array<string | number>, value: unknown) {
+	if (!tokens.length) throw new Error("Refusing to replace an entire custom-field value.");
+	let current = root;
+	for (const token of tokens.slice(0, -1)) {
+		if (current === null || current === undefined || !(token in Object(current))) {
+			throw new Error("Custom-field path no longer exists on the product.");
+		}
+		current = current[token];
+	}
+	current[tokens[tokens.length - 1]] = value;
 }
 
 function mediaMetadata(media: any, fallback: Record<string, unknown> = {}) {
@@ -1140,6 +1250,292 @@ function createServer() {
 				);
 
 				return toolResult(results);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_product_image_reference_report",
+		{
+			description:
+				"Read-only report of reused product-image attachments and unresolved custom-field image references.",
+			inputSchema: z.object({
+				status: z.string().default("publish"),
+				limit: z.number().int().min(1).max(100).default(100),
+			}),
+		},
+		async ({ status, limit }) => {
+			try {
+				const response = await wcFetch("products", {
+					status,
+					per_page: limit,
+					orderby: "title",
+					order: "asc",
+				});
+				const products = await response.json<any[]>();
+				const assignments: Array<Record<string, any>> = [];
+				for (const product of products) {
+					for (const [position, image] of (product.images ?? []).entries()) {
+						assignments.push({
+							product_id: product.id,
+							product_name: product.name,
+							role: position === 0 ? "featured" : "gallery",
+							attachment_id: image.id,
+							source_url: image.src,
+						});
+					}
+					for (const reference of collectProductImageReferences(product.meta_data)) {
+						assignments.push({
+							product_id: product.id,
+							product_name: product.name,
+							...reference,
+						});
+					}
+				}
+
+				const ids = [
+					...new Set(
+						assignments
+							.map((assignment) => assignment.attachment_id)
+							.filter((id): id is number => Number.isInteger(id) && id > 0),
+					),
+				];
+				const validIds = new Set<number>();
+				for (let index = 0; index < ids.length; index += 100) {
+					const batch = ids.slice(index, index + 100);
+					const mediaResponse = await wpFetch(
+						`media?include=${batch.join(",")}&per_page=100`,
+					);
+					for (const media of await mediaResponse.json<any[]>()) validIds.add(media.id);
+				}
+				const firstMediaResponse = await wpFetch("media?per_page=100&page=1");
+				const mediaItems = await firstMediaResponse.json<any[]>();
+				const reportedPages = Number(
+					firstMediaResponse.headers.get("X-WP-TotalPages") ?? 1,
+				);
+				const totalPages = Math.min(Math.max(reportedPages, 1), 40);
+				for (let page = 2; page <= totalPages; page += 5) {
+					const pageNumbers = Array.from(
+						{ length: Math.min(5, totalPages - page + 1) },
+						(_, offset) => page + offset,
+					);
+					const pageResponses = await Promise.all(
+						pageNumbers.map((pageNumber) =>
+							wpFetch(`media?per_page=100&page=${pageNumber}`),
+						),
+					);
+					for (const pageResponse of pageResponses) {
+						mediaItems.push(...(await pageResponse.json<any[]>()));
+					}
+				}
+				const mediaByFilename = new Map(
+					mediaItems.map((media) => [
+						mediaFilenameKey(media.source_url ?? ""),
+						media,
+					]),
+				);
+				for (const assignment of assignments) {
+					if (!assignment.attachment_id && assignment.source_url) {
+						const media = mediaByFilename.get(mediaFilenameKey(assignment.source_url));
+						if (media) assignment.resolved_attachment_id = media.id;
+					}
+				}
+
+				const workerEnv = env as unknown as Record<string, string | undefined>;
+				const siteHost = new URL(workerEnv.WC_SITE ?? "https://invalid.local").host;
+				const unresolved = assignments.filter((assignment) => {
+					if (assignment.attachment_id) return !validIds.has(assignment.attachment_id);
+					if (!assignment.source_url) return true;
+					try {
+						return (
+							new URL(assignment.source_url).host !== siteHost ||
+							!assignment.resolved_attachment_id
+						);
+					} catch {
+						return true;
+					}
+				});
+
+				const grouped = new Map<string, any[]>();
+				for (const assignment of assignments) {
+					const resolvedId =
+						assignment.attachment_id ?? assignment.resolved_attachment_id;
+					const identity = resolvedId
+						? `id:${resolvedId}`
+						: `url:${normaliseImageUrl(assignment.source_url ?? "")}`;
+					const group = grouped.get(identity) ?? [];
+					group.push(assignment);
+					grouped.set(identity, group);
+				}
+				const reused = [...grouped.entries()]
+					.map(([identity, uses]) => ({
+						identity,
+						assignment_count: uses.length,
+						product_count: new Set(uses.map((use) => use.product_id)).size,
+						uses,
+					}))
+					.filter((group) => group.assignment_count > 1)
+					.sort((a, b) => b.assignment_count - a.assignment_count);
+
+				return toolResult({
+					product_count: products.length,
+					assignment_count: assignments.length,
+					unique_reference_count: grouped.size,
+					reused_reference_count: reused.length,
+					unresolved_reference_count: unresolved.length,
+					reused_references: reused,
+					unresolved_references: unresolved,
+					media_replacement_configured: Boolean(
+						workerEnv.WP_USERNAME && workerEnv.WP_APPLICATION_PASSWORD,
+					),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"replace_product_option_image_guarded",
+		{
+			description:
+				"Upload a new WordPress attachment and replace exactly one product-option image reference, preserving the original attachment and a durable rollback record. Cannot delete media.",
+			inputSchema: z
+				.object({
+					product_id: z.number().int().positive(),
+					meta_data_id: z.number().int().positive(),
+					custom_field_key: z.string().min(1),
+					custom_field_path: z.string().min(1),
+					expected_attachment_id: z.number().int().positive().optional(),
+					expected_source_url: z.string().url().optional(),
+					replacement_filename: z.string().regex(/^[A-Za-z0-9._-]+$/),
+					replacement_mime_type: z.enum(["image/jpeg", "image/png", "image/webp"]),
+					replacement_base64: z.string().min(4).max(8_000_000),
+					confirmation: z.literal("CONFIRM REPLACE PRODUCT OPTION IMAGE"),
+				})
+				.refine(
+					(value) =>
+						value.expected_attachment_id !== undefined ||
+						value.expected_source_url !== undefined,
+					{ message: "An expected current attachment ID or URL is required." },
+				),
+		},
+		async ({
+			product_id,
+			meta_data_id,
+			custom_field_key,
+			custom_field_path,
+			expected_attachment_id,
+			expected_source_url,
+			replacement_filename,
+			replacement_mime_type,
+			replacement_base64,
+		}) => {
+			try {
+				const productResponse = await wcFetch(`products/${product_id}`);
+				const product = await productResponse.json<any>();
+				const meta = (product.meta_data ?? []).find(
+					(item: any) => item.id === meta_data_id && item.key === custom_field_key,
+				);
+				if (!meta) throw new Error("The exact product meta record was not found.");
+
+				const storedAsJson = typeof meta.value === "string" && /^[{[]/.test(meta.value.trim());
+				const parsedValue = storedAsJson ? JSON.parse(meta.value) : structuredClone(meta.value);
+				const tokens = productMetaPathTokens(custom_field_key, custom_field_path);
+				const oldValue = getNestedValue(parsedValue, tokens);
+				const attachmentMatches =
+					expected_attachment_id === undefined ||
+					Number(oldValue) === expected_attachment_id;
+				const urlMatches =
+					expected_source_url === undefined ||
+					(typeof oldValue === "string" &&
+						normaliseImageUrl(oldValue) === normaliseImageUrl(expected_source_url));
+				if (!attachmentMatches || !urlMatches) {
+					throw new Error("Current image reference does not match the expected value; no write performed.");
+				}
+				if (
+					typeof oldValue !== "number" &&
+					!(typeof oldValue === "string" && (/^\d+$/.test(oldValue) || /^https?:/i.test(oldValue)))
+				) {
+					throw new Error("The selected path is not a supported scalar image reference.");
+				}
+
+				const bytes = decodeBase64(replacement_base64);
+				if (!bytes.length || bytes.length > 6_000_000) {
+					throw new Error("Replacement image must decode to between 1 byte and 6 MB.");
+				}
+				if (!hasExpectedImageSignature(bytes, replacement_mime_type)) {
+					throw new Error("Replacement bytes do not match the declared image MIME type.");
+				}
+				const uploaded = await wpUploadMedia(
+					replacement_filename,
+					replacement_mime_type,
+					bytes,
+				);
+				const newValue =
+					typeof oldValue === "number"
+						? uploaded.id
+						: /^\d+$/.test(oldValue)
+							? String(uploaded.id)
+							: uploaded.source_url;
+				setNestedValue(parsedValue, tokens, newValue);
+
+				const backupKey = "_blindmotion_mcp_image_replacement_backups";
+				const backupMeta = (product.meta_data ?? []).find(
+					(item: any) => item.key === backupKey,
+				);
+				const backups = Array.isArray(backupMeta?.value) ? [...backupMeta.value] : [];
+				const backup = {
+					backup_id: crypto.randomUUID(),
+					created_at: new Date().toISOString(),
+					product_id,
+					meta_data_id,
+					custom_field_key,
+					custom_field_path,
+					old_value: oldValue,
+					new_attachment_id: uploaded.id,
+					new_source_url: uploaded.source_url,
+				};
+				backups.push(backup);
+				const updateResponse = await wcWrite(`products/${product_id}`, {
+					meta_data: [
+						{
+							id: meta_data_id,
+							key: custom_field_key,
+							value: storedAsJson ? JSON.stringify(parsedValue) : parsedValue,
+						},
+						{
+							...(backupMeta?.id ? { id: backupMeta.id } : {}),
+							key: backupKey,
+							value: backups,
+						},
+					],
+				});
+				const updatedProduct = await updateResponse.json<any>();
+				const updatedMeta = (updatedProduct.meta_data ?? []).find(
+					(item: any) => item.id === meta_data_id,
+				);
+				const updatedParsed = storedAsJson
+					? JSON.parse(updatedMeta.value)
+					: updatedMeta.value;
+				if (getNestedValue(updatedParsed, tokens) !== newValue) {
+					throw new Error("WooCommerce returned without verifying the new image reference.");
+				}
+
+				return toolResult({
+					replaced: true,
+					product_id,
+					product_name: product.name,
+					meta_data_id,
+					custom_field_path,
+					old_value: oldValue,
+					new_value: newValue,
+					new_attachment: mediaMetadata(uploaded),
+					backup,
+					original_attachment_deleted: false,
+				});
 			} catch (error) {
 				return toolError(error);
 			}
