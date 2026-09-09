@@ -571,6 +571,7 @@ const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
 const META_CREATE_SPRING_FORM_CONFIRMATION = "CONFIRM CREATE SPRING META FORM";
 const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
 const META_REPAIR_SPRING_ADS_CONFIRMATION = "CONFIRM REPAIR ACTIVE SPRING META ADS";
+const META_LEAD_AD_LINK = "https://fb.me/";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
 
 async function assertMetaObjectOwnership(
@@ -4985,9 +4986,13 @@ function createServer() {
 						{ video_id: video_4x5_id, adlabels: [{ name: "video_feed_4x5" }] },
 						{ video_id: video_9x16_id, adlabels: [{ name: "video_vertical_9x16" }] },
 					],
+					link_urls: [{ website_url: META_LEAD_AD_LINK }],
 					call_to_action_types: [cta_type],
 					call_to_actions: [
-						{ type: cta_type, value: { lead_gen_form_id: lead_form_id } },
+						{
+							type: cta_type,
+							value: { lead_gen_form_id: lead_form_id, link: META_LEAD_AD_LINK },
+						},
 					],
 					asset_customization_rules: [
 						{
