@@ -570,6 +570,7 @@ function safeMetaBudgetObject(object: any, objectType: "campaign" | "adset") {
 const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
 const META_CREATE_SPRING_FORM_CONFIRMATION = "CONFIRM CREATE SPRING META FORM";
 const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
+const META_REPAIR_SPRING_ADS_CONFIRMATION = "CONFIRM REPAIR ACTIVE SPRING META ADS";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
 
 async function assertMetaObjectOwnership(
@@ -4039,6 +4040,77 @@ function createServer() {
 	);
 
 	server.registerTool(
+		"get_meta_leads_for_owned_forms",
+		{
+			description:
+				"Retrieve leads from explicitly identified active Instant Forms owned by an assigned Blindmotion Page. Read-only; returns lead contact fields so the business can recover and follow up enquiries after a form-routing error.",
+			inputSchema: z.object({
+				page_id: z.string().regex(/^\d+$/),
+				forms: z
+					.array(
+						z.object({
+							form_id: z.string().regex(/^\d+$/),
+							expected_name: z.string().trim().min(3).max(200),
+						}),
+					)
+					.min(1)
+					.max(10),
+				created_on_or_after: z.string().datetime(),
+				limit_per_form: z.number().int().min(1).max(100).default(100),
+			}),
+		},
+		async ({ page_id, forms, created_on_or_after, limit_per_form }) => {
+			try {
+				await assertOwnedMetaPage(page_id);
+				const pageAccessToken = await getOwnedMetaPageAccessToken(page_id);
+				const ownedForms = await getOwnedMetaLeadForms(page_id, 100);
+				const validatedForms = forms.map(({ form_id, expected_name }) => {
+					const form = ownedForms.find((item: any) => String(item.id) === form_id);
+					if (!form || form.status !== "ACTIVE") {
+						throw new Error(
+							`Form ${form_id} is not an active form owned by the selected Page.`,
+						);
+					}
+					if (String(form.name) !== expected_name) {
+						throw new Error(`Form ${form_id} name does not exactly match expectation.`);
+					}
+					return form;
+				});
+				const rows: any[] = [];
+				for (const form of validatedForms) {
+					const leads = await getAllMetaEdgeRows(
+						String(form.id) + "/leads",
+						{
+							fields: "id,created_time,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,form_id,field_data,platform,is_organic",
+						},
+						limit_per_form,
+						pageAccessToken,
+					);
+					rows.push(
+						...leads
+							.filter(
+								(item: any) =>
+									String(item.created_time ?? "") >= created_on_or_after,
+							)
+							.map((item: any) => ({ ...item, source_form_name: form.name })),
+					);
+				}
+				rows.sort((a, b) => String(a.created_time).localeCompare(String(b.created_time)));
+				return toolResult({
+					page_id,
+					forms: validatedForms.map((form: any) => ({ id: form.id, name: form.name })),
+					created_on_or_after,
+					lead_count: rows.length,
+					leads: rows,
+					read_only: true,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"create_meta_spring_instant_form_for_paused_ads",
 		{
 			description:
@@ -4653,7 +4725,7 @@ function createServer() {
 		"create_meta_instant_form_placement_video_ad_paused",
 		{
 			description:
-				"Create one new placement-customized creative from explicitly validated 4:5 and 9:16 videos owned by the configured ad account, then create one PAUSED Instant-Form ad. Exact titles, upload times, durations and dimensions are required. Feed placements use 4:5; Stories and Reels use 9:16. Cannot activate delivery.",
+				"Create one new placement-customized creative from explicitly validated 4:5 and 9:16 videos owned by the configured ad account, then create one PAUSED Instant-Form ad. Exact titles, upload times, durations and dimensions are required. Feed placements use 4:5; Stories and Reels use 9:16. The owned parent may be ACTIVE only for a Spring repair; the new ad always remains PAUSED and cannot deliver until separately switched.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				page_id: z.string().regex(/^\d+$/),
@@ -4720,8 +4792,8 @@ function createServer() {
 					);
 				}
 				const adset = await assertMetaObjectOwnership(adset_id, "adset");
-				if (adset.status !== "PAUSED") {
-					throw new Error("Refusing creation: parent ad set must be PAUSED.");
+				if (!["PAUSED", "ACTIVE"].includes(adset.status)) {
+					throw new Error("Refusing creation: parent ad set must be PAUSED or ACTIVE.");
 				}
 				const adsetDetails = await metaFetch(adset_id, {
 					fields: "id,name,account_id,campaign_id,status,effective_status,optimization_goal,destination_type,promoted_object",
@@ -4741,9 +4813,13 @@ function createServer() {
 					String(adsetDetails.campaign_id),
 					"campaign",
 				);
-				if (campaign.status !== "PAUSED" || campaign.objective !== "OUTCOME_LEADS") {
+				if (
+					!["PAUSED", "ACTIVE"].includes(campaign.status) ||
+					campaign.objective !== "OUTCOME_LEADS" ||
+					(campaign.status === "ACTIVE" && !/spring/i.test(campaign.name))
+				) {
 					throw new Error(
-						"Refusing creation: parent campaign must be a PAUSED OUTCOME_LEADS campaign.",
+						"Refusing creation: parent campaign must be an OUTCOME_LEADS campaign; ACTIVE parents are allowed only for an explicitly Spring-named repair.",
 					);
 				}
 
@@ -5016,6 +5092,187 @@ function createServer() {
 					activation_performed: false,
 					object_type: "ad",
 					...verified,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"repair_active_spring_meta_ads_guarded",
+		{
+			description:
+				"Atomically switch a reviewed Spring lead campaign from delivered ads using incorrect forms to PAUSED replacement ads using one exact intended form. Validates ownership, campaign/ad-set identity, form linkage, placement customisation and status; activates replacements, pauses old ads, verifies the final state, and never deletes history.",
+			inputSchema: z.object({
+				campaign_id: z.string().regex(/^\d+$/),
+				expected_campaign_name: z.string().trim().min(3).max(200),
+				adset_id: z.string().regex(/^\d+$/),
+				expected_adset_name: z.string().trim().min(3).max(200),
+				page_id: z.string().regex(/^\d+$/),
+				intended_form_id: z.string().regex(/^\d+$/),
+				intended_form_expected_name: z.string().trim().min(3).max(200),
+				replacement_ads: z
+					.array(
+						z.object({
+							ad_id: z.string().regex(/^\d+$/),
+							expected_name: z.string().trim().min(3).max(200),
+						}),
+					)
+					.min(1)
+					.max(10),
+				incorrect_ads: z
+					.array(
+						z.object({
+							ad_id: z.string().regex(/^\d+$/),
+							expected_name: z.string().trim().min(3).max(200),
+						}),
+					)
+					.min(1)
+					.max(10),
+				confirmation: z.literal(META_REPAIR_SPRING_ADS_CONFIRMATION),
+			}),
+		},
+		async ({
+			campaign_id,
+			expected_campaign_name,
+			adset_id,
+			expected_adset_name,
+			page_id,
+			intended_form_id,
+			intended_form_expected_name,
+			replacement_ads,
+			incorrect_ads,
+		}) => {
+			try {
+				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
+				if (
+					campaign.name !== expected_campaign_name ||
+					campaign.status !== "ACTIVE" ||
+					campaign.objective !== "OUTCOME_LEADS" ||
+					!/spring/i.test(campaign.name)
+				) {
+					throw new Error(
+						"Refusing repair: campaign identity, status, objective or Spring name did not match.",
+					);
+				}
+				const adset = await assertMetaObjectOwnership(adset_id, "adset");
+				if (
+					String(adset.campaign_id) !== campaign_id ||
+					adset.name !== expected_adset_name ||
+					adset.status !== "ACTIVE"
+				) {
+					throw new Error(
+						"Refusing repair: active parent ad set did not exactly match expectation.",
+					);
+				}
+				const form = await assertOwnedActiveMetaLeadForm(page_id, intended_form_id);
+				if (
+					String(form.name) !== intended_form_expected_name ||
+					!/spring/i.test(form.name)
+				) {
+					throw new Error(
+						"Refusing repair: intended Spring form name did not exactly match expectation.",
+					);
+				}
+				const allIds = [...replacement_ads, ...incorrect_ads].map((item) => item.ad_id);
+				if (new Set(allIds).size !== allIds.length) {
+					throw new Error(
+						"Refusing repair: replacement and incorrect ad IDs must be unique.",
+					);
+				}
+				const loadAd = async (item: { ad_id: string; expected_name: string }) => {
+					const ad = await metaFetch(item.ad_id, {
+						fields: "id,name,account_id,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_spec,asset_feed_spec}",
+					});
+					await assertMetaObjectOwnership(item.ad_id, "ad");
+					if (
+						ad.name !== item.expected_name ||
+						String(ad.campaign_id) !== campaign_id ||
+						String(ad.adset_id) !== adset_id
+					) {
+						throw new Error(
+							`Refusing repair: ad ${item.ad_id} identity or parent did not match.`,
+						);
+					}
+					return ad;
+				};
+				const replacements = await Promise.all(replacement_ads.map(loadAd));
+				const incorrect = await Promise.all(incorrect_ads.map(loadAd));
+				for (const ad of replacements) {
+					if (ad.status !== "PAUSED")
+						throw new Error(`Replacement ad ${ad.id} is not PAUSED.`);
+					const formIds = collectMetaLeadFormIds(ad.creative);
+					if (formIds.size !== 1 || !formIds.has(intended_form_id)) {
+						throw new Error(
+							`Replacement ad ${ad.id} is not linked exclusively to the intended form.`,
+						);
+					}
+					const rules = ad.creative?.asset_feed_spec?.asset_customization_rules ?? [];
+					if (!Array.isArray(rules) || rules.length < 2) {
+						throw new Error(
+							`Replacement ad ${ad.id} lacks verified feed versus Stories/Reels placement rules.`,
+						);
+					}
+				}
+				for (const ad of incorrect) {
+					if (ad.status !== "ACTIVE")
+						throw new Error(`Incorrect ad ${ad.id} is not ACTIVE.`);
+					if (collectMetaLeadFormIds(ad.creative).has(intended_form_id)) {
+						throw new Error(
+							`Incorrect ad ${ad.id} already uses the intended form; refusing to pause it.`,
+						);
+					}
+				}
+
+				const changed: Array<{ id: string; previous: "ACTIVE" | "PAUSED" }> = [];
+				try {
+					for (const ad of replacements) {
+						await metaPost(ad.id, { status: "ACTIVE" });
+						changed.push({ id: ad.id, previous: "PAUSED" });
+					}
+					for (const ad of incorrect) {
+						await metaPost(ad.id, { status: "PAUSED" });
+						changed.push({ id: ad.id, previous: "ACTIVE" });
+					}
+				} catch (switchError) {
+					for (const item of changed.reverse()) {
+						try {
+							await metaPost(item.id, { status: item.previous });
+						} catch {
+							/* best-effort rollback */
+						}
+					}
+					throw switchError;
+				}
+				const verifiedReplacements = await Promise.all(
+					replacements.map((ad) =>
+						metaFetch(ad.id, {
+							fields: "id,name,status,effective_status,creative{id,object_story_spec,asset_feed_spec}",
+						}),
+					),
+				);
+				const verifiedIncorrect = await Promise.all(
+					incorrect.map((ad) =>
+						metaFetch(ad.id, { fields: "id,name,status,effective_status" }),
+					),
+				);
+				if (
+					verifiedReplacements.some((ad) => ad.status !== "ACTIVE") ||
+					verifiedIncorrect.some((ad) => ad.status !== "PAUSED")
+				) {
+					throw new Error(
+						"Repair switch completed but final status verification failed; inspect campaign immediately.",
+					);
+				}
+				return toolResult({
+					repaired: true,
+					campaign: { id: campaign.id, name: campaign.name, status: campaign.status },
+					adset: { id: adset.id, name: adset.name, status: adset.status },
+					intended_form: { id: form.id, name: form.name },
+					active_replacement_ads: verifiedReplacements,
+					paused_historical_ads: verifiedIncorrect,
+					deleted_ads: [],
 				});
 			} catch (error) {
 				return toolError(error);
