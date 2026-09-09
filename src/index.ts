@@ -111,6 +111,23 @@ async function wpFetch(path: string) {
 	return response;
 }
 
+async function wpAuthenticatedFetch(path: string) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const url = new URL(`${workerEnv.WC_SITE}/wp-json/wp/v2/${path}`);
+	const response = await fetch(url.toString(), {
+		headers: {
+			Authorization: getWpWriteAuthHeader(),
+			Accept: "application/json",
+		},
+	});
+	if (!response.ok) {
+		throw new Error(
+			`Authenticated WordPress read failed: ${response.status} ${await response.text()}`,
+		);
+	}
+	return response;
+}
+
 function getWpWriteAuthHeader() {
 	const workerEnv = env as unknown as Record<string, string | undefined>;
 	if (!workerEnv.WP_USERNAME || !workerEnv.WP_APPLICATION_PASSWORD) {
@@ -144,6 +161,222 @@ const CLONE_PRODUCT_CONFIRMATION = "CONFIRM CLONE PRODUCT AS DRAFT";
 const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
 const VISUALIZER_PLUGIN_SLUG = "blindmotion-visualizer";
 const VISUALIZER_PLUGIN_MAIN_FILE = "blindmotion-visualizer/blindmotion-visualizer.php";
+
+const OUTDOOR_SEO_TARGETS = {
+	outdoor_blinds: {
+		kind: "page",
+		slug: "outdoor-blinds",
+		path: "/outdoor-blinds/",
+	},
+	straight_drop: {
+		kind: "product",
+		productId: 111,
+		slug: "straightdrop-outdoor-blinds",
+		path: "/straightdrop-outdoor-blinds/",
+	},
+	zip_sided: {
+		kind: "product",
+		productId: 1301,
+		slug: "zipsided-outdoor-blinds",
+		path: "/zipsided-outdoor-blinds/",
+	},
+} as const;
+
+type OutdoorSeoTargetKey = keyof typeof OUTDOOR_SEO_TARGETS;
+
+const OUTDOOR_SEO_SUSPICIOUS_PATTERNS = [
+	{ label: "placeholder_text", pattern: /scelerisque eleifend|lorem ipsum/gi },
+	{ label: "unfinished_way_to_buy", pattern: /way\s+to\s+buy\s*\?\?/gi },
+	{ label: "irrelevant_gift_voucher", pattern: /gift\s+voucher/gi },
+	{ label: "incorrect_indoor_everyday_blind", pattern: /indoor\s+everyday\s+roller\s+blind/gi },
+	{ label: "incorrect_indoor_premium_blind", pattern: /indoor\s+premium\s+roller\s+blind/gi },
+] as const;
+
+function decodeBasicHtmlEntities(value: string) {
+	return value
+		.replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+		.replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+		.replace(/&nbsp;/gi, " ")
+		.replace(/&amp;/gi, "&")
+		.replace(/&quot;/gi, '"')
+		.replace(/&#0?39;|&apos;/gi, "'")
+		.replace(/&lt;/gi, "<")
+		.replace(/&gt;/gi, ">");
+}
+
+function htmlToPlainText(value: string) {
+	return decodeBasicHtmlEntities(
+		value
+			.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+			.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+			.replace(/<[^>]+>/g, " "),
+	)
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function getHtmlAttribute(tag: string, name: string) {
+	for (const match of tag.matchAll(/([^\s=<>]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)) {
+		if (match[1].toLowerCase() === name.toLowerCase()) {
+			return match[2] ?? match[3] ?? match[4] ?? "";
+		}
+	}
+	return undefined;
+}
+
+function extractHtmlSeo(html: string) {
+	const title = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1];
+	const descriptionTag = (html.match(/<meta\b[^>]*>/gi) ?? []).find(
+		(tag) => getHtmlAttribute(tag, "name")?.toLowerCase() === "description",
+	);
+	const canonicalTag = (html.match(/<link\b[^>]*>/gi) ?? []).find((tag) =>
+		getHtmlAttribute(tag, "rel")?.toLowerCase().split(/\s+/).includes("canonical"),
+	);
+	return {
+		title: title ? htmlToPlainText(title) : null,
+		description: descriptionTag
+			? decodeBasicHtmlEntities(getHtmlAttribute(descriptionTag, "content") ?? "").trim()
+			: null,
+		canonical: canonicalTag ? (getHtmlAttribute(canonicalTag, "href") ?? null) : null,
+	};
+}
+
+function extractHtmlHeadings(html: string) {
+	const headings = [...html.matchAll(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi)].map(
+		(match) => ({ level: Number(match[1]), text: htmlToPlainText(match[2]) }),
+	);
+	const counts = new Map<string, { text: string; count: number; levels: Set<number> }>();
+	for (const heading of headings) {
+		if (!heading.text) continue;
+		const key = heading.text.toLowerCase();
+		const current = counts.get(key) ?? {
+			text: heading.text,
+			count: 0,
+			levels: new Set<number>(),
+		};
+		current.count += 1;
+		current.levels.add(heading.level);
+		counts.set(key, current);
+	}
+	return {
+		total: headings.length,
+		h1_count: headings.filter((heading) => heading.level === 1).length,
+		headings: headings.slice(0, 100),
+		duplicates: [...counts.values()]
+			.filter((heading) => heading.count > 1)
+			.map((heading) => ({
+				text: heading.text,
+				count: heading.count,
+				levels: [...heading.levels].sort(),
+			})),
+	};
+}
+
+function suspiciousContentMatches(value: string) {
+	return OUTDOOR_SEO_SUSPICIOUS_PATTERNS.map(({ label, pattern }) => ({
+		label,
+		count: [...value.matchAll(new RegExp(pattern.source, pattern.flags))].length,
+	})).filter((match) => match.count > 0);
+}
+
+function outdoorSeoMetaInventory(metaData: any[]) {
+	return (metaData ?? [])
+		.filter((meta: any) =>
+			/(elementor|yoast|rank_math|page_template|wp_page_template)/i.test(String(meta.key)),
+		)
+		.map((meta: any) => {
+			const serialized =
+				typeof meta.value === "string" ? meta.value : JSON.stringify(meta.value ?? null);
+			return {
+				id: meta.id ?? null,
+				key: String(meta.key),
+				value_type: Array.isArray(meta.value) ? "array" : typeof meta.value,
+				value_length: serialized.length,
+				value: /(title|description|metadesc)$/i.test(String(meta.key))
+					? serialized.slice(0, 500)
+					: undefined,
+				suspicious_matches: suspiciousContentMatches(serialized),
+			};
+		});
+}
+
+async function inspectOutdoorSeoTarget(targetKey: OutdoorSeoTargetKey) {
+	const target = OUTDOOR_SEO_TARGETS[targetKey];
+	const workerEnv = env as unknown as Record<string, string>;
+	const publicUrl = new URL(target.path, workerEnv.WC_SITE).toString();
+	const publicResponse = await fetch(publicUrl, { headers: { Accept: "text/html" } });
+	if (!publicResponse.ok) {
+		throw new Error(`Public page fetch failed: ${publicResponse.status} ${publicUrl}`);
+	}
+	const publicHtml = await publicResponse.text();
+	let record: any;
+	let storedContent: string;
+	let metaInventory: ReturnType<typeof outdoorSeoMetaInventory> = [];
+
+	if (target.kind === "product") {
+		const productResponse = await wcFetch(`products/${target.productId}`);
+		const product = await productResponse.json<any>();
+		if (product.slug !== target.slug || product.permalink !== publicUrl) {
+			throw new Error(`Locked product identity mismatch for ${targetKey}.`);
+		}
+		storedContent = `${product.short_description ?? ""}\n${product.description ?? ""}`;
+		metaInventory = outdoorSeoMetaInventory(product.meta_data ?? []);
+		record = {
+			kind: "product",
+			id: product.id,
+			name: product.name,
+			slug: product.slug,
+			status: product.status,
+			permalink: product.permalink,
+			short_description_html_length: String(product.short_description ?? "").length,
+			description_html_length: String(product.description ?? "").length,
+			meta_record_count: product.meta_data?.length ?? 0,
+		};
+	} else {
+		const pageResponse = await wpAuthenticatedFetch(
+			`pages?slug=${encodeURIComponent(target.slug)}&context=edit&per_page=2`,
+		);
+		const pages = await pageResponse.json<any[]>();
+		if (pages.length !== 1 || pages[0].link !== publicUrl) {
+			throw new Error(`Locked page identity mismatch for ${targetKey}.`);
+		}
+		const page = pages[0];
+		storedContent = page.content?.raw ?? page.content?.rendered ?? "";
+		const pageMeta = Object.entries(page.meta ?? {}).map(([key, value]) => ({ key, value }));
+		metaInventory = outdoorSeoMetaInventory(pageMeta);
+		record = {
+			kind: "page",
+			id: page.id,
+			title: page.title?.raw ?? page.title?.rendered ?? "",
+			slug: page.slug,
+			status: page.status,
+			permalink: page.link,
+			content_html_length: storedContent.length,
+			meta_record_count: pageMeta.length,
+		};
+	}
+
+	const storedSuspicious = suspiciousContentMatches(storedContent);
+	const renderedSuspicious = suspiciousContentMatches(publicHtml);
+	return {
+		target: targetKey,
+		record,
+		seo: extractHtmlSeo(publicHtml),
+		rendered_html_length: publicHtml.length,
+		rendered_text_length: htmlToPlainText(publicHtml).length,
+		stored_text_length: htmlToPlainText(storedContent).length,
+		stored_text_preview: htmlToPlainText(storedContent).slice(0, 1200),
+		headings: extractHtmlHeadings(publicHtml),
+		suspicious_content: { stored: storedSuspicious, rendered: renderedSuspicious },
+		meta_inventory: metaInventory,
+		location_inference:
+			renderedSuspicious.length > 0 &&
+			storedSuspicious.length === 0 &&
+			metaInventory.every((meta) => meta.suspicious_matches.length === 0)
+				? "Suspicious text appears in rendered HTML but not exposed stored content; a shared theme/Elementor template is likely."
+				: null,
+	};
+}
 
 async function sha256Hex(bytes: Uint8Array) {
 	const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -3029,6 +3262,36 @@ function createServer() {
 				}));
 
 				return toolResult(safeProducts);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_outdoor_seo_pages",
+		{
+			description:
+				"Read-only inspection of the three locked Blindmotion outdoor-blinds URLs. Compares stored WordPress/WooCommerce content with rendered HTML, SEO metadata, headings, duplicate headings, Elementor/SEO-plugin metadata inventory and known template-content defects.",
+			inputSchema: z.object({
+				target: z.enum(["outdoor_blinds", "straight_drop", "zip_sided"]).optional(),
+			}),
+		},
+		async ({ target }) => {
+			try {
+				const targets = target
+					? [target]
+					: (Object.keys(OUTDOOR_SEO_TARGETS) as OutdoorSeoTargetKey[]);
+				const inspections = [];
+				for (const targetKey of targets) {
+					inspections.push(await inspectOutdoorSeoTarget(targetKey));
+				}
+				return toolResult({
+					read_only: true,
+					locked_target_count: Object.keys(OUTDOOR_SEO_TARGETS).length,
+					inspection_count: inspections.length,
+					inspections,
+				});
 			} catch (error) {
 				return toolError(error);
 			}
