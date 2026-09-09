@@ -571,6 +571,7 @@ const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
 const META_CREATE_SPRING_FORM_CONFIRMATION = "CONFIRM CREATE SPRING META FORM";
 const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
 const META_REPAIR_SPRING_ADS_CONFIRMATION = "CONFIRM REPAIR ACTIVE SPRING META ADS";
+const META_REFRESH_SPRING_OFFER_REASON = "PROMOTE 20.5 PERCENT OFFER";
 const META_LEAD_AD_LINK = "https://fb.me/";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
 
@@ -5126,15 +5127,15 @@ function createServer() {
 					fields: "id,name,account_id,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_id,thumbnail_url,object_story_spec,asset_feed_spec}",
 				});
 				const verifiedCreative = verified.creative ?? {};
-				const verifiedVideoIds = new Set(
-					(verifiedCreative.asset_feed_spec?.videos ?? []).map((item: any) =>
-						String(item.video_id),
+				const verifiedVideoLabels = new Set(
+					(verifiedCreative.asset_feed_spec?.videos ?? []).flatMap((item: any) =>
+						(item.adlabels ?? []).map((label: any) => String(label.name)),
 					),
 				);
 				if (
 					verified.status !== "PAUSED" ||
-					!verifiedVideoIds.has(video_4x5_id) ||
-					!verifiedVideoIds.has(video_9x16_id) ||
+					!verifiedVideoLabels.has("video_feed_4x5") ||
+					!verifiedVideoLabels.has("video_vertical_9x16") ||
 					!collectMetaLeadFormIds(verifiedCreative).has(lead_form_id)
 				) {
 					throw new Error(
@@ -5230,7 +5231,7 @@ function createServer() {
 		"repair_active_spring_meta_ads_guarded",
 		{
 			description:
-				"Atomically switch a reviewed Spring lead campaign from delivered ads using incorrect forms to PAUSED replacement ads using one exact intended form. Validates ownership, campaign/ad-set identity, form linkage, placement customisation and status; activates replacements, pauses old ads, verifies the final state, and never deletes history.",
+				"Atomically switch a reviewed Spring lead campaign from delivered ads to PAUSED replacement ads using one exact intended form. By default, delivered ads must use incorrect forms. An explicit 20.5%-offer refresh may instead replace ads already using the intended form, but only when the new title, body and description all state 20.5%. Validates ownership, campaign/ad-set identity, form linkage, placement customisation and status; activates replacements, pauses old ads, verifies the final state, and never deletes history.",
 			inputSchema: z.object({
 				campaign_id: z.string().regex(/^\d+$/),
 				expected_campaign_name: z.string().trim().min(3).max(200),
@@ -5257,6 +5258,7 @@ function createServer() {
 					)
 					.min(1)
 					.max(10),
+				refresh_reason: z.literal(META_REFRESH_SPRING_OFFER_REASON).optional(),
 				confirmation: z.literal(META_REPAIR_SPRING_ADS_CONFIRMATION),
 			}),
 		},
@@ -5270,6 +5272,7 @@ function createServer() {
 			intended_form_expected_name,
 			replacement_ads,
 			incorrect_ads,
+			refresh_reason,
 		}) => {
 			try {
 				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
@@ -5341,13 +5344,37 @@ function createServer() {
 							`Replacement ad ${ad.id} lacks verified feed versus Stories/Reels placement rules.`,
 						);
 					}
+					if (refresh_reason) {
+						const offerFields = [
+							...(ad.creative?.asset_feed_spec?.titles ?? []),
+							...(ad.creative?.asset_feed_spec?.bodies ?? []),
+							...(ad.creative?.asset_feed_spec?.descriptions ?? []),
+						].map((item: any) => String(item.text ?? ""));
+						if (
+							offerFields.length < 3 ||
+							offerFields.some((text: string) => !text.includes("20.5%"))
+						) {
+							throw new Error(
+								`Replacement ad ${ad.id} does not state 20.5% in its title, body and description.`,
+							);
+						}
+					}
 				}
 				for (const ad of incorrect) {
 					if (ad.status !== "ACTIVE")
 						throw new Error(`Incorrect ad ${ad.id} is not ACTIVE.`);
-					if (collectMetaLeadFormIds(ad.creative).has(intended_form_id)) {
+					const deliveredFormIds = collectMetaLeadFormIds(ad.creative);
+					if (deliveredFormIds.has(intended_form_id) && !refresh_reason) {
 						throw new Error(
 							`Incorrect ad ${ad.id} already uses the intended form; refusing to pause it.`,
+						);
+					}
+					if (
+						refresh_reason &&
+						(deliveredFormIds.size !== 1 || !deliveredFormIds.has(intended_form_id))
+					) {
+						throw new Error(
+							`Offer-refresh source ad ${ad.id} is not linked exclusively to the intended form.`,
 						);
 					}
 				}
