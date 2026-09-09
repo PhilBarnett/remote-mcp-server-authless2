@@ -27,6 +27,17 @@ The server includes two narrowly scoped Google Ads tools for customer `661009763
 
 The campaign name, account, Merchant Center account, AU feed label, product item, Australia/English targeting, landing page, and paused statuses are fixed. Daily budget is limited to A$5–A$50. Final URL expansion is opted out, all non-ZipGrip products are excluded, and no activation tool is provided.
 
+## Google Search Console reporting
+
+The server includes read-only Search Console tools for the fixed domain property
+`sc-domain:blindmotion.com.au`. They report organic-search queries, landing pages,
+query/page pairs, and daily clicks, impressions, CTR, and average position.
+
+Search Console reuses `GA4_SERVICE_ACCOUNT_JSON` and requests only the
+`webmasters.readonly` OAuth scope. Enable the Google Search Console API in the
+same Google Cloud project and add the service account email as a user of the
+Blindmotion Search Console property before calling these tools.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:

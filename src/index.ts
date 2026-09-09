@@ -5,6 +5,7 @@ import { z } from "zod";
 
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
+const SEARCH_CONSOLE_SITE_URL = "sc-domain:blindmotion.com.au";
 
 const GOOGLE_ADS_ZIPGRIP_CONFIRMATION = "CONFIRM CREATE PAUSED ZIPGRIP PMAX";
 const GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID = "6610097637";
@@ -986,6 +987,152 @@ async function ga4RunReport(request: Ga4ReportRequest) {
 	}
 
 	return response.json<any>();
+}
+
+type SearchConsoleDimension = "date" | "page" | "query";
+
+type SearchConsoleQueryRequest = {
+	startDate: string;
+	endDate: string;
+	dimensions?: SearchConsoleDimension[];
+	rowLimit?: number;
+	startRow?: number;
+	type?: "web";
+	aggregationType?: "auto";
+	dimensionFilterGroups?: Array<{
+		groupType: "and";
+		filters: Array<{
+			dimension: "page" | "query";
+			operator: "contains";
+			expression: string;
+		}>;
+	}>;
+};
+
+let searchConsoleAccessTokenCache: { token: string; expiresAt: number } | undefined;
+
+function getSearchConsoleConfig() {
+	const { serviceAccount } = getGa4Config();
+	return { siteUrl: SEARCH_CONSOLE_SITE_URL, serviceAccount };
+}
+
+async function getSearchConsoleAccessToken() {
+	if (
+		searchConsoleAccessTokenCache &&
+		searchConsoleAccessTokenCache.expiresAt > Date.now() + 60_000
+	) {
+		return searchConsoleAccessTokenCache.token;
+	}
+
+	const { serviceAccount } = getSearchConsoleConfig();
+	const now = Math.floor(Date.now() / 1000);
+	const tokenUri = serviceAccount.token_uri ?? "https://oauth2.googleapis.com/token";
+	const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+	const claims = base64UrlEncode(
+		JSON.stringify({
+			iss: serviceAccount.client_email,
+			scope: "https://www.googleapis.com/auth/webmasters.readonly",
+			aud: tokenUri,
+			iat: now,
+			exp: now + 3600,
+		}),
+	);
+	const unsignedToken = `${header}.${claims}`;
+	const key = await crypto.subtle.importKey(
+		"pkcs8",
+		pemToArrayBuffer(serviceAccount.private_key),
+		{ name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+		false,
+		["sign"],
+	);
+	const signature = await crypto.subtle.sign(
+		"RSASSA-PKCS1-v1_5",
+		key,
+		new TextEncoder().encode(unsignedToken),
+	);
+	const assertion = `${unsignedToken}.${base64UrlEncode(signature)}`;
+	const response = await fetch(tokenUri, {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body: new URLSearchParams({
+			grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+			assertion,
+		}),
+	});
+
+	if (!response.ok) {
+		throw new Error(
+			`Google Search Console OAuth request failed: ${response.status} ${await response.text()}`,
+		);
+	}
+
+	const tokenResponse = await response.json<{ access_token: string; expires_in?: number }>();
+	searchConsoleAccessTokenCache = {
+		token: tokenResponse.access_token,
+		expiresAt: Date.now() + (tokenResponse.expires_in ?? 3600) * 1000,
+	};
+	return tokenResponse.access_token;
+}
+
+async function searchConsoleFetch(path = "", init?: RequestInit) {
+	const { siteUrl } = getSearchConsoleConfig();
+	const accessToken = await getSearchConsoleAccessToken();
+	const response = await fetch(
+		`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}${path}`,
+		{
+			...init,
+			headers: {
+				Authorization: `Bearer ${accessToken}`,
+				Accept: "application/json",
+				...(init?.body ? { "Content-Type": "application/json" } : {}),
+				...init?.headers,
+			},
+		},
+	);
+
+	if (!response.ok) {
+		throw new Error(
+			`Google Search Console API request failed: ${response.status} ${await response.text()}`,
+		);
+	}
+
+	return response.json<any>();
+}
+
+async function searchConsoleQuery(request: SearchConsoleQueryRequest) {
+	return searchConsoleFetch("/searchAnalytics/query", {
+		method: "POST",
+		body: JSON.stringify({
+			...request,
+			type: "web",
+			aggregationType: "auto",
+		}),
+	});
+}
+
+function searchConsoleFilters(queryFilter?: string, pageFilter?: string) {
+	const filters: Array<{
+		dimension: "page" | "query";
+		operator: "contains";
+		expression: string;
+	}> = [];
+	if (queryFilter)
+		filters.push({ dimension: "query", operator: "contains", expression: queryFilter });
+	if (pageFilter)
+		filters.push({ dimension: "page", operator: "contains", expression: pageFilter });
+	return filters.length ? [{ groupType: "and" as const, filters }] : undefined;
+}
+
+function assertSearchConsoleDateRange(startDate: string, endDate: string) {
+	if (startDate > endDate) {
+		throw new Error("start_date must be on or before end_date.");
+	}
+}
+
+function utcDateDaysAgo(days: number) {
+	const date = new Date();
+	date.setUTCDate(date.getUTCDate() - days);
+	return date.toISOString().slice(0, 10);
 }
 
 type GoogleAdsConfig = {
@@ -2057,6 +2204,34 @@ function ga4ReportResult(report: any, startDate: string, endDate: string) {
 		row_count: report.rowCount ?? rows.length,
 		rows,
 		property_quota: report.propertyQuota,
+	};
+}
+
+function searchConsoleReportResult(
+	report: any,
+	startDate: string,
+	endDate: string,
+	dimensions: SearchConsoleDimension[],
+) {
+	const rows = (report.rows ?? []).map((row: any) => ({
+		...Object.fromEntries(
+			dimensions.map((dimension, index) => [dimension, row.keys?.[index] ?? ""]),
+		),
+		clicks: Number(row.clicks ?? 0),
+		impressions: Number(row.impressions ?? 0),
+		ctr: Number(row.ctr ?? 0),
+		position: Number(row.position ?? 0),
+	}));
+
+	return {
+		site_url: SEARCH_CONSOLE_SITE_URL,
+		start_date: startDate,
+		end_date: endDate,
+		search_type: "web",
+		row_count: rows.length,
+		rows,
+		response_aggregation_type: report.responseAggregationType,
+		metadata: report.metadata,
 	};
 }
 
@@ -7185,6 +7360,176 @@ function createServer() {
 					google_ad_strength: after.asset_group?.adStrength,
 					activation_tool_available: false,
 				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	/* Read-only Google Search Console reporting tools */
+
+	const searchConsoleDateSchema = z
+		.string()
+		.regex(/^\d{4}-\d{2}-\d{2}$/, "Use an ISO date in YYYY-MM-DD format.");
+	const searchConsoleFilterSchema = z.string().trim().min(1).max(500).optional();
+	const searchConsoleLimitSchema = z.number().int().min(1).max(1000).default(250);
+
+	server.registerTool(
+		"get_search_console_property",
+		{
+			description:
+				"Confirm read-only access to the fixed Blindmotion Search Console domain property and return a small recent organic-search activity check.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const { siteUrl, serviceAccount } = getSearchConsoleConfig();
+				const property = await searchConsoleFetch();
+				if (!property.permissionLevel || property.permissionLevel === "siteUnverifiedUser") {
+					throw new Error(
+						"The configured service account is not a verified user of the Blindmotion Search Console property.",
+					);
+				}
+				const startDate = utcDateDaysAgo(9);
+				const endDate = utcDateDaysAgo(3);
+				const activity = await searchConsoleQuery({
+					startDate,
+					endDate,
+					rowLimit: 1,
+				});
+				return toolResult({
+					site_url: siteUrl,
+					permission_level: property.permissionLevel,
+					service_account: serviceAccount.client_email,
+					access_confirmed: true,
+					activity_check: searchConsoleReportResult(activity, startDate, endDate, []),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_search_console_queries",
+		{
+			description:
+				"Return Blindmotion organic Google Search queries with clicks, impressions, CTR and average position. Optionally filter to queries containing a phrase.",
+			inputSchema: z.object({
+				start_date: searchConsoleDateSchema,
+				end_date: searchConsoleDateSchema,
+				limit: searchConsoleLimitSchema,
+				query_filter: searchConsoleFilterSchema,
+			}),
+		},
+		async ({ start_date, end_date, limit, query_filter }) => {
+			try {
+				assertSearchConsoleDateRange(start_date, end_date);
+				const dimensions: SearchConsoleDimension[] = ["query"];
+				const report = await searchConsoleQuery({
+					startDate: start_date,
+					endDate: end_date,
+					dimensions,
+					rowLimit: limit,
+					dimensionFilterGroups: searchConsoleFilters(query_filter, undefined),
+				});
+				return toolResult(
+					searchConsoleReportResult(report, start_date, end_date, dimensions),
+				);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_search_console_pages",
+		{
+			description:
+				"Return Blindmotion organic Google Search landing pages with clicks, impressions, CTR and average position. Optionally filter to pages containing a phrase or path.",
+			inputSchema: z.object({
+				start_date: searchConsoleDateSchema,
+				end_date: searchConsoleDateSchema,
+				limit: searchConsoleLimitSchema,
+				page_filter: searchConsoleFilterSchema,
+			}),
+		},
+		async ({ start_date, end_date, limit, page_filter }) => {
+			try {
+				assertSearchConsoleDateRange(start_date, end_date);
+				const dimensions: SearchConsoleDimension[] = ["page"];
+				const report = await searchConsoleQuery({
+					startDate: start_date,
+					endDate: end_date,
+					dimensions,
+					rowLimit: limit,
+					dimensionFilterGroups: searchConsoleFilters(undefined, page_filter),
+				});
+				return toolResult(
+					searchConsoleReportResult(report, start_date, end_date, dimensions),
+				);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_search_console_query_pages",
+		{
+			description:
+				"Return Blindmotion organic Google Search performance by query and landing-page pair, with optional query and page filters.",
+			inputSchema: z.object({
+				start_date: searchConsoleDateSchema,
+				end_date: searchConsoleDateSchema,
+				limit: searchConsoleLimitSchema,
+				query_filter: searchConsoleFilterSchema,
+				page_filter: searchConsoleFilterSchema,
+			}),
+		},
+		async ({ start_date, end_date, limit, query_filter, page_filter }) => {
+			try {
+				assertSearchConsoleDateRange(start_date, end_date);
+				const dimensions: SearchConsoleDimension[] = ["query", "page"];
+				const report = await searchConsoleQuery({
+					startDate: start_date,
+					endDate: end_date,
+					dimensions,
+					rowLimit: limit,
+					dimensionFilterGroups: searchConsoleFilters(query_filter, page_filter),
+				});
+				return toolResult(
+					searchConsoleReportResult(report, start_date, end_date, dimensions),
+				);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_search_console_daily_performance",
+		{
+			description:
+				"Return daily Blindmotion organic Google Search clicks, impressions, CTR and average position for an ISO date range.",
+			inputSchema: z.object({
+				start_date: searchConsoleDateSchema,
+				end_date: searchConsoleDateSchema,
+			}),
+		},
+		async ({ start_date, end_date }) => {
+			try {
+				assertSearchConsoleDateRange(start_date, end_date);
+				const dimensions: SearchConsoleDimension[] = ["date"];
+				const report = await searchConsoleQuery({
+					startDate: start_date,
+					endDate: end_date,
+					dimensions,
+					rowLimit: 5000,
+				});
+				const result = searchConsoleReportResult(report, start_date, end_date, dimensions);
+				result.rows.sort((left: any, right: any) => left.date.localeCompare(right.date));
+				return toolResult(result);
 			} catch (error) {
 				return toolError(error);
 			}
