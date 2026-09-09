@@ -310,6 +310,17 @@ function elementorWidgetInventory(nodes: any[]) {
 				stringSettings.find(({ key }) =>
 					/^(?:header_size|html_tag|title_tag|tag)$/.test(key),
 				)?.value ?? null;
+			const contentSettings = Object.fromEntries(
+				stringSettings
+					.filter(
+						({ key, value }) =>
+							suspiciousContentMatches(value).length > 0 ||
+							/^(?:title|title_text|description|description_text|editor|header_size|html_tag)$/.test(
+								key,
+							),
+					)
+					.map(({ key, value }) => [key, value.slice(0, 2000)]),
+			);
 			const responsiveSettings = Object.fromEntries(
 				Object.entries(settings).filter(([key]) =>
 					/(?:hide_|hidden|visibility|responsive|display)/i.test(key),
@@ -337,6 +348,7 @@ function elementorWidgetInventory(nodes: any[]) {
 						),
 					})),
 					heading_tag: headingTag,
+					content_settings: contentSettings,
 					text_preview: htmlToPlainText(searchable).slice(0, 800),
 					suspicious_matches: suspiciousMatches,
 					responsive_settings: responsiveSettings,
