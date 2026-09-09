@@ -185,6 +185,10 @@ const OUTDOOR_SEO_TARGETS = {
 
 type OutdoorSeoTargetKey = keyof typeof OUTDOOR_SEO_TARGETS;
 
+const OUTDOOR_SEO_ELEMENTOR_TEMPLATE_IDS = [425, 557, 885, 1640, 1691, 1990] as const;
+
+type OutdoorSeoElementorTemplateId = (typeof OUTDOOR_SEO_ELEMENTOR_TEMPLATE_IDS)[number];
+
 const OUTDOOR_SEO_SUSPICIOUS_PATTERNS = [
 	{ label: "placeholder_text", pattern: /scelerisque eleifend|lorem ipsum/gi },
 	{ label: "unfinished_way_to_buy", pattern: /way\s+to\s+buy\s*\?\?/gi },
@@ -278,6 +282,89 @@ function suspiciousContentMatches(value: string) {
 		label,
 		count: [...value.matchAll(new RegExp(pattern.source, pattern.flags))].length,
 	})).filter((match) => match.count > 0);
+}
+
+function parseElementorData(value: unknown) {
+	if (Array.isArray(value)) return value;
+	if (typeof value !== "string" || value.trim() === "") return null;
+	try {
+		const parsed = JSON.parse(value);
+		return Array.isArray(parsed) ? parsed : null;
+	} catch {
+		return null;
+	}
+}
+
+function elementorWidgetInventory(nodes: any[]) {
+	const widgets: any[] = [];
+	function visit(node: any) {
+		if (!node || typeof node !== "object") return;
+		const settings = node.settings && typeof node.settings === "object" ? node.settings : {};
+		if (node.elType === "widget") {
+			const stringSettings = Object.entries(settings)
+				.filter((entry): entry is [string, string] => typeof entry[1] === "string")
+				.map(([key, value]) => ({ key, value }));
+			const searchable = stringSettings.map(({ value }) => value).join("\n");
+			const suspiciousMatches = suspiciousContentMatches(searchable);
+			const headingTag =
+				stringSettings.find(({ key }) =>
+					/^(?:header_size|html_tag|title_tag|tag)$/.test(key),
+				)?.value ?? null;
+			const responsiveSettings = Object.fromEntries(
+				Object.entries(settings).filter(([key]) =>
+					/(?:hide_|hidden|visibility|responsive|display)/i.test(key),
+				),
+			);
+			if (
+				suspiciousMatches.length > 0 ||
+				headingTag !== null ||
+				/product-title|heading|text-editor|template/i.test(String(node.widgetType))
+			) {
+				widgets.push({
+					id: node.id ?? null,
+					widget_type: node.widgetType ?? null,
+					heading_tag: headingTag,
+					text_preview: htmlToPlainText(searchable).slice(0, 800),
+					suspicious_matches: suspiciousMatches,
+					responsive_settings: responsiveSettings,
+				});
+			}
+		}
+		for (const child of Array.isArray(node.elements) ? node.elements : []) visit(child);
+	}
+	for (const node of nodes) visit(node);
+	return widgets.slice(0, 250);
+}
+
+async function inspectOutdoorSeoElementorTemplate(templateId: OutdoorSeoElementorTemplateId) {
+	const response = await wpAuthenticatedFetch(`elementor_library/${templateId}?context=edit`);
+	const template = await response.json<any>();
+	if (template.id !== templateId || template.status !== "publish") {
+		throw new Error(`Locked Elementor template identity mismatch for ${templateId}.`);
+	}
+	const meta = template.meta && typeof template.meta === "object" ? template.meta : {};
+	const elementorDataValue = meta["_elementor_data"];
+	const elementorData = parseElementorData(elementorDataValue);
+	const serialized =
+		typeof elementorDataValue === "string"
+			? elementorDataValue
+			: JSON.stringify(elementorDataValue ?? null);
+	return {
+		id: template.id,
+		title: template.title?.raw ?? template.title?.rendered ?? "",
+		slug: template.slug,
+		status: template.status,
+		link: template.link,
+		template_type: meta["_elementor_template_type"] ?? null,
+		display_conditions: meta["_elementor_conditions"] ?? null,
+		meta_keys: Object.keys(meta)
+			.filter((key) => /elementor/i.test(key))
+			.sort(),
+		elementor_data_available: elementorData !== null,
+		elementor_data_length: serialized.length,
+		suspicious_matches: suspiciousContentMatches(serialized),
+		widgets: elementorData ? elementorWidgetInventory(elementorData) : [],
+	};
 }
 
 function outdoorSeoMetaInventory(metaData: any[]) {
@@ -3292,6 +3379,38 @@ function createServer() {
 					locked_target_count: Object.keys(OUTDOOR_SEO_TARGETS).length,
 					inspection_count: inspections.length,
 					inspections,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_outdoor_seo_elementor_templates",
+		{
+			description:
+				"Read-only inspection of the fixed Elementor templates rendered by Blindmotion's outdoor product pages. Reports identities, display conditions, relevant widgets, responsive visibility, heading tags and known template-content defects.",
+			inputSchema: z.object({
+				template_id: z
+					.union(OUTDOOR_SEO_ELEMENTOR_TEMPLATE_IDS.map((id) => z.literal(id)))
+					.optional(),
+			}),
+		},
+		async ({ template_id }) => {
+			try {
+				const templateIds = template_id
+					? [template_id]
+					: [...OUTDOOR_SEO_ELEMENTOR_TEMPLATE_IDS];
+				const templates = [];
+				for (const templateId of templateIds) {
+					templates.push(await inspectOutdoorSeoElementorTemplate(templateId));
+				}
+				return toolResult({
+					read_only: true,
+					locked_template_count: OUTDOOR_SEO_ELEMENTOR_TEMPLATE_IDS.length,
+					inspection_count: templates.length,
+					templates,
 				});
 			} catch (error) {
 				return toolError(error);
