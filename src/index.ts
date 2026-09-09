@@ -1082,13 +1082,6 @@ async function googleAdsSearch(query: string) {
 	return googleAdsSearchCustomer(customerId, query);
 }
 
-		const page = await response.json<{ results?: any[]; nextPageToken?: string }>();
-		results.push(...(page.results ?? []));
-		pageToken = page.nextPageToken;
-	} while (pageToken && results.length < 10_000);
-
-	return results;
-}
 
 async function googleAdsMutate(mutateOperations: any[], validateOnly: boolean) {
 	const { developerToken, loginCustomerId, customerId } = getGoogleAdsConfig();
