@@ -1037,8 +1037,12 @@ function assertGoogleAdsDate(value: string, name: string) {
 	}
 }
 
-async function googleAdsSearch(query: string) {
-	const { developerToken, loginCustomerId, customerId } = getGoogleAdsConfig();
+async function googleAdsSearchCustomer(customerId: string, query: string) {
+	if (!/^\d{10}$/.test(customerId)) {
+		throw new Error("Google Ads target customer ID must contain exactly 10 digits.");
+	}
+
+	const { developerToken, loginCustomerId } = getGoogleAdsConfig();
 	const accessToken = await getGoogleAdsAccessToken();
 	const results: any[] = [];
 	let pageToken: string | undefined;
@@ -1061,9 +1065,22 @@ async function googleAdsSearch(query: string) {
 
 		if (!response.ok) {
 			throw new Error(
-				`Google Ads API request failed: ${response.status} ${await response.text()}`,
+				`Google Ads API request for customer ${customerId} failed: ${response.status} ${await response.text()}`,
 			);
 		}
+
+		const page = await response.json<{ results?: any[]; nextPageToken?: string }>();
+		results.push(...(page.results ?? []));
+		pageToken = page.nextPageToken;
+	} while (pageToken && results.length < 10_000);
+
+	return results;
+}
+
+async function googleAdsSearch(query: string) {
+	const { customerId } = getGoogleAdsConfig();
+	return googleAdsSearchCustomer(customerId, query);
+}
 
 		const page = await response.json<{ results?: any[]; nextPageToken?: string }>();
 		results.push(...(page.results ?? []));
@@ -4615,6 +4632,137 @@ function createServer() {
 		},
 	);
 
+	server.registerTool(
+		"find_google_ads_campaign_across_manager",
+		{
+			description:
+				"Locate one or more Google Ads campaign IDs across all accessible non-manager client accounts beneath the configured manager account. Read-only diagnostic for attribution reconciliation.",
+			inputSchema: z.object({
+				campaign_ids: z.array(z.string().regex(/^\d+$/)).min(1).max(20),
+			}),
+		},
+		async ({ campaign_ids }) => {
+			try {
+				const { loginCustomerId, customerId } = getGoogleAdsConfig();
+
+				const uniqueCampaignIds = [
+					...new Set(campaign_ids.map((id) => id.trim())),
+				];
+
+				const idsClause = uniqueCampaignIds.join(", ");
+
+				const clientRows = await googleAdsSearchCustomer(
+					loginCustomerId,
+					`
+						SELECT
+							customer_client.id,
+							customer_client.descriptive_name,
+							customer_client.manager,
+							customer_client.level,
+							customer_client.status
+						FROM customer_client
+						WHERE customer_client.level > 0
+					`,
+				);
+
+				const clients = new Map<
+					string,
+					{
+						customer_id: string;
+						customer_name: string | null;
+						level: number | null;
+						status: string | null;
+					}
+				>();
+
+				for (const row of clientRows) {
+					const client = row.customerClient;
+					const id = String(client?.id ?? "");
+
+					if (!/^\d{10}$/.test(id) || client?.manager === true) {
+						continue;
+					}
+
+					clients.set(id, {
+						customer_id: id,
+						customer_name: client?.descriptiveName ?? null,
+						level: Number.isFinite(Number(client?.level))
+							? Number(client.level)
+							: null,
+						status: client?.status ?? null,
+					});
+				}
+
+				// Always include the currently configured production account,
+				// even if manager enumeration behaves unexpectedly.
+				if (!clients.has(customerId)) {
+					clients.set(customerId, {
+						customer_id: customerId,
+						customer_name: null,
+						level: null,
+						status: null,
+					});
+				}
+
+				const matches: any[] = [];
+				const unqueryableClients: any[] = [];
+
+				for (const client of clients.values()) {
+					try {
+						const rows = await googleAdsSearchCustomer(
+							client.customer_id,
+							`
+								SELECT
+									campaign.id,
+									campaign.name,
+									campaign.status,
+									campaign.advertising_channel_type
+								FROM campaign
+								WHERE campaign.id IN (${idsClause})
+							`,
+						);
+
+						for (const row of rows) {
+							matches.push({
+								customer_id: client.customer_id,
+								customer_name: client.customer_name,
+								manager_level: client.level,
+								customer_status: client.status,
+								campaign: row.campaign,
+							});
+						}
+					} catch (error) {
+						unqueryableClients.push({
+							customer_id: client.customer_id,
+							customer_name: client.customer_name,
+							manager_level: client.level,
+							customer_status: client.status,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
+
+				const matchedIds = new Set(
+					matches.map((match) => String(match.campaign?.id ?? "")),
+				);
+
+				return toolResult({
+					manager_customer_id: loginCustomerId,
+					configured_customer_id: customerId,
+					requested_campaign_ids: uniqueCampaignIds,
+					client_accounts_considered: clients.size,
+					matches,
+					unmatched_campaign_ids: uniqueCampaignIds.filter(
+						(id) => !matchedIds.has(id),
+					),
+					unqueryable_clients: unqueryableClients,
+					read_only: true,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
 	server.registerTool(
 		"get_google_ads_summary",
 		{
