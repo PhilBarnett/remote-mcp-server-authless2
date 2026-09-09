@@ -1737,6 +1737,11 @@ function cohortDateMs(value: unknown) {
 	return Number.isFinite(ms) ? ms : null;
 }
 
+function cohortTimestampMs(value: unknown) {
+	const ms = Date.parse(String(value ?? ""));
+	return Number.isFinite(ms) ? ms : null;
+}
+
 function cohortMedian(values: number[]) {
 	if (!values.length) return null;
 	const sorted = [...values].sort((a, b) => a - b);
@@ -2187,13 +2192,22 @@ function createServer() {
 					const conversions: any[] = [];
 					for (const customer of matured) {
 						const sampleMs = cohortDateMs(customer.first_sample_date)!;
+						const sampleTimestampMs = cohortTimestampMs(
+							sampleOrders.find((order) => Number(order.id) === customer.first_sample_order_id)?.date_created,
+						) ?? sampleMs;
 						const windowEndMs = sampleMs + windowDays * 86_400_000;
 						const matched = purchaseOrders
 							.map((order) => ({ order, match_method: purchaseMatchMethod(customer, order) }))
 							.filter(({ order, match_method }) => {
 								if (!match_method) return false;
 								const purchaseMs = cohortDateMs(order?.date_created);
-								return purchaseMs !== null && purchaseMs > sampleMs && purchaseMs <= windowEndMs;
+								const purchaseTimestampMs = cohortTimestampMs(order?.date_created);
+								return (
+									purchaseMs !== null &&
+									purchaseTimestampMs !== null &&
+									purchaseTimestampMs > sampleTimestampMs &&
+									purchaseMs <= windowEndMs
+								);
 							})
 							.sort(
 								(a, b) =>
@@ -2274,9 +2288,9 @@ function createServer() {
 						expected_zipgrip_line_revenue_per_matured_sample_customer_aud:
 							expectedZipGripRevenue,
 						expected_gross_profit_per_matured_sample_customer_aud:
-							expectedOrderRevenue === null
+							expectedZipGripRevenue === null
 								? null
-								: expectedOrderRevenue * (gross_margin_pct / 100),
+								: expectedZipGripRevenue * (gross_margin_pct / 100),
 						matches: conversions,
 					};
 				});
