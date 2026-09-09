@@ -20,6 +20,8 @@ const GOOGLE_ADS_ZIPGRIP_IMAGE_CONFIRMATION = "CONFIRM ADD PAUSED ZIPGRIP IMAGE 
 const GOOGLE_ADS_ZIPGRIP_BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP PAUSED ZIPGRIP ASSET GROUP";
 const GOOGLE_ADS_ZIPGRIP_VIDEO_CONFIRMATION = "CONFIRM LINK PAUSED ZIPGRIP YOUTUBE ASSETS";
 const GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION = "CONFIRM EXCLUSIVE ZIPGRIP LAUNCH";
+const GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_REPAIR_CONFIRMATION =
+	"CONFIRM ENABLE ZIPGRIP ASSET GROUP";
 const GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID = "22733226130";
 const GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS = ["22732181006", "21527804393"] as const;
 const GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID = "2036";
@@ -1358,7 +1360,7 @@ function zipGripAssetGroupResource() {
 	return `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroups/${GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID}`;
 }
 
-async function getZipGripAssetState() {
+async function getZipGripAssetState(requirePaused = true) {
 	assertZipGripGoogleAdsAccount();
 	const groups = await googleAdsSearch(`
 		SELECT campaign.id, campaign.resource_name, campaign.name, campaign.status,
@@ -1381,13 +1383,15 @@ async function getZipGripAssetState() {
 	if (
 		String(campaign?.id) !== GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID ||
 		campaign?.name !== GOOGLE_ADS_ZIPGRIP_CAMPAIGN_NAME ||
-		campaign?.status !== "PAUSED" ||
+		(requirePaused && campaign?.status !== "PAUSED") ||
 		campaign?.advertisingChannelType !== "PERFORMANCE_MAX" ||
 		String(assetGroup?.id) !== GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID ||
-		assetGroup?.status !== "PAUSED"
+		(requirePaused && assetGroup?.status !== "PAUSED")
 	) {
 		throw new Error(
-			"Refusing asset access: the locked campaign and asset group are not the expected PAUSED ZipGrip resources.",
+			requirePaused
+				? "Refusing asset access: the locked campaign and asset group are not the expected PAUSED ZipGrip resources."
+				: "Refusing post-launch access: the locked campaign or asset group identity is invalid.",
 		);
 	}
 
@@ -6165,6 +6169,252 @@ function createServer() {
 						"Google's ad_strength and primary_status are output-only feedback. Completeness is also calculated from live non-removed asset links.",
 					activation_prerequisite:
 						"Activation remains out of scope until clean post-fix ZipGrip purchase tracking has been observed and the campaign is separately reviewed.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_google_ads_zipgrip_post_launch_status",
+		{
+			description:
+				"Read-only post-launch inspection of the locked ZipGrip campaign and asset group, including live statuses, asset policy/completeness, dedicated gla_1301 targeting and source-campaign exclusions. Never mutates Google Ads.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				assertZipGripGoogleAdsAccount();
+				const state = await getZipGripAssetState(false);
+				const dedicatedTree = await googleAdsSearch(`
+					SELECT campaign.id, asset_group.id,
+						asset_group_listing_group_filter.resource_name,
+						asset_group_listing_group_filter.parent_listing_group_filter,
+						asset_group_listing_group_filter.type,
+						asset_group_listing_group_filter.case_value.product_item_id.value
+					FROM asset_group_listing_group_filter
+					WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID}
+						AND asset_group.id = ${GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID}
+				`);
+				const sourcePmaxItems = await googleAdsSearch(`
+					SELECT campaign.id, asset_group.id,
+						asset_group_listing_group_filter.resource_name,
+						asset_group_listing_group_filter.parent_listing_group_filter,
+						asset_group_listing_group_filter.type,
+						asset_group_listing_group_filter.case_value.product_item_id.value
+					FROM asset_group_listing_group_filter
+					WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID}
+						AND asset_group_listing_group_filter.case_value.product_item_id.value =
+							'${GOOGLE_ADS_ZIPGRIP_ITEM_ID}'
+				`);
+				const sourceShoppingItems = await googleAdsSearch(`
+					SELECT campaign.id, ad_group.id,
+						ad_group_criterion.resource_name,
+						ad_group_criterion.negative, ad_group_criterion.status,
+						ad_group_criterion.listing_group.type,
+						ad_group_criterion.listing_group.parent_ad_group_criterion,
+						ad_group_criterion.listing_group.case_value.product_item_id.value
+					FROM ad_group_criterion
+					WHERE campaign.id IN (${GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.join(", ")})
+						AND ad_group_criterion.type = 'LISTING_GROUP'
+						AND ad_group_criterion.status != 'REMOVED'
+						AND ad_group_criterion.listing_group.case_value.product_item_id.value =
+							'${GOOGLE_ADS_ZIPGRIP_ITEM_ID}'
+				`);
+				const policyProblems = state.asset_group_assets.filter((row) => {
+					const approval = row.assetGroupAsset?.policySummary?.approvalStatus;
+					const review = row.assetGroupAsset?.policySummary?.reviewStatus;
+					return (
+						(approval && approval !== "APPROVED") ||
+						(review && !["REVIEWED", "EXEMPT"].includes(review))
+					);
+				});
+				const dedicatedIncluded = dedicatedTree.filter(
+					(row) =>
+						row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ===
+							GOOGLE_ADS_ZIPGRIP_ITEM_ID &&
+						row.assetGroupListingGroupFilter?.type === "UNIT_INCLUDED",
+				);
+				const pmaxExcluded = sourcePmaxItems.filter(
+					(row) => row.assetGroupListingGroupFilter?.type === "UNIT_EXCLUDED",
+				);
+				const shoppingExcluded = sourceShoppingItems.filter(
+					(row) =>
+						row.adGroupCriterion?.negative === true &&
+						row.adGroupCriterion?.listingGroup?.type === "UNIT",
+				);
+				return toolResult({
+					created_or_modified: false,
+					campaign: state.campaign,
+					asset_group: state.asset_group,
+					minimum_complete: state.minimum_complete,
+					counts: state.counts,
+					policy_problem_count: policyProblems.length,
+					dedicated_gla_1301_included: dedicatedIncluded.length === 1,
+					source_pmax_gla_1301_excluded: pmaxExcluded.length === 1,
+					source_shopping_gla_1301_excluded:
+						shoppingExcluded.length ===
+						GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length,
+					dedicated_tree: dedicatedTree,
+					source_pmax_item_nodes: sourcePmaxItems,
+					source_shopping_item_nodes: sourceShoppingItems,
+					serving_ready:
+						state.campaign?.status === "ENABLED" &&
+						state.asset_group?.status === "ENABLED" &&
+						state.minimum_complete &&
+						policyProblems.length === 0 &&
+						dedicatedIncluded.length === 1 &&
+						pmaxExcluded.length === 1 &&
+						shoppingExcluded.length ===
+							GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length,
+					repair_confirmation_required:
+						state.campaign?.status === "ENABLED" &&
+						state.asset_group?.status === "PAUSED"
+							? GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_REPAIR_CONFIRMATION
+							: null,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"enable_google_ads_zipgrip_asset_group_guarded",
+		{
+			description:
+				"Enable only the locked ZipGrip asset group after launch when its campaign is already ENABLED but the asset group remains PAUSED. Requires approved complete assets, correct dedicated gla_1301 targeting, verified exclusions in all three source campaigns, exact confirmation and validateOnly. Cannot change campaign status, budget, bidding, targeting or product trees.",
+			inputSchema: z.object({
+				confirmation: z.literal(
+					GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_REPAIR_CONFIRMATION,
+				),
+			}),
+		},
+		async () => {
+			try {
+				assertZipGripGoogleAdsAccount();
+				const state = await getZipGripAssetState(false);
+				if (
+					state.campaign?.status !== "ENABLED" ||
+					state.asset_group?.status !== "PAUSED"
+				) {
+					throw new Error(
+						"Refusing repair: the locked campaign must be ENABLED and its locked asset group must be PAUSED.",
+					);
+				}
+				if (!state.minimum_complete) {
+					throw new Error(
+						"Refusing repair: the ZipGrip asset group is not creatively complete.",
+					);
+				}
+				const policyProblems = state.asset_group_assets.filter((row) => {
+					const approval = row.assetGroupAsset?.policySummary?.approvalStatus;
+					const review = row.assetGroupAsset?.policySummary?.reviewStatus;
+					return (
+						(approval && approval !== "APPROVED") ||
+						(review && !["REVIEWED", "EXEMPT"].includes(review))
+					);
+				});
+				if (policyProblems.length > 0) {
+					throw new Error(
+						"Refusing repair: one or more ZipGrip assets is not fully approved.",
+					);
+				}
+				const dedicated = await googleAdsSearch(`
+					SELECT asset_group_listing_group_filter.type,
+						asset_group_listing_group_filter.case_value.product_item_id.value
+					FROM asset_group_listing_group_filter
+					WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID}
+						AND asset_group.id = ${GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID}
+				`);
+				const pmaxSource = await googleAdsSearch(`
+					SELECT asset_group_listing_group_filter.type,
+						asset_group_listing_group_filter.case_value.product_item_id.value
+					FROM asset_group_listing_group_filter
+					WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID}
+						AND asset_group_listing_group_filter.case_value.product_item_id.value =
+							'${GOOGLE_ADS_ZIPGRIP_ITEM_ID}'
+				`);
+				const shoppingSource = await googleAdsSearch(`
+					SELECT campaign.id, ad_group_criterion.negative,
+						ad_group_criterion.listing_group.type,
+						ad_group_criterion.listing_group.case_value.product_item_id.value
+					FROM ad_group_criterion
+					WHERE campaign.id IN (${GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.join(", ")})
+						AND ad_group_criterion.type = 'LISTING_GROUP'
+						AND ad_group_criterion.status != 'REMOVED'
+						AND ad_group_criterion.listing_group.case_value.product_item_id.value =
+							'${GOOGLE_ADS_ZIPGRIP_ITEM_ID}'
+				`);
+				const dedicatedOk =
+					dedicated.filter(
+						(row) =>
+							row.assetGroupListingGroupFilter?.caseValue?.productItemId
+								?.value === GOOGLE_ADS_ZIPGRIP_ITEM_ID &&
+							row.assetGroupListingGroupFilter?.type === "UNIT_INCLUDED",
+					).length === 1;
+				const pmaxOk =
+					pmaxSource.filter(
+						(row) =>
+							row.assetGroupListingGroupFilter?.type === "UNIT_EXCLUDED",
+					).length === 1;
+				const shoppingCampaigns = new Set(
+					shoppingSource
+						.filter(
+							(row) =>
+								row.adGroupCriterion?.negative === true &&
+								row.adGroupCriterion?.listingGroup?.type === "UNIT",
+						)
+						.map((row) => String(row.campaign?.id)),
+				);
+				if (
+					!dedicatedOk ||
+					!pmaxOk ||
+					shoppingCampaigns.size !==
+						GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length
+				) {
+					throw new Error(
+						"Refusing repair: ZipGrip targeting or source exclusions are not in the expected post-launch state.",
+					);
+				}
+				const operation = {
+					assetGroupOperation: {
+						update: {
+							resourceName: zipGripAssetGroupResource(),
+							status: "ENABLED",
+						},
+						updateMask: "status",
+					},
+				};
+				await googleAdsMutate([operation], true);
+				const mutation = await googleAdsMutate([operation], false);
+				const verified = await googleAdsSearch(`
+					SELECT campaign.id, campaign.status, asset_group.id, asset_group.status
+					FROM asset_group
+					WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID}
+						AND asset_group.id = ${GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID}
+					LIMIT 1
+				`);
+				if (
+					verified.length !== 1 ||
+					verified[0]?.campaign?.status !== "ENABLED" ||
+					verified[0]?.assetGroup?.status !== "ENABLED"
+				) {
+					throw new Error(
+						"Asset-group repair returned but did not verify as ENABLED.",
+					);
+				}
+				return toolResult({
+					repaired: true,
+					api_validation_passed_before_mutation: true,
+					campaign: verified[0].campaign,
+					asset_group: verified[0].assetGroup,
+					daily_budget_changed: false,
+					campaign_status_changed: false,
+					product_trees_changed: false,
+					mutation_response_count:
+						mutation.mutateOperationResponses?.length ?? 0,
 				});
 			} catch (error) {
 				return toolError(error);
