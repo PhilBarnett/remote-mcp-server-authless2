@@ -297,7 +297,7 @@ function parseElementorData(value: unknown) {
 
 function elementorWidgetInventory(nodes: any[]) {
 	const widgets: any[] = [];
-	function visit(node: any) {
+	function visit(node: any, ancestors: any[] = []) {
 		if (!node || typeof node !== "object") return;
 		const settings = node.settings && typeof node.settings === "object" ? node.settings : {};
 		if (node.elType === "widget") {
@@ -323,6 +323,19 @@ function elementorWidgetInventory(nodes: any[]) {
 				widgets.push({
 					id: node.id ?? null,
 					widget_type: node.widgetType ?? null,
+					ancestor_path: ancestors.map((ancestor) => ({
+						id: ancestor.id ?? null,
+						el_type: ancestor.elType ?? null,
+						settings: Object.fromEntries(
+							Object.entries(
+								ancestor.settings && typeof ancestor.settings === "object"
+									? ancestor.settings
+									: {},
+							).filter(([key]) =>
+								/(?:dce_|visibility|hide_|display|css_classes|condition)/i.test(key),
+							),
+						),
+					})),
 					heading_tag: headingTag,
 					text_preview: htmlToPlainText(searchable).slice(0, 800),
 					suspicious_matches: suspiciousMatches,
@@ -330,7 +343,9 @@ function elementorWidgetInventory(nodes: any[]) {
 				});
 			}
 		}
-		for (const child of Array.isArray(node.elements) ? node.elements : []) visit(child);
+		for (const child of Array.isArray(node.elements) ? node.elements : []) {
+			visit(child, [...ancestors, node]);
+		}
 	}
 	for (const node of nodes) visit(node);
 	return widgets.slice(0, 250);
