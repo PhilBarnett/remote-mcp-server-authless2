@@ -5,7 +5,7 @@ import { z } from "zod";
 
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
-const SEARCH_CONSOLE_SITE_URL = "sc-domain:blindmotion.com.au";
+const SEARCH_CONSOLE_SITE_URL = "https://online.blindmotion.com.au/";
 
 const GOOGLE_ADS_ZIPGRIP_CONFIRMATION = "CONFIRM CREATE PAUSED ZIPGRIP PMAX";
 const GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID = "6610097637";
