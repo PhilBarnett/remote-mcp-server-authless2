@@ -1500,8 +1500,32 @@ function summarizeZipGripPmaxTree(rows: any[]) {
 			row.assetGroupListingGroupFilter?.parentListingGroupFilter ?? null,
 		type: row.assetGroupListingGroupFilter?.type ?? null,
 		listing_source: row.assetGroupListingGroupFilter?.listingSource ?? null,
+		case_value: row.assetGroupListingGroupFilter?.caseValue ?? null,
+		path: row.assetGroupListingGroupFilter?.path ?? null,
+		product_brand:
+			row.assetGroupListingGroupFilter?.caseValue?.productBrand?.value ?? null,
+		product_category_id:
+			row.assetGroupListingGroupFilter?.caseValue?.productCategory?.categoryId ??
+			null,
+		product_category_level:
+			row.assetGroupListingGroupFilter?.caseValue?.productCategory?.level ?? null,
+		product_channel:
+			row.assetGroupListingGroupFilter?.caseValue?.productChannel?.channel ?? null,
+		product_condition:
+			row.assetGroupListingGroupFilter?.caseValue?.productCondition?.condition ??
+			null,
+		product_custom_attribute_index:
+			row.assetGroupListingGroupFilter?.caseValue?.productCustomAttribute?.index ??
+			null,
+		product_custom_attribute_value:
+			row.assetGroupListingGroupFilter?.caseValue?.productCustomAttribute?.value ??
+			null,
 		product_item_id:
 			row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ?? null,
+		product_type_level:
+			row.assetGroupListingGroupFilter?.caseValue?.productType?.level ?? null,
+		product_type_value:
+			row.assetGroupListingGroupFilter?.caseValue?.productType?.value ?? null,
 		is_root: !row.assetGroupListingGroupFilter?.parentListingGroupFilter,
 	}));
 }
@@ -1595,7 +1619,17 @@ async function getZipGripExclusiveLaunchPlan() {
 			asset_group_listing_group_filter.parent_listing_group_filter,
 			asset_group_listing_group_filter.type,
 			asset_group_listing_group_filter.listing_source,
-			asset_group_listing_group_filter.case_value.product_item_id.value
+			asset_group_listing_group_filter.case_value.product_brand.value,
+			asset_group_listing_group_filter.case_value.product_category.category_id,
+			asset_group_listing_group_filter.case_value.product_category.level,
+			asset_group_listing_group_filter.case_value.product_channel.channel,
+			asset_group_listing_group_filter.case_value.product_condition.condition,
+			asset_group_listing_group_filter.case_value.product_custom_attribute.index,
+			asset_group_listing_group_filter.case_value.product_custom_attribute.value,
+			asset_group_listing_group_filter.case_value.product_item_id.value,
+			asset_group_listing_group_filter.case_value.product_type.level,
+			asset_group_listing_group_filter.case_value.product_type.value,
+			asset_group_listing_group_filter.path
 		FROM asset_group_listing_group_filter
 		WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID}
 			AND asset_group.status != 'REMOVED'
@@ -1636,56 +1670,49 @@ async function getZipGripExclusiveLaunchPlan() {
 
 	const operations: any[] = [];
 	let tempId = -9000;
-	for (const [assetGroupId, rows] of pmaxByGroup) {
+
+	const pmaxZipGripRows = sourcePmaxFilters.filter(
+		(row) =>
+			row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ===
+			GOOGLE_ADS_ZIPGRIP_ITEM_ID,
+	);
+	if (pmaxZipGripRows.length === 0) {
+		throw zipGripLaunchTreeError(
+			"Refusing launch: BM Online PMax 1 has no explicit gla_1301 item node. Its containing branch must be identified before a safe exclusion can be constructed.",
+			sourcePmaxFilters,
+			sourceShoppingCriteria,
+		);
+	}
+	for (const row of pmaxZipGripRows) {
+		const filter = row.assetGroupListingGroupFilter;
 		if (
-			rows.length !== 1 ||
-			rows[0]?.assetGroupListingGroupFilter?.parentListingGroupFilter ||
-			rows[0]?.assetGroupListingGroupFilter?.type !== "UNIT_INCLUDED"
+			filter?.type !== "UNIT_INCLUDED" ||
+			!filter.parentListingGroupFilter ||
+			!filter.resourceName
 		) {
 			throw zipGripLaunchTreeError(
-				`Refusing launch: source PMax asset group ${assetGroupId} is not the supported single-node All products tree.`,
+				"Refusing launch: an explicit PMax gla_1301 node is not an included child unit.",
 				sourcePmaxFilters,
 				sourceShoppingCriteria,
 			);
 		}
-		const existing = rows[0].assetGroupListingGroupFilter.resourceName;
+		const assetGroupId = String(row.assetGroup?.id ?? "");
 		const assetGroup =
-			rows[0].assetGroup.resourceName ??
+			row.assetGroup?.resourceName ??
 			`customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroups/${assetGroupId}`;
-		const root = `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`;
 		operations.push(
-			{ assetGroupListingGroupFilterOperation: { remove: existing } },
-			{
-				assetGroupListingGroupFilterOperation: {
-					create: {
-						resourceName: root,
-						assetGroup,
-						type: "SUBDIVISION",
-						listingSource: "SHOPPING",
-					},
-				},
-			},
+			{ assetGroupListingGroupFilterOperation: { remove: filter.resourceName } },
 			{
 				assetGroupListingGroupFilterOperation: {
 					create: {
 						resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`,
 						assetGroup,
-						parentListingGroupFilter: root,
+						parentListingGroupFilter: filter.parentListingGroupFilter,
 						type: "UNIT_EXCLUDED",
-						listingSource: "SHOPPING",
-						caseValue: { productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID } },
-					},
-				},
-			},
-			{
-				assetGroupListingGroupFilterOperation: {
-					create: {
-						resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`,
-						assetGroup,
-						parentListingGroupFilter: root,
-						type: "UNIT_INCLUDED",
-						listingSource: "SHOPPING",
-						caseValue: { productItemId: {} },
+						listingSource: filter.listingSource ?? "SHOPPING",
+						caseValue: {
+							productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID },
+						},
 					},
 				},
 			},
@@ -1693,49 +1720,36 @@ async function getZipGripExclusiveLaunchPlan() {
 	}
 
 	for (const [adGroupId, rows] of shoppingByGroup) {
-		if (
-			rows.length !== 1 ||
-			rows[0]?.adGroupCriterion?.listingGroup?.parentAdGroupCriterion ||
-			rows[0]?.adGroupCriterion?.listingGroup?.type !== "UNIT" ||
-			rows[0]?.adGroupCriterion?.negative
-		) {
+		const matches = rows.filter(
+			(row) =>
+				row.adGroupCriterion?.listingGroup?.caseValue?.productItemId?.value ===
+				GOOGLE_ADS_ZIPGRIP_ITEM_ID,
+		);
+		if (matches.length !== 1) {
 			throw zipGripLaunchTreeError(
-				`Refusing launch: source Shopping ad group ${adGroupId} is not the supported single-node All products tree.`,
+				`Refusing launch: source Shopping ad group ${adGroupId} must contain exactly one explicit gla_1301 unit node; found ${matches.length}.`,
 				sourcePmaxFilters,
 				sourceShoppingCriteria,
 			);
 		}
-		const existingCriterion = rows[0].adGroupCriterion;
+		const existingCriterion = matches[0].adGroupCriterion;
+		if (
+			existingCriterion?.listingGroup?.type !== "UNIT" ||
+			!existingCriterion.listingGroup.parentAdGroupCriterion ||
+			existingCriterion.negative ||
+			!existingCriterion.resourceName
+		) {
+			throw zipGripLaunchTreeError(
+				`Refusing launch: the gla_1301 node in Shopping ad group ${adGroupId} is not an included child unit.`,
+				sourcePmaxFilters,
+				sourceShoppingCriteria,
+			);
+		}
 		const adGroup =
-			rows[0].adGroup.resourceName ??
+			matches[0].adGroup?.resourceName ??
 			`customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/adGroups/${adGroupId}`;
-		const root = `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/adGroupCriteria/${adGroupId}~${tempId--}`;
-		const includedOther: any = {
-			resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/adGroupCriteria/${adGroupId}~${tempId--}`,
-			adGroup,
-			status: "ENABLED",
-			negative: false,
-			listingGroup: {
-				type: "UNIT",
-				parentAdGroupCriterion: root,
-				caseValue: { productItemId: {} },
-			},
-		};
-		if (existingCriterion.cpcBidMicros)
-			includedOther.cpcBidMicros = existingCriterion.cpcBidMicros;
 		operations.push(
 			{ adGroupCriterionOperation: { remove: existingCriterion.resourceName } },
-			{
-				adGroupCriterionOperation: {
-					create: {
-						resourceName: root,
-						adGroup,
-						status: "ENABLED",
-						negative: false,
-						listingGroup: { type: "SUBDIVISION" },
-					},
-				},
-			},
 			{
 				adGroupCriterionOperation: {
 					create: {
@@ -1745,13 +1759,15 @@ async function getZipGripExclusiveLaunchPlan() {
 						negative: true,
 						listingGroup: {
 							type: "UNIT",
-							parentAdGroupCriterion: root,
-							caseValue: { productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID } },
+							parentAdGroupCriterion:
+								existingCriterion.listingGroup.parentAdGroupCriterion,
+							caseValue: {
+								productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID },
+							},
 						},
 					},
 				},
 			},
-			{ adGroupCriterionOperation: { create: includedOther } },
 		);
 	}
 
@@ -6112,7 +6128,7 @@ function createServer() {
 		"launch_google_ads_zipgrip_exclusively_guarded",
 		{
 			description:
-				"Atomically exclude gla_1301 from the three locked existing campaign product trees and enable only the locked dedicated ZipGrip PMax campaign and asset group. Requires simple All products source trees, full asset approval, exact confirmation and validateOnly preflight.",
+				"Atomically replace only explicit gla_1301 product units with exclusions in the three locked existing campaign trees, preserving all roots, sibling partitions and bids, then enable only the locked dedicated ZipGrip PMax campaign and asset group. Requires full asset approval, exact confirmation and validateOnly preflight.",
 			inputSchema: z.object({
 				confirmation: z.literal(GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION),
 			}),
