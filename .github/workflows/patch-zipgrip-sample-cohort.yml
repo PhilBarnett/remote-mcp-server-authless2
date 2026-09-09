@@ -22,8 +22,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-      - run: npm ci
+      - run: npm install --no-audit --no-fund
       - run: node scripts/patch-zipgrip-sample-cohort.mjs
       - run: npm run type-check
       - name: Remove temporary patch machinery
