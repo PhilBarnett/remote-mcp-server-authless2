@@ -1486,6 +1486,61 @@ async function getZipGripAssetState() {
 	};
 }
 
+function summarizeZipGripPmaxTree(rows: any[]) {
+	return rows.map((row) => ({
+		campaign_id: String(row.campaign?.id ?? ""),
+		campaign_name: row.campaign?.name ?? null,
+		campaign_status: row.campaign?.status ?? null,
+		asset_group_id: String(row.assetGroup?.id ?? ""),
+		asset_group_name: row.assetGroup?.name ?? null,
+		asset_group_status: row.assetGroup?.status ?? null,
+		filter_id: String(row.assetGroupListingGroupFilter?.id ?? ""),
+		resource_name: row.assetGroupListingGroupFilter?.resourceName ?? null,
+		parent_resource_name:
+			row.assetGroupListingGroupFilter?.parentListingGroupFilter ?? null,
+		type: row.assetGroupListingGroupFilter?.type ?? null,
+		listing_source: row.assetGroupListingGroupFilter?.listingSource ?? null,
+		product_item_id:
+			row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ?? null,
+		is_root: !row.assetGroupListingGroupFilter?.parentListingGroupFilter,
+	}));
+}
+
+function summarizeZipGripShoppingTree(rows: any[]) {
+	return rows.map((row) => ({
+		campaign_id: String(row.campaign?.id ?? ""),
+		campaign_name: row.campaign?.name ?? null,
+		campaign_status: row.campaign?.status ?? null,
+		ad_group_id: String(row.adGroup?.id ?? ""),
+		ad_group_name: row.adGroup?.name ?? null,
+		ad_group_status: row.adGroup?.status ?? null,
+		criterion_id: String(row.adGroupCriterion?.criterionId ?? ""),
+		resource_name: row.adGroupCriterion?.resourceName ?? null,
+		parent_resource_name:
+			row.adGroupCriterion?.listingGroup?.parentAdGroupCriterion ?? null,
+		type: row.adGroupCriterion?.listingGroup?.type ?? null,
+		status: row.adGroupCriterion?.status ?? null,
+		negative: Boolean(row.adGroupCriterion?.negative),
+		cpc_bid_micros: row.adGroupCriterion?.cpcBidMicros ?? null,
+		product_item_id:
+			row.adGroupCriterion?.listingGroup?.caseValue?.productItemId?.value ?? null,
+		is_root: !row.adGroupCriterion?.listingGroup?.parentAdGroupCriterion,
+	}));
+}
+
+function zipGripLaunchTreeError(
+	message: string,
+	pmaxRows: any[],
+	shoppingRows: any[],
+) {
+	return Object.assign(new Error(message), {
+		zipGripLaunchDiagnostics: {
+			source_pmax_listing_tree: summarizeZipGripPmaxTree(pmaxRows),
+			source_shopping_listing_trees: summarizeZipGripShoppingTree(shoppingRows),
+		},
+	});
+}
+
 async function getZipGripExclusiveLaunchPlan() {
 	const state = await getZipGripAssetState();
 	if (!state.minimum_complete) {
@@ -1587,8 +1642,10 @@ async function getZipGripExclusiveLaunchPlan() {
 			rows[0]?.assetGroupListingGroupFilter?.parentListingGroupFilter ||
 			rows[0]?.assetGroupListingGroupFilter?.type !== "UNIT_INCLUDED"
 		) {
-			throw new Error(
+			throw zipGripLaunchTreeError(
 				`Refusing launch: source PMax asset group ${assetGroupId} is not the supported single-node All products tree.`,
+				sourcePmaxFilters,
+				sourceShoppingCriteria,
 			);
 		}
 		const existing = rows[0].assetGroupListingGroupFilter.resourceName;
@@ -1642,8 +1699,10 @@ async function getZipGripExclusiveLaunchPlan() {
 			rows[0]?.adGroupCriterion?.listingGroup?.type !== "UNIT" ||
 			rows[0]?.adGroupCriterion?.negative
 		) {
-			throw new Error(
+			throw zipGripLaunchTreeError(
 				`Refusing launch: source Shopping ad group ${adGroupId} is not the supported single-node All products tree.`,
+				sourcePmaxFilters,
+				sourceShoppingCriteria,
 			);
 		}
 		const existingCriterion = rows[0].adGroupCriterion;
@@ -6022,9 +6081,28 @@ function createServer() {
 					shopping_ad_groups_to_change: new Set(
 						plan.sourceShoppingCriteria.map((row) => String(row.adGroup?.id)),
 					).size,
+					source_pmax_listing_tree: summarizeZipGripPmaxTree(
+						plan.sourcePmaxFilters,
+					),
+					source_shopping_listing_trees: summarizeZipGripShoppingTree(
+						plan.sourceShoppingCriteria,
+					),
 					confirmation_required: GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION,
 				});
 			} catch (error) {
+				const diagnostics = (error as {
+					zipGripLaunchDiagnostics?: Record<string, unknown>;
+				})?.zipGripLaunchDiagnostics;
+				if (diagnostics) {
+					return toolResult({
+						valid_for_launch: false,
+						api_validation_passed: false,
+						created_or_modified: false,
+						blocker:
+							error instanceof Error ? error.message : "Unknown launch blocker",
+						...diagnostics,
+					});
+				}
 				return toolError(error);
 			}
 		},
