@@ -38,6 +38,15 @@ Search Console reuses `GA4_SERVICE_ACCOUNT_JSON` and requests only the
 same Google Cloud project and add the service account email as a user of the
 Blindmotion Search Console property before calling these tools.
 
+## Outdoor SEO page inspection
+
+`inspect_outdoor_seo_pages` is a read-only diagnostic locked to the Outdoor Blinds
+landing page and the Straight Drop and Zip Sided outdoor-blind products. It compares
+stored WordPress/WooCommerce content with the final rendered HTML, reports search
+metadata and headings, inventories relevant Elementor/SEO-plugin metadata, and flags
+known duplicated, placeholder, or incorrect indoor-product template text. It cannot
+change WordPress content or metadata.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
