@@ -1677,14 +1677,15 @@ async function getZipGripExclusiveLaunchPlan() {
 			row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ===
 			GOOGLE_ADS_ZIPGRIP_ITEM_ID,
 	);
-	if (pmaxZipGripRows.length === 0) {
+	if (pmaxZipGripRows.length > 1) {
 		throw zipGripLaunchTreeError(
-			"Refusing launch: BM Online PMax 1 has no explicit gla_1301 item node. Its containing branch must be identified before a safe exclusion can be constructed.",
+			"Refusing launch: BM Online PMax 1 contains more than one explicit gla_1301 item node.",
 			sourcePmaxFilters,
 			sourceShoppingCriteria,
 		);
 	}
-	for (const row of pmaxZipGripRows) {
+	if (pmaxZipGripRows.length === 1) {
+		const row = pmaxZipGripRows[0];
 		const filter = row.assetGroupListingGroupFilter;
 		if (
 			filter?.type !== "UNIT_INCLUDED" ||
@@ -1692,7 +1693,7 @@ async function getZipGripExclusiveLaunchPlan() {
 			!filter.resourceName
 		) {
 			throw zipGripLaunchTreeError(
-				"Refusing launch: an explicit PMax gla_1301 node is not an included child unit.",
+				"Refusing launch: the explicit PMax gla_1301 node is not an included child unit.",
 				sourcePmaxFilters,
 				sourceShoppingCriteria,
 			);
@@ -1714,6 +1715,80 @@ async function getZipGripExclusiveLaunchPlan() {
 						caseValue: {
 							productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID },
 						},
+					},
+				},
+			},
+		);
+	} else {
+		const containingLeaves = sourcePmaxFilters.filter((row) => {
+			const filter = row.assetGroupListingGroupFilter;
+			return (
+				String(row.assetGroup?.id ?? "") === "6591192784" &&
+				filter?.type === "UNIT_INCLUDED" &&
+				filter?.caseValue?.productType?.level === "LEVEL2" &&
+				filter?.caseValue?.productType?.value ===
+					"zip sided outdoor blinds" &&
+				Boolean(filter.parentListingGroupFilter) &&
+				Boolean(filter.resourceName)
+			);
+		});
+		if (containingLeaves.length !== 1) {
+			throw zipGripLaunchTreeError(
+				`Refusing launch: expected exactly one included Outdoor blinds > zip sided outdoor blinds leaf; found ${containingLeaves.length}.`,
+				sourcePmaxFilters,
+				sourceShoppingCriteria,
+			);
+		}
+		const row = containingLeaves[0];
+		const leaf = row.assetGroupListingGroupFilter;
+		const assetGroupId = String(row.assetGroup?.id ?? "");
+		const assetGroup =
+			row.assetGroup?.resourceName ??
+			`customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroups/${assetGroupId}`;
+		const subdivision =
+			`customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`;
+		operations.push(
+			{ assetGroupListingGroupFilterOperation: { remove: leaf.resourceName } },
+			{
+				assetGroupListingGroupFilterOperation: {
+					create: {
+						resourceName: subdivision,
+						assetGroup,
+						parentListingGroupFilter: leaf.parentListingGroupFilter,
+						type: "SUBDIVISION",
+						listingSource: leaf.listingSource ?? "SHOPPING",
+						caseValue: {
+							productType: {
+								value: "zip sided outdoor blinds",
+								level: "LEVEL2",
+							},
+						},
+					},
+				},
+			},
+			{
+				assetGroupListingGroupFilterOperation: {
+					create: {
+						resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`,
+						assetGroup,
+						parentListingGroupFilter: subdivision,
+						type: "UNIT_EXCLUDED",
+						listingSource: leaf.listingSource ?? "SHOPPING",
+						caseValue: {
+							productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID },
+						},
+					},
+				},
+			},
+			{
+				assetGroupListingGroupFilterOperation: {
+					create: {
+						resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`,
+						assetGroup,
+						parentListingGroupFilter: subdivision,
+						type: "UNIT_INCLUDED",
+						listingSource: leaf.listingSource ?? "SHOPPING",
+						caseValue: { productItemId: {} },
 					},
 				},
 			},
@@ -6155,7 +6230,7 @@ function createServer() {
 		"launch_google_ads_zipgrip_exclusively_guarded",
 		{
 			description:
-				"Atomically replace only explicit gla_1301 product units with exclusions in the three locked existing campaign trees, preserving all roots, sibling partitions and bids, then enable only the locked dedicated ZipGrip PMax campaign and asset group. Requires full asset approval, exact confirmation and validateOnly preflight.",
+				"Atomically exclude gla_1301 from the three locked existing campaign trees. In source PMax, safely subdivides only the exact Outdoor blinds > zip sided outdoor blinds leaf when needed and preserves an included catch-all child; in Shopping, replaces only explicit gla_1301 units. Preserves all unrelated roots, siblings and bids, requires full asset approval, exact confirmation and validateOnly preflight.",
 			inputSchema: z.object({
 				confirmation: z.literal(GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION),
 			}),
