@@ -5,7 +5,7 @@ on:
     branches:
       - feature/zipgrip-sample-cohort
     paths:
-      - scripts/patch-zipgrip-sample-cohort.mjs
+      - scripts/patch-zipgrip-sample-cohort-v2.mjs
       - .github/workflows/patch-zipgrip-sample-cohort.yml
 
 permissions:
@@ -23,10 +23,10 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
-      - run: node scripts/patch-zipgrip-sample-cohort.mjs
+      - run: node scripts/patch-zipgrip-sample-cohort-v2.mjs
       - run: npm run type-check
       - name: Remove temporary patch machinery
-        run: rm -f scripts/patch-zipgrip-sample-cohort.mjs .github/workflows/patch-zipgrip-sample-cohort.yml
+        run: rm -f scripts/patch-zipgrip-sample-cohort.mjs scripts/patch-zipgrip-sample-cohort-v2.mjs .github/workflows/patch-zipgrip-sample-cohort.yml package-lock.json
       - name: Commit patched source
         run: |
           git config user.name "github-actions[bot]"
