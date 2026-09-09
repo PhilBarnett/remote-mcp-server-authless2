@@ -1655,6 +1655,33 @@ function isGenuineCommercialOrder(order: any) {
 	return total > GENUINE_ORDER_MIN_TOTAL && GENUINE_STATUSES.has(order.status);
 }
 
+function safeOrderAttribution(order: any) {
+	const meta = Array.isArray(order?.meta_data) ? order.meta_data : [];
+
+	const getMeta = (key: string) => {
+		const item = meta.find((entry: any) => entry?.key === key);
+		return item?.value ?? null;
+	};
+
+	return {
+		source_type: getMeta("_wc_order_attribution_source_type"),
+		referrer: getMeta("_wc_order_attribution_referrer"),
+		utm_campaign: getMeta("_wc_order_attribution_utm_campaign"),
+		utm_source: getMeta("_wc_order_attribution_utm_source"),
+		utm_medium: getMeta("_wc_order_attribution_utm_medium"),
+		utm_content: getMeta("_wc_order_attribution_utm_content"),
+		utm_id: getMeta("_wc_order_attribution_utm_id"),
+		utm_term: getMeta("_wc_order_attribution_utm_term"),
+		utm_source_platform: getMeta("_wc_order_attribution_utm_source_platform"),
+		utm_creative_format: getMeta("_wc_order_attribution_utm_creative_format"),
+		utm_marketing_tactic: getMeta("_wc_order_attribution_utm_marketing_tactic"),
+		session_entry: getMeta("_wc_order_attribution_session_entry"),
+		session_start_time: getMeta("_wc_order_attribution_session_start_time"),
+		session_pages: getMeta("_wc_order_attribution_session_pages"),
+		session_count: getMeta("_wc_order_attribution_session_count"),
+	};
+}
+
 function safeOrder(order: any) {
 	return {
 		id: order.id,
@@ -1666,6 +1693,7 @@ function safeOrder(order: any) {
 		discount_total: order.discount_total,
 		shipping_total: order.shipping_total,
 		payment_method_title: order.payment_method_title,
+		attribution: safeOrderAttribution(order),
 		line_items: order.line_items?.map((item: any) => ({
 			product_id: item.product_id,
 			variation_id: item.variation_id,
