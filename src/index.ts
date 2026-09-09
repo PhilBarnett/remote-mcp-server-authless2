@@ -704,6 +704,48 @@ async function getOwnedMetaPageAccessToken(pageId: string) {
 	return String(page.access_token);
 }
 
+async function getMetaInstagramIdentityForPage(pageId: string, adsetId: string) {
+	const existingAds = await metaFetch(adsetId + "/ads", {
+		fields: "id,creative{object_story_spec}",
+		limit: 100,
+	});
+	const existingIdentities = new Set(
+		(existingAds.data ?? [])
+			.filter(
+				(ad: any) =>
+					String(ad.creative?.object_story_spec?.page_id ?? "") === pageId &&
+					/^\d+$/.test(String(ad.creative?.object_story_spec?.instagram_user_id ?? "")),
+			)
+			.map((ad: any) => String(ad.creative.object_story_spec.instagram_user_id)),
+	);
+	if (existingIdentities.size === 1) {
+		const instagramUserId = [...existingIdentities][0];
+		if (!instagramUserId) {
+			throw new Error("Refusing creation: the validated Instagram identity was empty.");
+		}
+		return instagramUserId;
+	}
+	if (existingIdentities.size > 1) {
+		throw new Error(
+			"Refusing creation: existing ads use multiple Instagram identities for the selected Page.",
+		);
+	}
+
+	const pageAccessToken = await getOwnedMetaPageAccessToken(pageId);
+	const page = await metaFetch(
+		pageId,
+		{ fields: "id,name,instagram_business_account{id,username}" },
+		pageAccessToken,
+	);
+	const instagramUserId = String(page.instagram_business_account?.id ?? "");
+	if (!/^\d+$/.test(instagramUserId)) {
+		throw new Error(
+			"Refusing creation: no single connected Instagram business account could be validated for the selected Page.",
+		);
+	}
+	return instagramUserId;
+}
+
 async function getOwnedMetaLeadForms(pageId: string, limit = 100) {
 	const pageAccessToken = await getOwnedMetaPageAccessToken(pageId);
 	const result = await metaFetch(
@@ -4593,11 +4635,12 @@ function createServer() {
 					);
 				}
 
-				const [page, form, video4x5, video9x16] = await Promise.all([
+				const [page, form, video4x5, video9x16, instagramUserId] = await Promise.all([
 					assertOwnedMetaPage(page_id),
 					assertOwnedActiveMetaLeadForm(page_id, lead_form_id),
 					assertOwnedMetaAdAccountVideo(video_4x5_id),
 					assertOwnedMetaAdAccountVideo(video_9x16_id),
+					getMetaInstagramIdentityForPage(page_id, adset_id),
 				]);
 				const videoName = (video: any) => String(video.name ?? video.title ?? "").trim();
 				if (videoName(video4x5) !== video_4x5_expected_name) {
@@ -4745,7 +4788,10 @@ function createServer() {
 				const { adAccountId } = getMetaConfig();
 				const createdCreative = await metaPost(adAccountId + "/adcreatives", {
 					name: name + " | Placement Creative",
-					object_story_spec: JSON.stringify({ page_id }),
+					object_story_spec: JSON.stringify({
+						page_id,
+						instagram_user_id: instagramUserId,
+					}),
 					asset_feed_spec: JSON.stringify(assetFeedSpec),
 				});
 				let createdAd: any;
@@ -4791,6 +4837,7 @@ function createServer() {
 					object_type: "ad",
 					...verified,
 					validated_page: page,
+					validated_instagram_user_id: instagramUserId,
 					validated_instant_form: form,
 					validated_4x5_video: video4x5,
 					validated_9x16_video: video9x16,
