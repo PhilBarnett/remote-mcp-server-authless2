@@ -29,8 +29,8 @@ The campaign name, account, Merchant Center account, AU feed label, product item
 
 ## Google Search Console reporting
 
-The server includes read-only Search Console tools for the fixed domain property
-`sc-domain:blindmotion.com.au`. They report organic-search queries, landing pages,
+The server includes read-only Search Console tools for the fixed URL-prefix property
+`https://online.blindmotion.com.au/`. They report organic-search queries, landing pages,
 query/page pairs, and daily clicks, impressions, CTR, and average position.
 
 Search Console reuses `GA4_SERVICE_ACCOUNT_JSON` and requests only the
