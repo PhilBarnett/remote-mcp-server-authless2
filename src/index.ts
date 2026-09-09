@@ -19,6 +19,9 @@ const GOOGLE_ADS_ZIPGRIP_TEXT_CONFIRMATION = "CONFIRM ADD PAUSED ZIPGRIP TEXT AS
 const GOOGLE_ADS_ZIPGRIP_IMAGE_CONFIRMATION = "CONFIRM ADD PAUSED ZIPGRIP IMAGE ASSETS";
 const GOOGLE_ADS_ZIPGRIP_BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP PAUSED ZIPGRIP ASSET GROUP";
 const GOOGLE_ADS_ZIPGRIP_VIDEO_CONFIRMATION = "CONFIRM LINK PAUSED ZIPGRIP YOUTUBE ASSETS";
+const GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION = "CONFIRM EXCLUSIVE ZIPGRIP LAUNCH";
+const GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID = "22733226130";
+const GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS = ["22732181006", "21527804393"] as const;
 const GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID = "2036";
 const GOOGLE_ADS_ENGLISH_LANGUAGE_ID = "1000";
 
@@ -567,7 +570,6 @@ function safeMetaBudgetObject(object: any, objectType: "campaign" | "adset") {
 const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
 const META_CREATE_SPRING_FORM_CONFIRMATION = "CONFIRM CREATE SPRING META FORM";
 const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
-const META_REPAIR_SPRING_ADS_CONFIRMATION = "CONFIRM REPAIR ACTIVE SPRING META ADS";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
 
 async function assertMetaObjectOwnership(
@@ -1438,6 +1440,233 @@ async function getZipGripAssetState() {
 		requirements: ZIPGRIP_ASSET_REQUIREMENTS,
 		activation_tool_available: false,
 	};
+}
+
+async function getZipGripExclusiveLaunchPlan() {
+	const state = await getZipGripAssetState();
+	if (!state.minimum_complete) {
+		throw new Error(
+			"Refusing launch: the locked ZipGrip asset group does not meet Google's minimum asset requirements.",
+		);
+	}
+	const policyProblems = state.asset_group_assets.filter((row) => {
+		const approval = row.assetGroupAsset?.policySummary?.approvalStatus;
+		const review = row.assetGroupAsset?.policySummary?.reviewStatus;
+		return (
+			(approval && approval !== "APPROVED") ||
+			(review && !["REVIEWED", "EXEMPT"].includes(review))
+		);
+	});
+	if (policyProblems.length > 0) {
+		throw new Error(
+			"Refusing launch: one or more ZipGrip asset-group assets are not fully reviewed and approved.",
+		);
+	}
+	if (
+		state.asset_group?.finalUrls?.length !== 1 ||
+		state.asset_group.finalUrls[0] !== GOOGLE_ADS_ZIPGRIP_FINAL_URL
+	) {
+		throw new Error(
+			"Refusing launch: the dedicated ZipGrip asset group is not locked to the approved landing page.",
+		);
+	}
+	const dedicatedSettings = await googleAdsSearch(`
+		SELECT campaign.id, campaign.campaign_budget,
+			campaign.maximize_conversion_value.target_roas,
+			campaign_budget.amount_micros
+		FROM campaign
+		WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID}
+		LIMIT 1
+	`);
+	if (
+		dedicatedSettings.length !== 1 ||
+		String(dedicatedSettings[0]?.campaignBudget?.amountMicros) !== "20000000" ||
+		dedicatedSettings[0]?.campaign?.maximizeConversionValue?.targetRoas != null
+	) {
+		throw new Error(
+			"Refusing launch: the dedicated ZipGrip campaign must remain at A$20/day with no target ROAS.",
+		);
+	}
+
+	const sourcePmaxFilters = await googleAdsSearch(`
+		SELECT campaign.id, campaign.name, campaign.status,
+			asset_group.id, asset_group.name, asset_group.status,
+			asset_group_listing_group_filter.id,
+			asset_group_listing_group_filter.resource_name,
+			asset_group_listing_group_filter.parent_listing_group_filter,
+			asset_group_listing_group_filter.type,
+			asset_group_listing_group_filter.listing_source,
+			asset_group_listing_group_filter.case_value.product_item_id.value
+		FROM asset_group_listing_group_filter
+		WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID}
+			AND asset_group.status != 'REMOVED'
+	`);
+	const sourceShoppingCriteria = await googleAdsSearch(`
+		SELECT campaign.id, campaign.name, campaign.status,
+			ad_group.id, ad_group.name, ad_group.status,
+			ad_group_criterion.resource_name, ad_group_criterion.criterion_id,
+			ad_group_criterion.negative, ad_group_criterion.status,
+			ad_group_criterion.cpc_bid_micros,
+			ad_group_criterion.listing_group.type,
+			ad_group_criterion.listing_group.parent_ad_group_criterion,
+			ad_group_criterion.listing_group.case_value.product_item_id.value
+		FROM ad_group_criterion
+		WHERE campaign.id IN (${GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.join(", ")})
+			AND ad_group.status != 'REMOVED'
+			AND ad_group_criterion.type = 'LISTING_GROUP'
+			AND ad_group_criterion.status != 'REMOVED'
+	`);
+
+	const pmaxByGroup = new Map<string, any[]>();
+	for (const row of sourcePmaxFilters) {
+		const id = String(row.assetGroup?.id ?? "");
+		if (!id) continue;
+		pmaxByGroup.set(id, [...(pmaxByGroup.get(id) ?? []), row]);
+	}
+	const shoppingByGroup = new Map<string, any[]>();
+	for (const row of sourceShoppingCriteria) {
+		const id = String(row.adGroup?.id ?? "");
+		if (!id) continue;
+		shoppingByGroup.set(id, [...(shoppingByGroup.get(id) ?? []), row]);
+	}
+	if (pmaxByGroup.size === 0 || shoppingByGroup.size === 0) {
+		throw new Error(
+			"Refusing launch: one or more locked source campaigns has no inspectable product-partition tree.",
+		);
+	}
+
+	const operations: any[] = [];
+	let tempId = -9000;
+	for (const [assetGroupId, rows] of pmaxByGroup) {
+		if (
+			rows.length !== 1 ||
+			rows[0]?.assetGroupListingGroupFilter?.parentListingGroupFilter ||
+			rows[0]?.assetGroupListingGroupFilter?.type !== "UNIT_INCLUDED"
+		) {
+			throw new Error(
+				`Refusing launch: source PMax asset group ${assetGroupId} is not the supported single-node All products tree.`,
+			);
+		}
+		const existing = rows[0].assetGroupListingGroupFilter.resourceName;
+		const assetGroup =
+			rows[0].assetGroup.resourceName ??
+			`customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroups/${assetGroupId}`;
+		const root = `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`;
+		operations.push(
+			{ assetGroupListingGroupFilterOperation: { remove: existing } },
+			{
+				assetGroupListingGroupFilterOperation: {
+					create: {
+						resourceName: root,
+						assetGroup,
+						type: "SUBDIVISION",
+						listingSource: "SHOPPING",
+					},
+				},
+			},
+			{
+				assetGroupListingGroupFilterOperation: {
+					create: {
+						resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`,
+						assetGroup,
+						parentListingGroupFilter: root,
+						type: "UNIT_EXCLUDED",
+						listingSource: "SHOPPING",
+						caseValue: { productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID } },
+					},
+				},
+			},
+			{
+				assetGroupListingGroupFilterOperation: {
+					create: {
+						resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`,
+						assetGroup,
+						parentListingGroupFilter: root,
+						type: "UNIT_INCLUDED",
+						listingSource: "SHOPPING",
+						caseValue: { productItemId: {} },
+					},
+				},
+			},
+		);
+	}
+
+	for (const [adGroupId, rows] of shoppingByGroup) {
+		if (
+			rows.length !== 1 ||
+			rows[0]?.adGroupCriterion?.listingGroup?.parentAdGroupCriterion ||
+			rows[0]?.adGroupCriterion?.listingGroup?.type !== "UNIT" ||
+			rows[0]?.adGroupCriterion?.negative
+		) {
+			throw new Error(
+				`Refusing launch: source Shopping ad group ${adGroupId} is not the supported single-node All products tree.`,
+			);
+		}
+		const existingCriterion = rows[0].adGroupCriterion;
+		const adGroup =
+			rows[0].adGroup.resourceName ??
+			`customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/adGroups/${adGroupId}`;
+		const root = `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/adGroupCriteria/${adGroupId}~${tempId--}`;
+		const includedOther: any = {
+			resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/adGroupCriteria/${adGroupId}~${tempId--}`,
+			adGroup,
+			status: "ENABLED",
+			negative: false,
+			listingGroup: {
+				type: "UNIT",
+				parentAdGroupCriterion: root,
+				caseValue: { productItemId: {} },
+			},
+		};
+		if (existingCriterion.cpcBidMicros)
+			includedOther.cpcBidMicros = existingCriterion.cpcBidMicros;
+		operations.push(
+			{ adGroupCriterionOperation: { remove: existingCriterion.resourceName } },
+			{
+				adGroupCriterionOperation: {
+					create: {
+						resourceName: root,
+						adGroup,
+						status: "ENABLED",
+						negative: false,
+						listingGroup: { type: "SUBDIVISION" },
+					},
+				},
+			},
+			{
+				adGroupCriterionOperation: {
+					create: {
+						resourceName: `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/adGroupCriteria/${adGroupId}~${tempId--}`,
+						adGroup,
+						status: "ENABLED",
+						negative: true,
+						listingGroup: {
+							type: "UNIT",
+							parentAdGroupCriterion: root,
+							caseValue: { productItemId: { value: GOOGLE_ADS_ZIPGRIP_ITEM_ID } },
+						},
+					},
+				},
+			},
+			{ adGroupCriterionOperation: { create: includedOther } },
+		);
+	}
+
+	operations.push(
+		{
+			assetGroupOperation: {
+				update: { resourceName: zipGripAssetGroupResource(), status: "ENABLED" },
+				updateMask: "status",
+			},
+		},
+		{
+			campaignOperation: {
+				update: { resourceName: zipGripCampaignResource(), status: "ENABLED" },
+				updateMask: "status",
+			},
+		},
+	);
+	return { state, sourcePmaxFilters, sourceShoppingCriteria, operations };
 }
 
 function googleAdsAssetResource(assetId: string) {
@@ -3810,77 +4039,6 @@ function createServer() {
 	);
 
 	server.registerTool(
-		"get_meta_leads_for_owned_forms",
-		{
-			description:
-				"Retrieve leads from explicitly identified active Instant Forms owned by an assigned Blindmotion Page. Read-only; returns lead contact fields so the business can recover and follow up enquiries after a form-routing error.",
-			inputSchema: z.object({
-				page_id: z.string().regex(/^\d+$/),
-				forms: z
-					.array(
-						z.object({
-							form_id: z.string().regex(/^\d+$/),
-							expected_name: z.string().trim().min(3).max(200),
-						}),
-					)
-					.min(1)
-					.max(10),
-				created_on_or_after: z.string().datetime(),
-				limit_per_form: z.number().int().min(1).max(100).default(100),
-			}),
-		},
-		async ({ page_id, forms, created_on_or_after, limit_per_form }) => {
-			try {
-				await assertOwnedMetaPage(page_id);
-				const pageAccessToken = await getOwnedMetaPageAccessToken(page_id);
-				const ownedForms = await getOwnedMetaLeadForms(page_id, 100);
-				const validatedForms = forms.map(({ form_id, expected_name }) => {
-					const form = ownedForms.find((item: any) => String(item.id) === form_id);
-					if (!form || form.status !== "ACTIVE") {
-						throw new Error(
-							`Form ${form_id} is not an active form owned by the selected Page.`,
-						);
-					}
-					if (String(form.name) !== expected_name) {
-						throw new Error(`Form ${form_id} name does not exactly match expectation.`);
-					}
-					return form;
-				});
-				const rows: any[] = [];
-				for (const form of validatedForms) {
-					const leads = await getAllMetaEdgeRows(
-						String(form.id) + "/leads",
-						{
-							fields: "id,created_time,ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,form_id,field_data,platform,is_organic",
-						},
-						limit_per_form,
-						pageAccessToken,
-					);
-					rows.push(
-						...leads
-							.filter(
-								(item: any) =>
-									String(item.created_time ?? "") >= created_on_or_after,
-							)
-							.map((item: any) => ({ ...item, source_form_name: form.name })),
-					);
-				}
-				rows.sort((a, b) => String(a.created_time).localeCompare(String(b.created_time)));
-				return toolResult({
-					page_id,
-					forms: validatedForms.map((form: any) => ({ id: form.id, name: form.name })),
-					created_on_or_after,
-					lead_count: rows.length,
-					leads: rows,
-					read_only: true,
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
-	server.registerTool(
 		"create_meta_spring_instant_form_for_paused_ads",
 		{
 			description:
@@ -4495,7 +4653,7 @@ function createServer() {
 		"create_meta_instant_form_placement_video_ad_paused",
 		{
 			description:
-				"Create one new placement-customized creative from explicitly validated 4:5 and 9:16 videos owned by the configured ad account, then create one PAUSED Instant-Form ad. Exact titles, upload times, durations and dimensions are required. Feed placements use 4:5; Stories and Reels use 9:16. The owned parent may be ACTIVE only for a Spring repair; the new ad always remains PAUSED and cannot deliver until separately switched.",
+				"Create one new placement-customized creative from explicitly validated 4:5 and 9:16 videos owned by the configured ad account, then create one PAUSED Instant-Form ad. Exact titles, upload times, durations and dimensions are required. Feed placements use 4:5; Stories and Reels use 9:16. Cannot activate delivery.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				page_id: z.string().regex(/^\d+$/),
@@ -4562,8 +4720,8 @@ function createServer() {
 					);
 				}
 				const adset = await assertMetaObjectOwnership(adset_id, "adset");
-				if (!["PAUSED", "ACTIVE"].includes(adset.status)) {
-					throw new Error("Refusing creation: parent ad set must be PAUSED or ACTIVE.");
+				if (adset.status !== "PAUSED") {
+					throw new Error("Refusing creation: parent ad set must be PAUSED.");
 				}
 				const adsetDetails = await metaFetch(adset_id, {
 					fields: "id,name,account_id,campaign_id,status,effective_status,optimization_goal,destination_type,promoted_object",
@@ -4583,13 +4741,9 @@ function createServer() {
 					String(adsetDetails.campaign_id),
 					"campaign",
 				);
-				if (
-					!["PAUSED", "ACTIVE"].includes(campaign.status) ||
-					campaign.objective !== "OUTCOME_LEADS" ||
-					(campaign.status === "ACTIVE" && !/spring/i.test(campaign.name))
-				) {
+				if (campaign.status !== "PAUSED" || campaign.objective !== "OUTCOME_LEADS") {
 					throw new Error(
-						"Refusing creation: parent campaign must be an OUTCOME_LEADS campaign; ACTIVE parents are allowed only for an explicitly Spring-named repair.",
+						"Refusing creation: parent campaign must be a PAUSED OUTCOME_LEADS campaign.",
 					);
 				}
 
@@ -4862,187 +5016,6 @@ function createServer() {
 					activation_performed: false,
 					object_type: "ad",
 					...verified,
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"repair_active_spring_meta_ads_guarded",
-		{
-			description:
-				"Atomically switch a reviewed Spring lead campaign from delivered ads using incorrect forms to PAUSED replacement ads using one exact intended form. Validates ownership, campaign/ad-set identity, form linkage, placement customisation and status; activates replacements, pauses old ads, verifies the final state, and never deletes history.",
-			inputSchema: z.object({
-				campaign_id: z.string().regex(/^\d+$/),
-				expected_campaign_name: z.string().trim().min(3).max(200),
-				adset_id: z.string().regex(/^\d+$/),
-				expected_adset_name: z.string().trim().min(3).max(200),
-				page_id: z.string().regex(/^\d+$/),
-				intended_form_id: z.string().regex(/^\d+$/),
-				intended_form_expected_name: z.string().trim().min(3).max(200),
-				replacement_ads: z
-					.array(
-						z.object({
-							ad_id: z.string().regex(/^\d+$/),
-							expected_name: z.string().trim().min(3).max(200),
-						}),
-					)
-					.min(1)
-					.max(10),
-				incorrect_ads: z
-					.array(
-						z.object({
-							ad_id: z.string().regex(/^\d+$/),
-							expected_name: z.string().trim().min(3).max(200),
-						}),
-					)
-					.min(1)
-					.max(10),
-				confirmation: z.literal(META_REPAIR_SPRING_ADS_CONFIRMATION),
-			}),
-		},
-		async ({
-			campaign_id,
-			expected_campaign_name,
-			adset_id,
-			expected_adset_name,
-			page_id,
-			intended_form_id,
-			intended_form_expected_name,
-			replacement_ads,
-			incorrect_ads,
-		}) => {
-			try {
-				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
-				if (
-					campaign.name !== expected_campaign_name ||
-					campaign.status !== "ACTIVE" ||
-					campaign.objective !== "OUTCOME_LEADS" ||
-					!/spring/i.test(campaign.name)
-				) {
-					throw new Error(
-						"Refusing repair: campaign identity, status, objective or Spring name did not match.",
-					);
-				}
-				const adset = await assertMetaObjectOwnership(adset_id, "adset");
-				if (
-					String(adset.campaign_id) !== campaign_id ||
-					adset.name !== expected_adset_name ||
-					adset.status !== "ACTIVE"
-				) {
-					throw new Error(
-						"Refusing repair: active parent ad set did not exactly match expectation.",
-					);
-				}
-				const form = await assertOwnedActiveMetaLeadForm(page_id, intended_form_id);
-				if (
-					String(form.name) !== intended_form_expected_name ||
-					!/spring/i.test(form.name)
-				) {
-					throw new Error(
-						"Refusing repair: intended Spring form name did not exactly match expectation.",
-					);
-				}
-				const allIds = [...replacement_ads, ...incorrect_ads].map((item) => item.ad_id);
-				if (new Set(allIds).size !== allIds.length) {
-					throw new Error(
-						"Refusing repair: replacement and incorrect ad IDs must be unique.",
-					);
-				}
-				const loadAd = async (item: { ad_id: string; expected_name: string }) => {
-					const ad = await metaFetch(item.ad_id, {
-						fields: "id,name,account_id,campaign_id,adset_id,status,effective_status,creative{id,name,status,object_story_spec,asset_feed_spec}",
-					});
-					await assertMetaObjectOwnership(item.ad_id, "ad");
-					if (
-						ad.name !== item.expected_name ||
-						String(ad.campaign_id) !== campaign_id ||
-						String(ad.adset_id) !== adset_id
-					) {
-						throw new Error(
-							`Refusing repair: ad ${item.ad_id} identity or parent did not match.`,
-						);
-					}
-					return ad;
-				};
-				const replacements = await Promise.all(replacement_ads.map(loadAd));
-				const incorrect = await Promise.all(incorrect_ads.map(loadAd));
-				for (const ad of replacements) {
-					if (ad.status !== "PAUSED")
-						throw new Error(`Replacement ad ${ad.id} is not PAUSED.`);
-					const formIds = collectMetaLeadFormIds(ad.creative);
-					if (formIds.size !== 1 || !formIds.has(intended_form_id)) {
-						throw new Error(
-							`Replacement ad ${ad.id} is not linked exclusively to the intended form.`,
-						);
-					}
-					const rules = ad.creative?.asset_feed_spec?.asset_customization_rules ?? [];
-					if (!Array.isArray(rules) || rules.length < 2) {
-						throw new Error(
-							`Replacement ad ${ad.id} lacks verified feed versus Stories/Reels placement rules.`,
-						);
-					}
-				}
-				for (const ad of incorrect) {
-					if (ad.status !== "ACTIVE")
-						throw new Error(`Incorrect ad ${ad.id} is not ACTIVE.`);
-					if (collectMetaLeadFormIds(ad.creative).has(intended_form_id)) {
-						throw new Error(
-							`Incorrect ad ${ad.id} already uses the intended form; refusing to pause it.`,
-						);
-					}
-				}
-
-				const changed: Array<{ id: string; previous: "ACTIVE" | "PAUSED" }> = [];
-				try {
-					for (const ad of replacements) {
-						await metaPost(ad.id, { status: "ACTIVE" });
-						changed.push({ id: ad.id, previous: "PAUSED" });
-					}
-					for (const ad of incorrect) {
-						await metaPost(ad.id, { status: "PAUSED" });
-						changed.push({ id: ad.id, previous: "ACTIVE" });
-					}
-				} catch (switchError) {
-					for (const item of changed.reverse()) {
-						try {
-							await metaPost(item.id, { status: item.previous });
-						} catch {
-							/* best-effort rollback */
-						}
-					}
-					throw switchError;
-				}
-				const verifiedReplacements = await Promise.all(
-					replacements.map((ad) =>
-						metaFetch(ad.id, {
-							fields: "id,name,status,effective_status,creative{id,object_story_spec,asset_feed_spec}",
-						}),
-					),
-				);
-				const verifiedIncorrect = await Promise.all(
-					incorrect.map((ad) =>
-						metaFetch(ad.id, { fields: "id,name,status,effective_status" }),
-					),
-				);
-				if (
-					verifiedReplacements.some((ad) => ad.status !== "ACTIVE") ||
-					verifiedIncorrect.some((ad) => ad.status !== "PAUSED")
-				) {
-					throw new Error(
-						"Repair switch completed but final status verification failed; inspect campaign immediately.",
-					);
-				}
-				return toolResult({
-					repaired: true,
-					campaign: { id: campaign.id, name: campaign.name, status: campaign.status },
-					adset: { id: adset.id, name: adset.name, status: adset.status },
-					intended_form: { id: form.id, name: form.name },
-					active_replacement_ads: verifiedReplacements,
-					paused_historical_ads: verifiedIncorrect,
-					deleted_ads: [],
 				});
 			} catch (error) {
 				return toolError(error);
@@ -5706,6 +5679,94 @@ function createServer() {
 						"Google's ad_strength and primary_status are output-only feedback. Completeness is also calculated from live non-removed asset links.",
 					activation_prerequisite:
 						"Activation remains out of scope until clean post-fix ZipGrip purchase tracking has been observed and the campaign is separately reviewed.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"preview_google_ads_zipgrip_exclusive_launch",
+		{
+			description:
+				"Read-only preflight for the fixed ZipGrip launch: validate excluding gla_1301 from the locked existing PMax and Shopping product trees while enabling only the dedicated campaign and asset group.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				assertZipGripGoogleAdsAccount();
+				const plan = await getZipGripExclusiveLaunchPlan();
+				await googleAdsMutate(plan.operations, true);
+				return toolResult({
+					valid_for_launch: true,
+					api_validation_passed: true,
+					created_or_modified: false,
+					dedicated_campaign_id: GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID,
+					dedicated_asset_group_id: GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID,
+					excluded_item_id: GOOGLE_ADS_ZIPGRIP_ITEM_ID,
+					source_pmax_campaign_id: GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID,
+					source_shopping_campaign_ids: GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS,
+					pmax_asset_groups_to_change: new Set(
+						plan.sourcePmaxFilters.map((row) => String(row.assetGroup?.id)),
+					).size,
+					shopping_ad_groups_to_change: new Set(
+						plan.sourceShoppingCriteria.map((row) => String(row.adGroup?.id)),
+					).size,
+					confirmation_required: GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"launch_google_ads_zipgrip_exclusively_guarded",
+		{
+			description:
+				"Atomically exclude gla_1301 from the three locked existing campaign product trees and enable only the locked dedicated ZipGrip PMax campaign and asset group. Requires simple All products source trees, full asset approval, exact confirmation and validateOnly preflight.",
+			inputSchema: z.object({
+				confirmation: z.literal(GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION),
+			}),
+		},
+		async () => {
+			try {
+				assertZipGripGoogleAdsAccount();
+				const plan = await getZipGripExclusiveLaunchPlan();
+				await googleAdsMutate(plan.operations, true);
+				const mutation = await googleAdsMutate(plan.operations, false);
+				const launched = await googleAdsSearch(`
+					SELECT campaign.id, campaign.name, campaign.status,
+						asset_group.id, asset_group.name, asset_group.status
+					FROM asset_group
+					WHERE campaign.id = ${GOOGLE_ADS_ZIPGRIP_CAMPAIGN_ID}
+						AND asset_group.id = ${GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_ID}
+					LIMIT 1
+				`);
+				if (
+					launched.length !== 1 ||
+					launched[0]?.campaign?.status !== "ENABLED" ||
+					launched[0]?.assetGroup?.status !== "ENABLED"
+				) {
+					throw new Error(
+						"The atomic launch mutation returned, but the dedicated campaign and asset group did not verify as ENABLED. Manual review is required.",
+					);
+				}
+				return toolResult({
+					launched: true,
+					api_validation_passed_before_mutation: true,
+					campaign: launched[0].campaign,
+					asset_group: launched[0].assetGroup,
+					excluded_item_id: GOOGLE_ADS_ZIPGRIP_ITEM_ID,
+					excluded_from_campaign_ids: [
+						GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID,
+						...GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS,
+					],
+					sample_item_id_changed: false,
+					daily_budget_changed: false,
+					target_roas_added: false,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
 				});
 			} catch (error) {
 				return toolError(error);
