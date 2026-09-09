@@ -1685,12 +1685,13 @@ function safeOrderAttribution(order: any) {
 
 			// Most-specific classification first.
 			if (
-				searchable.includes("zipgrip") ||
-				searchable.includes("zip-grip") ||
-				searchable.includes("zip-sided") ||
-				searchable.includes("zip-sided-outdoor") ||
-				searchable.includes("zip-guided") ||
-				searchable.includes("zipscreen")
+			searchable.includes("zipgrip") ||
+			searchable.includes("zip-grip") ||
+			searchable.includes("zip-sided") ||
+			searchable.includes("zip-sided-outdoor") ||
+			searchable.includes("zip-guided") ||
+			searchable.includes("zipsided") ||
+			searchable.includes("zipscreen")
 			) {
 				sampleIntent = "ZipGrip";
 				landingProduct = "ZipGrip / Zip Sided Outdoor Blinds";
