@@ -164,7 +164,8 @@ const VISUALIZER_PLUGIN_MAIN_FILE = "blindmotion-visualizer/blindmotion-visualiz
 
 const OUTDOOR_SEO_TARGETS = {
 	outdoor_blinds: {
-		kind: "page",
+		kind: "product",
+		productId: 1615,
 		slug: "outdoor-blinds",
 		path: "/outdoor-blinds/",
 	},
