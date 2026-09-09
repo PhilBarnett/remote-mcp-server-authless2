@@ -376,6 +376,7 @@ async function inspectOutdoorSeoElementorTemplate(templateId: OutdoorSeoElemento
 		typeof elementorDataValue === "string"
 			? elementorDataValue
 			: JSON.stringify(elementorDataValue ?? null);
+	const elementorDataSha256 = await sha256Hex(new TextEncoder().encode(serialized));
 	return {
 		id: template.id,
 		title: template.title?.raw ?? template.title?.rendered ?? "",
@@ -389,6 +390,7 @@ async function inspectOutdoorSeoElementorTemplate(templateId: OutdoorSeoElemento
 			.sort(),
 		elementor_data_available: elementorData !== null,
 		elementor_data_length: serialized.length,
+		elementor_data_sha256: elementorDataSha256,
 		suspicious_matches: suspiciousContentMatches(serialized),
 		widgets: elementorData ? elementorWidgetInventory(elementorData) : [],
 	};
@@ -445,6 +447,8 @@ async function inspectOutdoorSeoTarget(targetKey: OutdoorSeoTargetKey) {
 			permalink: product.permalink,
 			short_description_html_length: String(product.short_description ?? "").length,
 			description_html_length: String(product.description ?? "").length,
+			short_description_html: String(product.short_description ?? ""),
+			description_html: String(product.description ?? ""),
 			meta_record_count: product.meta_data?.length ?? 0,
 		};
 	} else {
@@ -473,6 +477,7 @@ async function inspectOutdoorSeoTarget(targetKey: OutdoorSeoTargetKey) {
 
 	const storedSuspicious = suspiciousContentMatches(storedContent);
 	const renderedSuspicious = suspiciousContentMatches(publicHtml);
+	const storedContentSha256 = await sha256Hex(new TextEncoder().encode(storedContent));
 	return {
 		target: targetKey,
 		record,
@@ -480,6 +485,7 @@ async function inspectOutdoorSeoTarget(targetKey: OutdoorSeoTargetKey) {
 		rendered_html_length: publicHtml.length,
 		rendered_text_length: htmlToPlainText(publicHtml).length,
 		stored_text_length: htmlToPlainText(storedContent).length,
+		stored_content_sha256: storedContentSha256,
 		stored_text_preview: htmlToPlainText(storedContent).slice(0, 1200),
 		headings: extractHtmlHeadings(publicHtml),
 		suspicious_content: { stored: storedSuspicious, rendered: renderedSuspicious },
