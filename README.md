@@ -47,6 +47,11 @@ metadata and headings, inventories relevant Elementor/SEO-plugin metadata, and f
 known duplicated, placeholder, or incorrect indoor-product template text. It cannot
 change WordPress content or metadata.
 
+`inspect_outdoor_seo_elementor_templates` is locked to the six Elementor documents
+rendered by those outdoor pages. It reports their identities, display conditions,
+heading tags, responsive visibility and suspicious widget content without exposing a
+write path.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
