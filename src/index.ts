@@ -1663,6 +1663,58 @@ function safeOrderAttribution(order: any) {
 		return item?.value ?? null;
 	};
 
+	const sessionEntry = getMeta("_wc_order_attribution_session_entry");
+
+	let gclid: string | null = null;
+	let gbraid: string | null = null;
+	let gadCampaignId: string | null = null;
+	let landingPath: string | null = null;
+	let landingProduct: string | null = null;
+	let sampleIntent: "ZipGrip" | "Outdoor" | "Roller" | "Unknown" = "Unknown";
+
+	if (typeof sessionEntry === "string" && sessionEntry.trim()) {
+		try {
+			const url = new URL(sessionEntry);
+
+			gclid = url.searchParams.get("gclid");
+			gbraid = url.searchParams.get("gbraid");
+			gadCampaignId = url.searchParams.get("gad_campaignid");
+			landingPath = url.pathname || "/";
+
+			const searchable = `${url.pathname} ${url.search}`.toLowerCase();
+
+			// Most-specific classification first.
+			if (
+				searchable.includes("zipgrip") ||
+				searchable.includes("zip-grip") ||
+				searchable.includes("zip-sided") ||
+				searchable.includes("zip-sided-outdoor") ||
+				searchable.includes("zip-guided") ||
+				searchable.includes("zipscreen")
+			) {
+				sampleIntent = "ZipGrip";
+				landingProduct = "ZipGrip / Zip Sided Outdoor Blinds";
+			} else if (
+				searchable.includes("outdoor-blind") ||
+				searchable.includes("outdoor_blind") ||
+				searchable.includes("outdoor")
+			) {
+				sampleIntent = "Outdoor";
+				landingProduct = "Outdoor Blinds";
+			} else if (
+				searchable.includes("roller-blind") ||
+				searchable.includes("roller_blind") ||
+				searchable.includes("roller")
+			) {
+				sampleIntent = "Roller";
+				landingProduct = "Roller Blinds";
+			}
+		} catch {
+			// Preserve the native Woo attribution even if session_entry
+			// is not a valid absolute URL.
+		}
+	}
+
 	return {
 		source_type: getMeta("_wc_order_attribution_source_type"),
 		referrer: getMeta("_wc_order_attribution_referrer"),
@@ -1675,7 +1727,15 @@ function safeOrderAttribution(order: any) {
 		utm_source_platform: getMeta("_wc_order_attribution_utm_source_platform"),
 		utm_creative_format: getMeta("_wc_order_attribution_utm_creative_format"),
 		utm_marketing_tactic: getMeta("_wc_order_attribution_utm_marketing_tactic"),
-		session_entry: getMeta("_wc_order_attribution_session_entry"),
+
+		gclid,
+		gbraid,
+		gad_campaignid: gadCampaignId,
+		landing_path: landingPath,
+		landing_product: landingProduct,
+		sample_intent: sampleIntent,
+
+		session_entry: sessionEntry,
 		session_start_time: getMeta("_wc_order_attribution_session_start_time"),
 		session_pages: getMeta("_wc_order_attribution_session_pages"),
 		session_count: getMeta("_wc_order_attribution_session_count"),
