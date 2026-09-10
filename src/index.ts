@@ -39,6 +39,19 @@ const GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS = ["22732181006", "21527804393"] as
 const GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID = "2036";
 const GOOGLE_ADS_ENGLISH_LANGUAGE_ID = "1000";
 
+// Reusable product-level Performance Max workflow. The Blindmotion account and
+// Merchant Center remain fixed, but product/campaign identities are validated
+// at runtime so a new product does not require another hard-coded tool family.
+const GOOGLE_ADS_PRODUCT_PMAX_CUSTOMER_ID = "6610097637";
+const GOOGLE_ADS_PRODUCT_PMAX_MERCHANT_ID = "5320593492";
+const GOOGLE_ADS_PRODUCT_PMAX_FEED_LABEL = "AU";
+const GOOGLE_ADS_PRODUCT_PMAX_CREATE_CONFIRMATION =
+	"CONFIRM CREATE PAUSED PRODUCT PMAX";
+const GOOGLE_ADS_PRODUCT_PMAX_BOOTSTRAP_CONFIRMATION =
+	"CONFIRM BOOTSTRAP PAUSED PRODUCT PMAX";
+const GOOGLE_ADS_PRODUCT_PMAX_VIDEO_CONFIRMATION =
+	"CONFIRM LINK PAUSED PRODUCT PMAX VIDEOS";
+
 const GENUINE_STATUSES = new Set(["processing", "completed", "on-hold"]);
 
 function getAuthHeader() {
@@ -3159,6 +3172,484 @@ function validateZipGripImage(
 		);
 	}
 	return { ...dimensions, bytes: bytes.length, aspect_ratio: ratio };
+}
+
+type ProductPmaxIdentity = {
+	productId: number;
+	expectedProductName: string;
+	campaignLabel: string;
+	campaignName: string;
+	assetGroupName: string;
+	itemId: string;
+	finalUrl: string;
+};
+
+function assertProductPmaxGoogleAdsAccount() {
+	const { customerId } = getGoogleAdsConfig();
+	if (customerId !== GOOGLE_ADS_PRODUCT_PMAX_CUSTOMER_ID) {
+		throw new Error(
+			`Refusing product PMax access: configured customer ${customerId} is not the Blindmotion customer ${GOOGLE_ADS_PRODUCT_PMAX_CUSTOMER_ID}.`,
+		);
+	}
+}
+
+function gaqlString(value: string) {
+	return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+function productPmaxCampaignName(campaignLabel: string) {
+	return `BM Online PMax — ${campaignLabel}`;
+}
+
+function productPmaxAssetGroupName(campaignLabel: string) {
+	return `${campaignLabel} product`;
+}
+
+async function getProductPmaxIdentity(
+	productId: number,
+	expectedProductName: string,
+	campaignLabel: string,
+	requirePublished = true,
+): Promise<ProductPmaxIdentity> {
+	assertProductPmaxGoogleAdsAccount();
+	const response = await wcFetch(`products/${productId}`);
+	const product = await response.json<any>();
+	if (Number(product?.id) !== productId || product?.name !== expectedProductName) {
+		throw new Error(
+			`Refusing product PMax access: WooCommerce product ${productId} did not match the expected name.`,
+		);
+	}
+	if (requirePublished && product?.status !== "publish") {
+		throw new Error(
+			`Refusing product PMax creation: WooCommerce product ${productId} is ${product?.status ?? "unknown"}, not published.`,
+		);
+	}
+	if (!product?.slug || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(product.slug)) {
+		throw new Error("Refusing product PMax access: the product slug is missing or unsafe.");
+	}
+	const workerEnv = env as unknown as Record<string, string>;
+	const site = new URL(workerEnv.WC_SITE);
+	const finalUrl = new URL(`/${product.slug}/`, site.origin).toString();
+	const campaignName = productPmaxCampaignName(campaignLabel);
+	const assetGroupName = productPmaxAssetGroupName(campaignLabel);
+	if (campaignName.length > 128 || assetGroupName.length > 128) {
+		throw new Error("The derived campaign or asset-group name exceeds Google's limit.");
+	}
+	return {
+		productId,
+		expectedProductName,
+		campaignLabel,
+		campaignName,
+		assetGroupName,
+		itemId: `gla_${productId}`,
+		finalUrl,
+	};
+}
+
+async function findExistingProductPmaxCampaign(identity: ProductPmaxIdentity) {
+	return googleAdsSearch(`
+		SELECT campaign.id, campaign.resource_name, campaign.name, campaign.status,
+			campaign.advertising_channel_type
+		FROM campaign
+		WHERE campaign.name = '${gaqlString(identity.campaignName)}'
+			AND campaign.status != 'REMOVED'
+		LIMIT 2
+	`);
+}
+
+function productPmaxPlan(identity: ProductPmaxIdentity, dailyBudgetAud: number) {
+	const { customerId } = getGoogleAdsConfig();
+	const budgetResource = `customers/${customerId}/campaignBudgets/-1`;
+	const campaignResource = `customers/${customerId}/campaigns/-2`;
+	const assetGroupResource = `customers/${customerId}/assetGroups/-3`;
+	const rootFilterResource =
+		`customers/${customerId}/assetGroupListingGroupFilters/-3~-4`;
+	const mutateOperations = [
+		{
+			campaignBudgetOperation: {
+				create: {
+					resourceName: budgetResource,
+					name: `${identity.campaignName} budget`,
+					amountMicros: String(Math.round(dailyBudgetAud * 1_000_000)),
+					deliveryMethod: "STANDARD",
+					explicitlyShared: false,
+				},
+			},
+		},
+		{
+			campaignOperation: {
+				create: {
+					resourceName: campaignResource,
+					name: identity.campaignName,
+					status: "PAUSED",
+					advertisingChannelType: "PERFORMANCE_MAX",
+					campaignBudget: budgetResource,
+					maximizeConversionValue: {},
+					shoppingSetting: {
+						merchantId: GOOGLE_ADS_PRODUCT_PMAX_MERCHANT_ID,
+						feedLabel: GOOGLE_ADS_PRODUCT_PMAX_FEED_LABEL,
+					},
+					assetAutomationSettings: [
+						{
+							assetAutomationType:
+								"FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION",
+							assetAutomationStatus: "OPTED_OUT",
+						},
+					],
+					containsEuPoliticalAdvertising:
+						"DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+				},
+			},
+		},
+		{
+			campaignCriterionOperation: {
+				create: {
+					campaign: campaignResource,
+					location: {
+						geoTargetConstant:
+							`geoTargetConstants/${GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID}`,
+					},
+				},
+			},
+		},
+		{
+			campaignCriterionOperation: {
+				create: {
+					campaign: campaignResource,
+					language: {
+						languageConstant:
+							`languageConstants/${GOOGLE_ADS_ENGLISH_LANGUAGE_ID}`,
+					},
+				},
+			},
+		},
+		{
+			assetGroupOperation: {
+				create: {
+					resourceName: assetGroupResource,
+					campaign: campaignResource,
+					name: identity.assetGroupName,
+					finalUrls: [identity.finalUrl],
+					finalMobileUrls: [identity.finalUrl],
+					status: "PAUSED",
+				},
+			},
+		},
+		{
+			assetGroupListingGroupFilterOperation: {
+				create: {
+					resourceName: rootFilterResource,
+					assetGroup: assetGroupResource,
+					type: "SUBDIVISION",
+					listingSource: "SHOPPING",
+				},
+			},
+		},
+		{
+			assetGroupListingGroupFilterOperation: {
+				create: {
+					resourceName:
+						`customers/${customerId}/assetGroupListingGroupFilters/-3~-5`,
+					assetGroup: assetGroupResource,
+					parentListingGroupFilter: rootFilterResource,
+					type: "UNIT_INCLUDED",
+					listingSource: "SHOPPING",
+					caseValue: { productItemId: { value: identity.itemId } },
+				},
+			},
+		},
+		{
+			assetGroupListingGroupFilterOperation: {
+				create: {
+					resourceName:
+						`customers/${customerId}/assetGroupListingGroupFilters/-3~-6`,
+					assetGroup: assetGroupResource,
+					parentListingGroupFilter: rootFilterResource,
+					type: "UNIT_EXCLUDED",
+					listingSource: "SHOPPING",
+					caseValue: { productItemId: {} },
+				},
+			},
+		},
+	];
+	return {
+		identity,
+		daily_budget_aud: dailyBudgetAud,
+		bidding: "MAXIMIZE_CONVERSION_VALUE_WITHOUT_TARGET_ROAS",
+		merchant_id: GOOGLE_ADS_PRODUCT_PMAX_MERCHANT_ID,
+		feed_label: GOOGLE_ADS_PRODUCT_PMAX_FEED_LABEL,
+		all_other_items: "EXCLUDED",
+		final_url_expansion: "OPTED_OUT",
+		location: "Australia",
+		language: "English",
+		mutateOperations,
+	};
+}
+
+function productPmaxCampaignResource(campaignId: string) {
+	return `customers/${GOOGLE_ADS_PRODUCT_PMAX_CUSTOMER_ID}/campaigns/${campaignId}`;
+}
+
+function productPmaxAssetGroupResource(assetGroupId: string) {
+	return `customers/${GOOGLE_ADS_PRODUCT_PMAX_CUSTOMER_ID}/assetGroups/${assetGroupId}`;
+}
+
+function productPmaxAssetResource(assetId: string) {
+	return `customers/${GOOGLE_ADS_PRODUCT_PMAX_CUSTOMER_ID}/assets/${assetId}`;
+}
+
+async function getProductPmaxAssetState(args: {
+	productId: number;
+	expectedProductName: string;
+	campaignLabel: string;
+	campaignId: string;
+	assetGroupId: string;
+	requirePaused?: boolean;
+}) {
+	const identity = await getProductPmaxIdentity(
+		args.productId,
+		args.expectedProductName,
+		args.campaignLabel,
+		true,
+	);
+	const groups = await googleAdsSearch(`
+		SELECT campaign.id, campaign.resource_name, campaign.name, campaign.status,
+			campaign.advertising_channel_type, campaign.brand_guidelines_enabled,
+			asset_group.id, asset_group.resource_name, asset_group.name, asset_group.status,
+			asset_group.final_urls, asset_group.ad_strength, asset_group.primary_status,
+			asset_group.primary_status_reasons
+		FROM asset_group
+		WHERE campaign.id = ${args.campaignId}
+			AND asset_group.id = ${args.assetGroupId}
+		LIMIT 2
+	`);
+	if (groups.length !== 1) {
+		throw new Error("The product PMax campaign and asset group were not unique.");
+	}
+	const campaign = groups[0]?.campaign;
+	const assetGroup = groups[0]?.assetGroup;
+	const requirePaused = args.requirePaused ?? true;
+	if (
+		String(campaign?.id) !== args.campaignId ||
+		campaign?.name !== identity.campaignName ||
+		campaign?.advertisingChannelType !== "PERFORMANCE_MAX" ||
+		String(assetGroup?.id) !== args.assetGroupId ||
+		assetGroup?.name !== identity.assetGroupName ||
+		assetGroup?.finalUrls?.length !== 1 ||
+		assetGroup.finalUrls[0] !== identity.finalUrl ||
+		(requirePaused &&
+			(campaign?.status !== "PAUSED" || assetGroup?.status !== "PAUSED"))
+	) {
+		throw new Error(
+			"Refusing product PMax access: campaign, asset group, landing page or paused state did not match.",
+		);
+	}
+	const listing = await googleAdsSearch(`
+		SELECT asset_group_listing_group_filter.resource_name,
+			asset_group_listing_group_filter.parent_listing_group_filter,
+			asset_group_listing_group_filter.type,
+			asset_group_listing_group_filter.case_value.product_item_id.value
+		FROM asset_group_listing_group_filter
+		WHERE campaign.id = ${args.campaignId}
+			AND asset_group.id = ${args.assetGroupId}
+	`);
+	const included = listing.filter(
+		(row) =>
+			row.assetGroupListingGroupFilter?.type === "UNIT_INCLUDED" &&
+			row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ===
+				identity.itemId,
+	);
+	const excludedOther = listing.filter(
+		(row) =>
+			row.assetGroupListingGroupFilter?.type === "UNIT_EXCLUDED" &&
+			row.assetGroupListingGroupFilter?.caseValue?.productItemId &&
+			!row.assetGroupListingGroupFilter.caseValue.productItemId.value,
+	);
+	if (included.length !== 1 || excludedOther.length !== 1 || listing.length !== 3) {
+		throw new Error(
+			"Refusing product PMax access: listing group is not the expected one-product partition.",
+		);
+	}
+	const assetGroupAssets = await googleAdsSearch(`
+		SELECT asset_group_asset.resource_name, asset_group_asset.asset_group,
+			asset_group_asset.asset, asset_group_asset.field_type,
+			asset_group_asset.status, asset_group_asset.source,
+			asset_group_asset.primary_status, asset_group_asset.primary_status_reasons,
+			asset_group_asset.policy_summary.approval_status,
+			asset_group_asset.policy_summary.review_status,
+			asset.id, asset.resource_name, asset.name, asset.type,
+			asset.text_asset.text, asset.image_asset.full_size.url,
+			asset.image_asset.full_size.width_pixels,
+			asset.image_asset.full_size.height_pixels, asset.image_asset.file_size,
+			asset.youtube_video_asset.youtube_video_id,
+			asset.youtube_video_asset.youtube_video_title
+		FROM asset_group_asset
+		WHERE asset_group.id = ${args.assetGroupId}
+			AND asset_group_asset.status != 'REMOVED'
+		ORDER BY asset_group_asset.field_type, asset.id
+	`);
+	const campaignAssets = await googleAdsSearch(`
+		SELECT campaign_asset.resource_name, campaign_asset.field_type,
+			campaign_asset.status, asset.id, asset.resource_name, asset.name, asset.type,
+			asset.text_asset.text, asset.image_asset.full_size.url,
+			asset.image_asset.full_size.width_pixels,
+			asset.image_asset.full_size.height_pixels, asset.image_asset.file_size
+		FROM campaign_asset
+		WHERE campaign.id = ${args.campaignId}
+			AND campaign_asset.status != 'REMOVED'
+	`);
+	const counts: Record<string, number> = {};
+	for (const row of assetGroupAssets) {
+		const type = row.assetGroupAsset?.fieldType;
+		if (type) counts[type] = (counts[type] ?? 0) + 1;
+	}
+	for (const row of campaignAssets) {
+		const type = row.campaignAsset?.fieldType;
+		if (type) counts[type] = (counts[type] ?? 0) + 1;
+	}
+	const brandGuidelinesEnabled = Boolean(campaign?.brandGuidelinesEnabled);
+	const requiredTypes = [
+		"HEADLINE",
+		"LONG_HEADLINE",
+		"DESCRIPTION",
+		"MARKETING_IMAGE",
+		"SQUARE_MARKETING_IMAGE",
+		"BUSINESS_NAME",
+		"LOGO",
+	] as const;
+	const completeness = Object.fromEntries(
+		requiredTypes.map((fieldType) => {
+			const rule = ZIPGRIP_ASSET_REQUIREMENTS[fieldType];
+			const count = counts[fieldType] ?? 0;
+			return [
+				fieldType,
+				{
+					count,
+					minimum: rule.min,
+					maximum: rule.max,
+					meets_minimum: count >= rule.min,
+					missing: Math.max(0, rule.min - count),
+				},
+			];
+		}),
+	);
+	return {
+		identity,
+		campaign,
+		asset_group: assetGroup,
+		listing_group: listing,
+		brand_guidelines_enabled: brandGuidelinesEnabled,
+		asset_group_assets: assetGroupAssets,
+		campaign_brand_assets: campaignAssets,
+		counts,
+		completeness,
+		minimum_complete: Object.values(completeness).every(
+			(value: any) => value.meets_minimum,
+		),
+	};
+}
+
+function buildProductPmaxAssetLinkOperation(
+	campaignId: string,
+	assetGroupId: string,
+	assetResource: string,
+	fieldType: string,
+	brandGuidelinesEnabled: boolean,
+) {
+	const isBrandAsset = ["BUSINESS_NAME", "LOGO", "LANDSCAPE_LOGO"].includes(
+		fieldType,
+	);
+	if (brandGuidelinesEnabled && isBrandAsset) {
+		return {
+			campaignAssetOperation: {
+				create: {
+					campaign: productPmaxCampaignResource(campaignId),
+					asset: assetResource,
+					fieldType,
+					status: "ENABLED",
+				},
+			},
+		};
+	}
+	return {
+		assetGroupAssetOperation: {
+			create: {
+				assetGroup: productPmaxAssetGroupResource(assetGroupId),
+				asset: assetResource,
+				fieldType,
+				status: "ENABLED",
+			},
+		},
+	};
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+	let binary = "";
+	const chunkSize = 0x8000;
+	for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+		binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+	}
+	return btoa(binary);
+}
+
+async function loadBlindmotionPmaxImage(sourceUrl: string) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const site = new URL(workerEnv.WC_SITE);
+	const url = new URL(sourceUrl);
+	if (
+		url.protocol !== "https:" ||
+		url.host !== site.host ||
+		!url.pathname.startsWith("/wp-content/uploads/") ||
+		url.search ||
+		url.hash
+	) {
+		throw new Error(
+			"Image source_url must be an exact HTTPS Blindmotion WordPress uploads URL.",
+		);
+	}
+	const response = await fetch(url.toString(), { redirect: "error" });
+	if (!response.ok) {
+		throw new Error(`Image download failed: ${response.status}.`);
+	}
+	const contentType = response.headers.get("content-type")?.split(";")[0];
+	if (contentType !== "image/jpeg" && contentType !== "image/png") {
+		throw new Error("Only JPEG and PNG source images can be uploaded to Google Ads.");
+	}
+	const mimeType: "image/jpeg" | "image/png" = contentType;
+	const bytes = new Uint8Array(await response.arrayBuffer());
+	return { bytes, mimeType, imageBase64: bytesToBase64(bytes) };
+}
+
+function validatePmaxExistingImage(
+	image: any,
+	fieldType:
+		| "MARKETING_IMAGE"
+		| "SQUARE_MARKETING_IMAGE"
+		| "PORTRAIT_MARKETING_IMAGE"
+		| "LOGO"
+		| "LANDSCAPE_LOGO",
+) {
+	const width = Number(image?.widthPixels ?? 0);
+	const height = Number(image?.heightPixels ?? 0);
+	const bytes = Number(image?.fileSize ?? 0);
+	const rules = {
+		MARKETING_IMAGE: { ratio: 1.91, minWidth: 600, minHeight: 314 },
+		SQUARE_MARKETING_IMAGE: { ratio: 1, minWidth: 300, minHeight: 300 },
+		PORTRAIT_MARKETING_IMAGE: { ratio: 0.8, minWidth: 480, minHeight: 600 },
+		LOGO: { ratio: 1, minWidth: 128, minHeight: 128 },
+		LANDSCAPE_LOGO: { ratio: 4, minWidth: 512, minHeight: 128 },
+	}[fieldType];
+	if (
+		width < rules.minWidth ||
+		height < rules.minHeight ||
+		bytes > 5_120_000 ||
+		Math.abs(width / height - rules.ratio) > 0.02
+	) {
+		throw new Error(
+			`Existing image does not meet ${fieldType} dimensions, ratio or size requirements.`,
+		);
+	}
+	return { width, height, bytes, aspect_ratio: width / height };
 }
 
 function googleAdsMetrics(metrics: any = {}) {
@@ -9457,7 +9948,598 @@ function createServer() {
 		},
 	);
 
-	/* Guarded Google Ads creation tools. They can only build a PAUSED ZipGrip draft. */
+	/* Reusable guarded product Performance Max tools. Product identity is verified
+	 * against live WooCommerce and every campaign is created PAUSED. */
+	const productPmaxIdentitySchema = z.object({
+		product_id: z.number().int().positive(),
+		expected_product_name: z.string().trim().min(3).max(200),
+		campaign_label: z
+			.string()
+			.trim()
+			.min(2)
+			.max(60)
+			.regex(/^[A-Za-z0-9][A-Za-z0-9 &'()\-]+$/),
+	});
+	const productPmaxResourceSchema = productPmaxIdentitySchema.extend({
+		campaign_id: z.string().regex(/^[1-9][0-9]*$/),
+		asset_group_id: z.string().regex(/^[1-9][0-9]*$/),
+	});
+	const productPmaxBudgetSchema = z
+		.number()
+		.min(5)
+		.max(50)
+		.default(20)
+		.describe("Daily campaign budget in AUD, hard-limited to A$5–A$50.");
+	const productPmaxImageFieldSchema = z.enum([
+		"MARKETING_IMAGE",
+		"SQUARE_MARKETING_IMAGE",
+		"PORTRAIT_MARKETING_IMAGE",
+		"LOGO",
+		"LANDSCAPE_LOGO",
+	]);
+	const productPmaxImageSchema = z
+		.object({
+			field_type: productPmaxImageFieldSchema,
+			name: z.string().trim().min(1).max(82),
+			source_url: z.string().url().optional(),
+			existing_asset_id: z.string().regex(/^[1-9][0-9]*$/).optional(),
+		})
+		.superRefine((value, context) => {
+			if (Boolean(value.source_url) === Boolean(value.existing_asset_id)) {
+				context.addIssue({
+					code: "custom",
+					message: "Provide exactly one of source_url or existing_asset_id.",
+				});
+			}
+		});
+	const productPmaxBootstrapSchema = productPmaxResourceSchema
+		.extend({
+			headlines: z.array(z.string().trim().min(1).max(30)).min(3).max(15),
+			long_headlines: z.array(z.string().trim().min(1).max(90)).min(1).max(5),
+			descriptions: z.array(z.string().trim().min(1).max(90)).min(2).max(5),
+			business_name: z.string().trim().min(1).max(25),
+			images: z.array(productPmaxImageSchema).min(3).max(20),
+			confirmation: z.literal(GOOGLE_ADS_PRODUCT_PMAX_BOOTSTRAP_CONFIRMATION),
+		})
+		.superRefine((value, context) => {
+			for (const [field, values] of [
+				["headlines", value.headlines],
+				["long_headlines", value.long_headlines],
+				["descriptions", value.descriptions],
+			] as const) {
+				if (new Set(values).size !== values.length) {
+					context.addIssue({
+						code: "custom",
+						path: [field],
+						message: `Duplicate ${field.replace("_", " ")} are not allowed.`,
+					});
+				}
+			}
+			for (const fieldType of [
+				"MARKETING_IMAGE",
+				"SQUARE_MARKETING_IMAGE",
+				"LOGO",
+			] as const) {
+				if (!value.images.some((image) => image.field_type === fieldType)) {
+					context.addIssue({
+						code: "custom",
+						path: ["images"],
+						message: `At least one ${fieldType} is required.`,
+					});
+				}
+			}
+			const imageKeys = value.images.map(
+				(image) =>
+					`${image.field_type}\u0000${image.source_url ?? image.existing_asset_id}`,
+			);
+			if (new Set(imageKeys).size !== imageKeys.length) {
+				context.addIssue({
+					code: "custom",
+					path: ["images"],
+					message: "Duplicate image/field-type pairs are not allowed.",
+				});
+			}
+		});
+
+	server.registerTool(
+		"preview_google_ads_product_pmax_paused",
+		{
+			description:
+				"Validate a reusable one-product Blindmotion Performance Max campaign plan. Verifies the published WooCommerce product, derives its gla_<product ID> listing item and canonical URL, checks duplicate campaign names and calls Google Ads validateOnly. Never creates resources.",
+			inputSchema: productPmaxIdentitySchema.extend({
+				daily_budget_aud: productPmaxBudgetSchema,
+			}),
+		},
+		async ({ product_id, expected_product_name, campaign_label, daily_budget_aud }) => {
+			try {
+				const identity = await getProductPmaxIdentity(
+					product_id,
+					expected_product_name,
+					campaign_label,
+				);
+				const existing = await findExistingProductPmaxCampaign(identity);
+				if (existing.length > 0) {
+					return toolResult({
+						valid_for_creation: false,
+						created: false,
+						reason: "A non-removed campaign already uses the derived campaign name.",
+						existing_campaigns: existing.map((row) => row.campaign),
+					});
+				}
+				const plan = productPmaxPlan(identity, daily_budget_aud);
+				await googleAdsMutate(plan.mutateOperations, true);
+				const { mutateOperations: _operations, ...safePlan } = plan;
+				return toolResult({
+					valid_for_creation: true,
+					api_validation_passed: true,
+					created: false,
+					...safePlan,
+					confirmation_required: GOOGLE_ADS_PRODUCT_PMAX_CREATE_CONFIRMATION,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_google_ads_product_pmax_paused",
+		{
+			description:
+				"Create a reusable one-product Blindmotion Performance Max campaign, one asset group and a gla_<product ID>-only listing partition. Product identity and publication are verified; campaign and asset group are always PAUSED; final URL expansion is off; the tool cannot activate delivery.",
+			inputSchema: productPmaxIdentitySchema.extend({
+				daily_budget_aud: productPmaxBudgetSchema,
+				confirmation: z.literal(GOOGLE_ADS_PRODUCT_PMAX_CREATE_CONFIRMATION),
+			}),
+		},
+		async ({ product_id, expected_product_name, campaign_label, daily_budget_aud }) => {
+			try {
+				const identity = await getProductPmaxIdentity(
+					product_id,
+					expected_product_name,
+					campaign_label,
+				);
+				const existing = await findExistingProductPmaxCampaign(identity);
+				if (existing.length > 0) {
+					throw new Error("Refusing creation: the derived campaign name already exists.");
+				}
+				const plan = productPmaxPlan(identity, daily_budget_aud);
+				await googleAdsMutate(plan.mutateOperations, true);
+				const mutation = await googleAdsMutate(plan.mutateOperations, false);
+				const campaigns = await findExistingProductPmaxCampaign(identity);
+				if (
+					campaigns.length !== 1 ||
+					campaigns[0]?.campaign?.status !== "PAUSED" ||
+					campaigns[0]?.campaign?.advertisingChannelType !== "PERFORMANCE_MAX"
+				) {
+					throw new Error(
+						"Creation returned, but the unique paused campaign could not be verified.",
+					);
+				}
+				const campaign = campaigns[0].campaign;
+				const groups = await googleAdsSearch(`
+					SELECT asset_group.id, asset_group.resource_name, asset_group.name,
+						asset_group.status, asset_group.final_urls, campaign.id
+					FROM asset_group
+					WHERE campaign.id = ${campaign.id}
+					LIMIT 2
+				`);
+				if (
+					groups.length !== 1 ||
+					groups[0]?.assetGroup?.status !== "PAUSED" ||
+					groups[0]?.assetGroup?.name !== identity.assetGroupName
+				) {
+					throw new Error(
+						"Campaign was created, but its unique paused asset group failed verification.",
+					);
+				}
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					api_validation_passed_before_creation: true,
+					campaign,
+					asset_group: groups[0].assetGroup,
+					identity,
+					daily_budget_aud,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
+					bootstrap_confirmation_required:
+						GOOGLE_ADS_PRODUCT_PMAX_BOOTSTRAP_CONFIRMATION,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_google_ads_product_pmax_asset_group",
+		{
+			description:
+				"Inspect a parametrically identified one-product Blindmotion PMax campaign and asset group. Revalidates the published WooCommerce product, canonical landing page, gla_<product ID>-only listing partition, resource identities, assets, policy state and completeness. Never mutates Google Ads.",
+			inputSchema: productPmaxResourceSchema.extend({
+				require_paused: z.boolean().default(true),
+			}),
+		},
+		async ({
+			product_id,
+			expected_product_name,
+			campaign_label,
+			campaign_id,
+			asset_group_id,
+			require_paused,
+		}) => {
+			try {
+				const state = await getProductPmaxAssetState({
+					productId: product_id,
+					expectedProductName: expected_product_name,
+					campaignLabel: campaign_label,
+					campaignId: campaign_id,
+					assetGroupId: asset_group_id,
+					requirePaused: require_paused,
+				});
+				return toolResult({
+					...state,
+					created_or_modified: false,
+					activation_tool_available: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"bootstrap_google_ads_product_pmax_asset_group_guarded",
+		{
+			description:
+				"Atomically create or reuse a complete initial text, Blindmotion-hosted image and brand bundle for one validated PAUSED product PMax asset group. Enforces Google limits, validates image bytes/dimensions, uses validateOnly preflight and cannot activate delivery.",
+			inputSchema: productPmaxBootstrapSchema,
+		},
+		async ({
+			product_id,
+			expected_product_name,
+			campaign_label,
+			campaign_id,
+			asset_group_id,
+			headlines,
+			long_headlines,
+			descriptions,
+			business_name,
+			images,
+		}) => {
+			try {
+				const stateArgs = {
+					productId: product_id,
+					expectedProductName: expected_product_name,
+					campaignLabel: campaign_label,
+					campaignId: campaign_id,
+					assetGroupId: asset_group_id,
+				};
+				const before = await getProductPmaxAssetState(stateArgs);
+				if (before.minimum_complete) {
+					throw new Error(
+						"Refusing bootstrap: this product asset group already meets minimum requirements.",
+					);
+				}
+				const requestedText = [
+					...headlines.map((text) => ({ fieldType: "HEADLINE", text })),
+					...long_headlines.map((text) => ({ fieldType: "LONG_HEADLINE", text })),
+					...descriptions.map((text) => ({ fieldType: "DESCRIPTION", text })),
+					{ fieldType: "BUSINESS_NAME", text: business_name },
+				];
+				const linkedText = new Set([
+					...before.asset_group_assets.map(
+						(row: any) =>
+							`${row.assetGroupAsset?.fieldType}\u0000${row.asset?.textAsset?.text ?? ""}`,
+					),
+					...before.campaign_brand_assets.map(
+						(row: any) =>
+							`${row.campaignAsset?.fieldType}\u0000${row.asset?.textAsset?.text ?? ""}`,
+					),
+				]);
+				const textAdditions = requestedText.filter(
+					(item) => !linkedText.has(`${item.fieldType}\u0000${item.text}`),
+				);
+				const requestedCounts: Record<string, number> = {};
+				for (const item of textAdditions) {
+					requestedCounts[item.fieldType] =
+						(requestedCounts[item.fieldType] ?? 0) + 1;
+				}
+				for (const image of images) {
+					requestedCounts[image.field_type] =
+						(requestedCounts[image.field_type] ?? 0) + 1;
+				}
+				for (const [fieldType, count] of Object.entries(requestedCounts)) {
+					const rule =
+						ZIPGRIP_ASSET_REQUIREMENTS[
+							fieldType as keyof typeof ZIPGRIP_ASSET_REQUIREMENTS
+						];
+					if (!rule || (before.counts[fieldType] ?? 0) + count > rule.max) {
+						throw new Error(`${fieldType} would exceed Google's asset limit.`);
+					}
+				}
+				for (const fieldType of [
+					"HEADLINE",
+					"LONG_HEADLINE",
+					"DESCRIPTION",
+					"MARKETING_IMAGE",
+					"SQUARE_MARKETING_IMAGE",
+					"BUSINESS_NAME",
+					"LOGO",
+				] as const) {
+					if (
+						(before.counts[fieldType] ?? 0) +
+							(requestedCounts[fieldType] ?? 0) <
+						ZIPGRIP_ASSET_REQUIREMENTS[fieldType].min
+					) {
+						throw new Error(`${fieldType} would remain below Google's minimum.`);
+					}
+				}
+
+				const reusableText = await reusableTextAssets();
+				const existingImageLinks = new Set([
+					...before.asset_group_assets.map(
+						(row: any) =>
+							`${row.assetGroupAsset?.fieldType}\u0000${row.asset?.resourceName}`,
+					),
+					...before.campaign_brand_assets.map(
+						(row: any) =>
+							`${row.campaignAsset?.fieldType}\u0000${row.asset?.resourceName}`,
+					),
+				]);
+				const assetOperations: any[] = [];
+				const assetGroupLinks: any[] = [];
+				const campaignLinks: any[] = [];
+				const textSummary: any[] = [];
+				const imageSummary: any[] = [];
+				let textTemp = -11000;
+				let imageTemp = -12000;
+				for (const item of textAdditions) {
+					let assetResource = reusableText.get(item.text);
+					const reused = Boolean(assetResource);
+					if (!assetResource) {
+						const currentId = textTemp--;
+						assetResource = productPmaxAssetResource(String(currentId));
+						assetOperations.push({
+							assetOperation: {
+								create: {
+									resourceName: assetResource,
+									name: `${campaign_label} ${item.fieldType} ${Math.abs(currentId)}`,
+									textAsset: { text: item.text },
+								},
+							},
+						});
+					}
+					const link = buildProductPmaxAssetLinkOperation(
+						campaign_id,
+						asset_group_id,
+						assetResource,
+						item.fieldType,
+						before.brand_guidelines_enabled,
+					);
+					(link.campaignAssetOperation ? campaignLinks : assetGroupLinks).push(link);
+					textSummary.push({
+						field_type: item.fieldType,
+						text: item.text,
+						reused_existing_asset: reused,
+					});
+				}
+				for (const image of images) {
+					let assetResource: string;
+					let imageInfo: any;
+					if (image.existing_asset_id) {
+						assetResource = productPmaxAssetResource(image.existing_asset_id);
+						const rows = await googleAdsSearch(`
+							SELECT asset.id, asset.resource_name, asset.type,
+								asset.image_asset.full_size.width_pixels,
+								asset.image_asset.full_size.height_pixels,
+								asset.image_asset.file_size
+							FROM asset
+							WHERE asset.id = ${image.existing_asset_id}
+							LIMIT 2
+						`);
+						if (rows.length !== 1 || rows[0]?.asset?.type !== "IMAGE") {
+							throw new Error(
+								`Existing asset ${image.existing_asset_id} is not a unique image.`,
+							);
+						}
+						if (
+							existingImageLinks.has(
+								`${image.field_type}\u0000${assetResource}`,
+							)
+						) {
+							throw new Error("An image is already linked with that field type.");
+						}
+						imageInfo = validatePmaxExistingImage(
+							rows[0].asset.imageAsset?.fullSize,
+							image.field_type,
+						);
+					} else {
+						const loaded = await loadBlindmotionPmaxImage(image.source_url!);
+						imageInfo = validateZipGripImage(
+							loaded.bytes,
+							loaded.mimeType,
+							image.field_type,
+						);
+						const digest = await sha256Hex(loaded.bytes);
+						const currentId = imageTemp--;
+						assetResource = productPmaxAssetResource(String(currentId));
+						assetOperations.push({
+							assetOperation: {
+								create: {
+									resourceName: assetResource,
+									name: `${image.name} ${digest.slice(0, 12)}`,
+									imageAsset: { data: loaded.imageBase64 },
+								},
+							},
+						});
+					}
+					const link = buildProductPmaxAssetLinkOperation(
+						campaign_id,
+						asset_group_id,
+						assetResource,
+						image.field_type,
+						before.brand_guidelines_enabled,
+					);
+					(link.campaignAssetOperation ? campaignLinks : assetGroupLinks).push(link);
+					imageSummary.push({
+						field_type: image.field_type,
+						name: image.name,
+						source_url: image.source_url ?? null,
+						existing_asset_id: image.existing_asset_id ?? null,
+						image: imageInfo,
+					});
+				}
+				const operations = [
+					...assetOperations,
+					...assetGroupLinks,
+					...campaignLinks,
+				];
+				await googleAdsMutate(operations, true);
+				const mutation = await googleAdsMutate(operations, false);
+				const after = await getProductPmaxAssetState(stateArgs);
+				if (!after.minimum_complete) {
+					throw new Error(
+						"Bootstrap returned, but the asset group is not complete. Manual review is required.",
+					);
+				}
+				return toolResult({
+					bootstrapped: true,
+					activation_performed: false,
+					api_validation_passed_before_creation: true,
+					text_assets: textSummary,
+					image_assets: imageSummary,
+					completeness: after.completeness,
+					google_ad_strength: after.asset_group?.adStrength,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"link_google_ads_product_pmax_youtube_assets_guarded",
+		{
+			description:
+				"Create or reuse YouTube assets and link them only to a parametrically validated PAUSED one-product PMax asset group. Uses validateOnly preflight and cannot activate delivery.",
+			inputSchema: productPmaxResourceSchema.extend({
+				videos: z
+					.array(
+						z.object({
+							youtube_video_id: z.string().regex(/^[A-Za-z0-9_-]{11}$/),
+							name: z.string().trim().min(1).max(82),
+						}),
+					)
+					.min(1)
+					.max(15),
+				confirmation: z.literal(GOOGLE_ADS_PRODUCT_PMAX_VIDEO_CONFIRMATION),
+			}),
+		},
+		async ({
+			product_id,
+			expected_product_name,
+			campaign_label,
+			campaign_id,
+			asset_group_id,
+			videos,
+		}) => {
+			try {
+				const stateArgs = {
+					productId: product_id,
+					expectedProductName: expected_product_name,
+					campaignLabel: campaign_label,
+					campaignId: campaign_id,
+					assetGroupId: asset_group_id,
+				};
+				const before = await getProductPmaxAssetState(stateArgs);
+				if (
+					new Set(videos.map((video) => video.youtube_video_id)).size !==
+					videos.length
+				) {
+					throw new Error("Duplicate YouTube video IDs are not allowed.");
+				}
+				const linked = new Set(
+					before.asset_group_assets
+						.filter(
+							(row: any) =>
+								row.assetGroupAsset?.fieldType === "YOUTUBE_VIDEO",
+						)
+						.map((row: any) => row.asset?.youtubeVideoAsset?.youtubeVideoId),
+				);
+				const additions = videos.filter(
+					(video) => !linked.has(video.youtube_video_id),
+				);
+				if (additions.length === 0) {
+					return toolResult({
+						created_or_linked: false,
+						reason: "Every supplied video is already linked.",
+						activation_performed: false,
+					});
+				}
+				if (
+					(before.counts.YOUTUBE_VIDEO ?? 0) + additions.length >
+					ZIPGRIP_ASSET_REQUIREMENTS.YOUTUBE_VIDEO.max
+				) {
+					throw new Error("The request would exceed Google's YouTube asset limit.");
+				}
+				const reusable = await reusableYoutubeAssets();
+				const operations: any[] = [];
+				const summary: any[] = [];
+				let tempId = -13000;
+				for (const video of additions) {
+					let assetResource = reusable.get(video.youtube_video_id);
+					const reused = Boolean(assetResource);
+					if (!assetResource) {
+						const currentId = tempId--;
+						assetResource = productPmaxAssetResource(String(currentId));
+						operations.push({
+							assetOperation: {
+								create: {
+									resourceName: assetResource,
+									name: `${campaign_label} ${video.name}`,
+									youtubeVideoAsset: {
+										youtubeVideoId: video.youtube_video_id,
+									},
+								},
+							},
+						});
+					}
+					operations.push(
+						buildProductPmaxAssetLinkOperation(
+							campaign_id,
+							asset_group_id,
+							assetResource,
+							"YOUTUBE_VIDEO",
+							before.brand_guidelines_enabled,
+						),
+					);
+					summary.push({
+						youtube_video_id: video.youtube_video_id,
+						name: video.name,
+						reused_existing_asset: reused,
+					});
+				}
+				await googleAdsMutate(operations, true);
+				const mutation = await googleAdsMutate(operations, false);
+				const after = await getProductPmaxAssetState(stateArgs);
+				return toolResult({
+					created_or_linked: true,
+					activation_performed: false,
+					api_validation_passed_before_creation: true,
+					videos: summary,
+					google_ad_strength: after.asset_group?.adStrength,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	/* Guarded Google Ads creation tools. They can only build a PAUSED ZipGrip draft.
+	 * Kept for backwards compatibility while callers migrate to the reusable tools. */
 
 	const zipGripBudgetSchema = z
 		.number()
