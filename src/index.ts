@@ -7465,12 +7465,17 @@ function createServer() {
 					);
 				}
 
+				const creationQuestions = winterQuestions.map((question) =>
+					question.type === "CUSTOM"
+						? question
+						: { type: question.type, key: question.key },
+				);
 				const created = await metaPost(
 					META_SPRING_REPAIR_PAGE_ID + "/leadgen_forms",
 					{
 						name: META_CORRECTED_SPRING_FORM_NAME,
 						locale: String(winterForm.locale ?? "en_US"),
-						questions: JSON.stringify(winterQuestions),
+						questions: JSON.stringify(creationQuestions),
 						question_page_custom_headline: META_CORRECTED_SPRING_FORM_HEADLINE,
 						privacy_policy: JSON.stringify({
 							url: String(springForm.privacy_policy_url),
