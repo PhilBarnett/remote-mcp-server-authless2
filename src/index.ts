@@ -181,6 +181,8 @@ const TOTALBLOCK_PRODUCT_NAME = "Blindmotion TotalBlock Cassette Blind";
 const TOTALBLOCK_PRODUCT_SLUG = "totalblock-cassette-blinds";
 const TOTALBLOCK_PRODUCT_CATEGORY_ID = 74;
 const TOTALBLOCK_PRODUCT_CONFIRMATION = "CONFIRM APPLY TOTALBLOCK PRODUCT CONTENT";
+const TOTALBLOCK_FABRIC_SOURCE_ID = 4788;
+const TOTALBLOCK_FABRIC_SOURCE_NAME = "Premium Roller Blinds";
 const TOTALBLOCK_SEO_TITLE =
 	"Total Blockout Cassette Blinds with Side Channels | Blindmotion";
 const TOTALBLOCK_SEO_DESCRIPTION =
@@ -222,6 +224,60 @@ function normalizeTotalBlockHtml(value: unknown) {
 		.replace(/[\t ]+\n/g, "\n")
 		.replace(/>\s+</g, "><")
 		.trim();
+}
+
+function parseWapfFieldGroup(value: unknown) {
+	if (value && typeof value === "object") return value as Record<string, any>;
+	if (typeof value !== "string" || value.trim() === "") return null;
+	try {
+		const parsed = JSON.parse(value);
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, any>) : null;
+	} catch {
+		return null;
+	}
+}
+
+function wapfFieldLabel(field: any) {
+	return String(
+		field?.label ?? field?.title ?? field?.name ?? field?.options?.label ?? "",
+	).trim();
+}
+
+function wapfFabricCandidates(group: Record<string, any>) {
+	const fields = Array.isArray(group.fields) ? group.fields : [];
+	return fields
+		.map((field: any, index: number) => ({ field, index, label: wapfFieldLabel(field) }))
+		.filter(({ field, label }) => {
+			const choiceLabels = Array.isArray(field?.options?.choices)
+				? field.options.choices
+						.slice(0, 10)
+						.map((choice: any) => String(choice?.label ?? choice?.name ?? choice?.value ?? ""))
+						.join(" ")
+				: "";
+			return /fabric|blockout|blackout/i.test(`${label} ${choiceLabels}`);
+		})
+		.map(({ field, index, label }) => ({
+			index,
+			id: field?.id ?? field?.key ?? null,
+			label,
+			type: field?.type ?? null,
+			required: field?.required ?? field?.options?.required ?? null,
+			field_keys: Object.keys(field ?? {}).sort(),
+			option_keys: Object.keys(field?.options ?? {}).sort(),
+			choice_count: Array.isArray(field?.options?.choices) ? field.options.choices.length : 0,
+			choices: Array.isArray(field?.options?.choices)
+				? field.options.choices.map((choice: any, choiceIndex: number) => ({
+						index: choiceIndex,
+						id: choice?.id ?? choice?.key ?? null,
+						label: choice?.label ?? choice?.name ?? null,
+						value: choice?.value ?? null,
+						price: choice?.price ?? choice?.pricing ?? null,
+						image: choice?.image ?? null,
+						keys: Object.keys(choice ?? {}).sort(),
+					}))
+				: [],
+			condition_data: field?.conditionals ?? field?.conditions ?? field?.rules ?? null,
+		}));
 }
 
 const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
@@ -4114,6 +4170,72 @@ function createServer() {
 						"non-SEO metadata",
 					],
 					publication_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_totalblock_blockout_fabric_options",
+		{
+			description:
+				"Read-only inspection of WAPF fabric-option candidates on locked TotalBlock product 9413 and Premium Roller Blinds product 4788. Reports structure, choice identifiers, prices, images and conditions without returning unrelated product metadata or performing writes.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const [targetResponse, sourceResponse] = await Promise.all([
+					wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`),
+					wcFetch(`products/${TOTALBLOCK_FABRIC_SOURCE_ID}`),
+				]);
+				const target = await targetResponse.json<any>();
+				const source = await sourceResponse.json<any>();
+				if (
+					target.id !== TOTALBLOCK_PRODUCT_ID ||
+					target.name !== TOTALBLOCK_PRODUCT_NAME ||
+					target.status !== "draft" ||
+					target.catalog_visibility !== "hidden"
+				) {
+					throw new Error("Locked TotalBlock identity or draft/hidden state changed.");
+				}
+				if (
+					source.id !== TOTALBLOCK_FABRIC_SOURCE_ID ||
+					source.name !== TOTALBLOCK_FABRIC_SOURCE_NAME ||
+					source.status !== "publish"
+				) {
+					throw new Error("Locked Premium Roller Blinds source identity changed.");
+				}
+
+				async function inspect(product: any) {
+					const matches = (product.meta_data ?? []).filter(
+						(meta: any) => String(meta.key) === "_wapf_fieldgroup",
+					);
+					if (matches.length !== 1) {
+						throw new Error(
+							`Expected exactly one WAPF field group on product ${product.id}; found ${matches.length}.`,
+						);
+					}
+					const group = parseWapfFieldGroup(matches[0].value);
+					if (!group || !Array.isArray(group.fields)) {
+						throw new Error(`Product ${product.id} WAPF field group is not readable.`);
+					}
+					const serialized = JSON.stringify(matches[0].value);
+					return {
+						product: { id: product.id, name: product.name, status: product.status },
+						meta_data_id: matches[0].id,
+						field_group_sha256: await sha256Hex(new TextEncoder().encode(serialized)),
+						field_count: group.fields.length,
+						fabric_candidates: wapfFabricCandidates(group),
+					};
+				}
+
+				return toolResult({
+					read_only: true,
+					target: await inspect(target),
+					source: await inspect(source),
+					write_performed: false,
 				});
 			} catch (error) {
 				return toolError(error);
