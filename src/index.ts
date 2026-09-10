@@ -215,6 +215,14 @@ const TOTALBLOCK_DESCRIPTION = `<h2>Blockout fabric is only part of the answer</
 <h2>A complete blockout cassette blind system</h2>
 <p>TotalBlock combines practical room-darkening performance with the clean appearance of a purpose-built cassette blind. It is a strong choice when a standard blockout blind is not dark enough, without resorting to bulky layers of additional window coverings.</p>
 <p><small>TotalBlock is designed to dramatically reduce incoming light. The final result depends on the window, opening, installation and surrounding sources of light; absolute darkness cannot be guaranteed in every room.</small></p>`;
+
+function normalizeTotalBlockHtml(value: unknown) {
+	return String(value ?? "")
+		.replace(/\r\n?/g, "\n")
+		.replace(/[\t ]+\n/g, "\n")
+		.trim();
+}
+
 const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
 const VISUALIZER_PLUGIN_SLUG = "blindmotion-visualizer";
 const VISUALIZER_PLUGIN_MAIN_FILE = "blindmotion-visualizer/blindmotion-visualizer.php";
@@ -4021,9 +4029,26 @@ function createServer() {
 					["_yoast_wpseo_metadesc", TOTALBLOCK_SEO_DESCRIPTION],
 					["_yoast_wpseo_focuskw", "blockout blinds with side tracks"],
 				] as const;
-				const metaData = seoUpdates.map(([key, value]) =>
-					productMetaUpdate(target, key, sourceMeta.get(key) ?? "", value),
-				);
+				const metaData = seoUpdates.map(([key, value]) => {
+					const currentMatches = (target.meta_data ?? []).filter(
+						(meta: any) => meta.key === key,
+					);
+					if (currentMatches.length > 1) {
+						throw new Error(
+							`Unexpected product ${target.id} metadata state for ${key}.`,
+						);
+					}
+					const currentValue = String(currentMatches[0]?.value ?? "");
+					const expectedSourceValue = sourceMeta.get(key) ?? "";
+					if (currentValue !== expectedSourceValue && currentValue !== value) {
+						throw new Error(
+							`Unexpected product ${target.id} metadata state for ${key}.`,
+						);
+					}
+					return currentMatches.length === 1
+						? { id: currentMatches[0].id, key, value }
+						: { key, value };
+				});
 
 				const updateResponse = await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
 					name: TOTALBLOCK_PRODUCT_NAME,
@@ -4042,19 +4067,26 @@ function createServer() {
 				const verifiedMeta = new Map(
 					(verified.meta_data ?? []).map((meta: any) => [String(meta.key), String(meta.value ?? "")]),
 				);
-				if (
-					verified.name !== TOTALBLOCK_PRODUCT_NAME ||
-					verified.slug !== TOTALBLOCK_PRODUCT_SLUG ||
-					verified.status !== "draft" ||
-					verified.catalog_visibility !== "hidden" ||
-					verified.description !== TOTALBLOCK_DESCRIPTION ||
-					verified.short_description !== TOTALBLOCK_SHORT_DESCRIPTION ||
-					verified.categories?.length !== 1 ||
-					verified.categories[0]?.id !== TOTALBLOCK_PRODUCT_CATEGORY_ID ||
-					seoUpdates.some(([key, value]) => verifiedMeta.get(key) !== value)
-				) {
+				const verificationFailures = [
+					verified.name !== TOTALBLOCK_PRODUCT_NAME && "name",
+					verified.slug !== TOTALBLOCK_PRODUCT_SLUG && "slug",
+					verified.status !== "draft" && "status",
+					verified.catalog_visibility !== "hidden" && "catalog_visibility",
+					normalizeTotalBlockHtml(verified.description) !==
+						normalizeTotalBlockHtml(TOTALBLOCK_DESCRIPTION) && "description",
+					normalizeTotalBlockHtml(verified.short_description) !==
+						normalizeTotalBlockHtml(TOTALBLOCK_SHORT_DESCRIPTION) && "short_description",
+					(verified.categories?.length !== 1 ||
+						verified.categories[0]?.id !== TOTALBLOCK_PRODUCT_CATEGORY_ID) && "categories",
+					...seoUpdates.map(
+						([key, value]) => verifiedMeta.get(key) !== value && `metadata:${key}`,
+					),
+				].filter(Boolean);
+				if (verificationFailures.length > 0) {
 					throw new Error(
-						"TotalBlock content write did not pass exact post-write verification; product remains draft and hidden.",
+						`TotalBlock content write failed post-write verification for: ${verificationFailures.join(
+							", ",
+						)}; product remains draft and hidden.`,
 					);
 				}
 
