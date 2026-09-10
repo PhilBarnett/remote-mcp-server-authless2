@@ -209,6 +209,11 @@ const TOTALBLOCK_VIBE_SOURCE_HASH =
 	"000f7ac1a42c6193be39703cf19177dc0cb1e7c44c5b7af13195833a0ab94175";
 const TOTALBLOCK_DUO_BLOCK_CONFIRMATION = "CONFIRM ADD DUO BLOCK TO TOTALBLOCK";
 const TOTALBLOCK_SANCTUARY_CONFIRMATION = "CONFIRM ADD SANCTUARY TO TOTALBLOCK";
+const TOTALBLOCK_FEATURED_IMAGE_CONFIRMATION =
+	"CONFIRM REPLACE TOTALBLOCK FEATURED IMAGE";
+const TOTALBLOCK_EXPECTED_FEATURED_IMAGE_ID = 6704;
+const TOTALBLOCK_FEATURED_IMAGE_BACKUP_KEY =
+	"_blindmotion_mcp_totalblock_featured_backups";
 const TOTALBLOCK_FABRIC_INSTALLED_HASH =
 	"56baa1454189de29feda97493fc59405f76de11111c686379262c7458a8bed52";
 const TOTALBLOCK_DUO_BLOCK_INSTALLED_HASH =
@@ -3526,7 +3531,16 @@ function assertGithubPatchFile(path: string, content: string) {
 	if (new TextEncoder().encode(content).length > GITHUB_MAX_FILE_BYTES) {
 		throw new Error(`${path} exceeds the ${GITHUB_MAX_FILE_BYTES}-byte safety limit.`);
 	}
-	if (/-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(content)) {
+	const privateKeyPattern = new RegExp(
+		[
+			"-----BEGIN (?:RSA )?",
+			"PRIVATE KEY-----",
+			"\\s+[A-Za-z0-9+/=\\r\\n]{256,}",
+			"-----END (?:RSA )?",
+			"PRIVATE KEY-----",
+		].join(""),
+	);
+	if (privateKeyPattern.test(content)) {
 		throw new Error(`${path} appears to contain a private key.`);
 	}
 }
@@ -3603,6 +3617,55 @@ function createServer() {
 						direct_main_updates: false,
 						merge_tool_available: false,
 					},
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+
+	server.registerTool(
+		"get_blindmotion_mcp_source_file",
+		{
+			description:
+				"Read one permitted Blindmotion MCP source file from the exact current main commit through the repository-scoped GitHub App. Returns content and blob SHA; cannot read any other path or ref.",
+			inputSchema: z.object({
+				path: z.enum(["src/index.ts", "README.md"]),
+				expected_main_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+			}),
+		},
+		async ({ path, expected_main_sha }) => {
+			try {
+				const token = await getGithubInstallationToken();
+				const main = await getGithubMainState(token);
+				if (expected_main_sha !== undefined && main.sha !== expected_main_sha) {
+					throw new Error(
+						`main changed since review. Expected ${expected_main_sha}, current ${main.sha}. Re-read before continuing.`,
+					);
+				}
+				const file = await githubRepoRequest(
+					token,
+					`/contents/${path}?ref=${main.sha}`,
+				);
+				if (
+					file.data?.type !== "file" ||
+					typeof file.data?.content !== "string" ||
+					file.data?.encoding !== "base64" ||
+					!/^[0-9a-f]{40}$/.test(String(file.data?.sha ?? ""))
+				) {
+					throw new Error("GitHub returned an unexpected source-file response.");
+				}
+				const content = new TextDecoder().decode(
+					decodeBase64(file.data.content.replace(/\n/g, "")),
+				);
+				return toolResult({
+					repository: GITHUB_REPO_FULL_NAME,
+					main_sha: main.sha,
+					path,
+					blob_sha: file.data.sha,
+					encoding: "utf-8",
+					content,
 				});
 			} catch (error) {
 				return toolError(error);
@@ -5645,6 +5708,221 @@ function createServer() {
 					rollback_available: verified.rollback_available === true,
 				});
 			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+
+	server.registerTool(
+		"replace_totalblock_featured_image_guarded",
+		{
+			description:
+				`Upload or reuse an approved image and replace only the featured image of TotalBlock product ${TOTALBLOCK_PRODUCT_ID}. Preserves gallery images and all product configuration, records the previous attachment for rollback, and requires exact confirmation: ${TOTALBLOCK_FEATURED_IMAGE_CONFIRMATION}`,
+			inputSchema: z
+				.object({
+					expected_current_attachment_id: z
+						.literal(TOTALBLOCK_EXPECTED_FEATURED_IMAGE_ID)
+						.default(TOTALBLOCK_EXPECTED_FEATURED_IMAGE_ID),
+					replacement_attachment_id: z.number().int().positive().optional(),
+					replacement_filename: z
+						.string()
+						.regex(/^[A-Za-z0-9._-]+$/)
+						.optional(),
+					replacement_mime_type: z
+						.enum(["image/jpeg", "image/png", "image/webp"])
+						.optional(),
+					replacement_base64: z.string().min(4).max(8_000_000).optional(),
+					alt_text: z
+						.string()
+						.trim()
+						.min(1)
+						.max(250)
+						.default("Blindmotion TotalBlock cassette blind installed in a bedroom"),
+					confirmation: z.literal(TOTALBLOCK_FEATURED_IMAGE_CONFIRMATION),
+				})
+				.refine(
+					(value) => {
+						const reusingAttachment = value.replacement_attachment_id !== undefined;
+						const uploadFields = [
+							value.replacement_filename,
+							value.replacement_mime_type,
+							value.replacement_base64,
+						];
+						const anyUploadField = uploadFields.some((field) => field !== undefined);
+						const completeUpload = uploadFields.every((field) => field !== undefined);
+						return reusingAttachment ? !anyUploadField : completeUpload;
+					},
+					{
+						message:
+							"Provide either replacement_attachment_id or a complete filename/MIME/base64 upload payload.",
+					},
+				),
+		},
+		async ({
+			expected_current_attachment_id,
+			replacement_attachment_id,
+			replacement_filename,
+			replacement_mime_type,
+			replacement_base64,
+			alt_text,
+		}) => {
+			let product: any;
+			let originalImages: Array<{ id: number }> = [];
+			let productWriteCompleted = false;
+			try {
+				const productResponse = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
+				product = await productResponse.json<any>();
+				if (
+					product.id !== TOTALBLOCK_PRODUCT_ID ||
+					product.name !== TOTALBLOCK_PRODUCT_NAME ||
+					product.slug !== TOTALBLOCK_PRODUCT_SLUG
+				) {
+					throw new Error("TotalBlock product identity check failed; no write performed.");
+				}
+				if (product.status !== "draft") {
+					throw new Error("TotalBlock is no longer draft; no write performed.");
+				}
+				if (
+					!Array.isArray(product.images) ||
+					Number(product.images[0]?.id) !== expected_current_attachment_id
+				) {
+					throw new Error(
+						`Current featured image is not the reviewed attachment ${expected_current_attachment_id}; no write performed.`,
+					);
+				}
+				originalImages = product.images.map((image: any) => ({ id: Number(image.id) }));
+				if (
+					originalImages.some((image) => !Number.isInteger(image.id) || image.id <= 0)
+				) {
+					throw new Error("The current product image list is invalid; no write performed.");
+				}
+
+				let replacement: any;
+				let uploadedByThisTool = false;
+				if (replacement_attachment_id !== undefined) {
+					const mediaResponse = await wpAuthenticatedFetch(
+						`media/${replacement_attachment_id}?context=edit`,
+					);
+					replacement = await mediaResponse.json<any>();
+				} else {
+					const bytes = decodeBase64(replacement_base64!);
+					if (!bytes.length || bytes.length > 6_000_000) {
+						throw new Error(
+							"Replacement image must decode to between 1 byte and 6 MB.",
+						);
+					}
+					if (!hasExpectedImageSignature(bytes, replacement_mime_type!)) {
+						throw new Error(
+							"Replacement bytes do not match the declared image MIME type.",
+						);
+					}
+					replacement = await wpUploadMedia(
+						replacement_filename!,
+						replacement_mime_type!,
+						bytes,
+					);
+					uploadedByThisTool = true;
+				}
+				if (
+					!replacement?.id ||
+					typeof replacement.source_url !== "string" ||
+					!/^image\/(jpeg|png|webp)$/i.test(replacement.mime_type ?? "")
+				) {
+					throw new Error("The replacement attachment is not a supported WordPress image.");
+				}
+				if (Number(replacement.id) === expected_current_attachment_id) {
+					throw new Error("The replacement attachment is already the current featured image.");
+				}
+
+
+				const backupMeta = (product.meta_data ?? []).find(
+					(item: any) => item.key === TOTALBLOCK_FEATURED_IMAGE_BACKUP_KEY,
+				);
+				const backups = Array.isArray(backupMeta?.value) ? [...backupMeta.value] : [];
+				const backup = {
+					backup_id: crypto.randomUUID(),
+					created_at: new Date().toISOString(),
+					product_id: TOTALBLOCK_PRODUCT_ID,
+					old_featured_attachment_id: expected_current_attachment_id,
+					old_featured_source_url: product.images[0]?.src ?? null,
+					new_featured_attachment_id: Number(replacement.id),
+					new_featured_source_url: replacement.source_url,
+					original_gallery_attachment_ids: originalImages.slice(1).map((image) => image.id),
+				};
+				backups.push(backup);
+
+				await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
+					images: [
+						{ id: Number(replacement.id) },
+						...originalImages.slice(1),
+					],
+					meta_data: [
+						{
+							...(backupMeta?.id ? { id: backupMeta.id } : {}),
+							key: TOTALBLOCK_FEATURED_IMAGE_BACKUP_KEY,
+							value: backups,
+						},
+					],
+				});
+				productWriteCompleted = true;
+
+				const verifyResponse = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
+				const verified = await verifyResponse.json<any>();
+				const verifiedImageIds = (verified.images ?? []).map((image: any) =>
+					Number(image.id),
+				);
+				const expectedImageIds = [
+					Number(replacement.id),
+					...originalImages.slice(1).map((image) => image.id),
+				];
+				if (
+					verified.id !== TOTALBLOCK_PRODUCT_ID ||
+					verified.name !== TOTALBLOCK_PRODUCT_NAME ||
+					verified.slug !== TOTALBLOCK_PRODUCT_SLUG ||
+					verified.status !== "draft" ||
+					JSON.stringify(verifiedImageIds) !== JSON.stringify(expectedImageIds)
+				) {
+					throw new Error("Post-write TotalBlock featured-image verification failed.");
+				}
+
+				await wpAuthenticatedWrite(`media/${replacement.id}`, {
+					alt_text,
+					title: "Blindmotion TotalBlock Cassette Blind",
+					caption: "",
+					description: "",
+				});
+
+				return toolResult({
+					replaced: true,
+					product_id: verified.id,
+					product_name: verified.name,
+					product_status: verified.status,
+					old_featured_attachment_id: expected_current_attachment_id,
+					new_featured_attachment: {
+						...mediaMetadata(replacement),
+						alt: alt_text,
+					},
+					gallery_attachment_ids: verifiedImageIds.slice(1),
+					gallery_preserved: true,
+					original_attachment_deleted: false,
+					rollback_record: backup,
+					uploaded_by_this_tool: uploadedByThisTool,
+				});
+			} catch (error) {
+				if (productWriteCompleted && originalImages.length > 0) {
+					try {
+						await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
+							images: originalImages,
+						});
+					} catch (rollbackError) {
+						return toolError(
+							new Error(
+								`${error instanceof Error ? error.message : String(error)} Rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+							),
+						);
+					}
+				}
 				return toolError(error);
 			}
 		},
