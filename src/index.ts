@@ -197,8 +197,11 @@ const TOTALBLOCK_FABRIC_SOURCE_HASH =
 const TOTALBLOCK_VIBE_SOURCE_HASH =
 	"000f7ac1a42c6193be39703cf19177dc0cb1e7c44c5b7af13195833a0ab94175";
 const TOTALBLOCK_DUO_BLOCK_CONFIRMATION = "CONFIRM ADD DUO BLOCK TO TOTALBLOCK";
+const TOTALBLOCK_SANCTUARY_CONFIRMATION = "CONFIRM ADD SANCTUARY TO TOTALBLOCK";
 const TOTALBLOCK_FABRIC_INSTALLED_HASH =
 	"56baa1454189de29feda97493fc59405f76de11111c686379262c7458a8bed52";
+const TOTALBLOCK_DUO_BLOCK_INSTALLED_HASH =
+	"6dac64e0b458af244027410655e4fdc6dcf8e48e741810a408393cd9db60c741";
 const TOTALBLOCK_SEO_TITLE =
 	"Total Blockout Cassette Blinds with Side Channels | Blindmotion";
 const TOTALBLOCK_SEO_DESCRIPTION =
@@ -4906,6 +4909,279 @@ function createServer() {
 		},
 	);
 
+	server.registerTool(
+		"add_totalblock_sanctuary_guarded",
+		{
+			description:
+				"Add only Sanctuary Blockout and its ten reviewed colours from locked Everyday Roller Blinds product 3839 to the already-installed TotalBlock blockout fabric subtree on draft product 9413. Uses fabric pricing group 6 and excludes Sanctuary Light Filter, preserves every unrelated field and product value, forces draft/hidden state, verifies the exact result and rolls back on failure. Cannot publish the product.",
+			inputSchema: z.object({
+				product_id: z.literal(TOTALBLOCK_PRODUCT_ID),
+				source_product_id: z.literal(TOTALBLOCK_VIBE_PRICING_SOURCE_ID),
+				confirmation: z.literal(TOTALBLOCK_SANCTUARY_CONFIRMATION),
+			}),
+		},
+		async () => {
+			try {
+				const [targetResponse, sourceResponse] = await Promise.all([
+					wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`),
+					wcFetch(`products/${TOTALBLOCK_VIBE_PRICING_SOURCE_ID}`),
+				]);
+				const [target, source] = await Promise.all([
+					targetResponse.json<any>(),
+					sourceResponse.json<any>(),
+				]);
+				if (
+					target.id !== TOTALBLOCK_PRODUCT_ID ||
+					target.name !== TOTALBLOCK_PRODUCT_NAME ||
+					target.slug !== TOTALBLOCK_PRODUCT_SLUG ||
+					target.status !== "draft" ||
+					target.catalog_visibility !== "hidden"
+				) {
+					throw new Error("Locked TotalBlock identity or draft/hidden state changed.");
+				}
+				if (
+					source.id !== TOTALBLOCK_VIBE_PRICING_SOURCE_ID ||
+					source.name !== TOTALBLOCK_VIBE_PRICING_SOURCE_NAME ||
+					source.status !== "publish"
+				) {
+					throw new Error("Locked Everyday Roller Blinds source identity changed.");
+				}
+
+				function lockedWapf(product: any, metaId: number) {
+					const matches = (product.meta_data ?? []).filter(
+						(meta: any) => String(meta.key) === "_wapf_fieldgroup",
+					);
+					if (matches.length !== 1 || matches[0].id !== metaId) {
+						throw new Error(`Locked WAPF metadata ${metaId} changed on product ${product.id}.`);
+					}
+					const group = parseWapfFieldGroup(matches[0].value);
+					if (!group || !Array.isArray(group.fields)) {
+						throw new Error(`Product ${product.id} WAPF group is not readable.`);
+					}
+					return { meta: matches[0], group };
+				}
+
+				const targetWapf = lockedWapf(target, TOTALBLOCK_FABRIC_TARGET_META_ID);
+				const sourceWapf = lockedWapf(source, TOTALBLOCK_VIBE_SOURCE_META_ID);
+				const [targetHash, sourceHash] = await Promise.all(
+					[targetWapf.meta.value, sourceWapf.meta.value].map((value) =>
+						sha256Hex(new TextEncoder().encode(JSON.stringify(value))),
+					),
+				);
+				if (
+					targetHash !== TOTALBLOCK_DUO_BLOCK_INSTALLED_HASH ||
+					sourceHash !== TOTALBLOCK_VIBE_SOURCE_HASH ||
+					targetWapf.group.fields.length !== 24 ||
+					sourceWapf.group.fields.length !== 125
+				) {
+					throw new Error("A locked TotalBlock or Sanctuary source changed; refusing write.");
+				}
+
+				const selector = targetWapf.group.fields[7];
+				const targetColourFields = targetWapf.group.fields.slice(8, 13);
+				if (
+					String(selector?.id) !== "690277bc86553" ||
+					wapfFieldLabel(selector) !== "Blockout Fabric Options" ||
+					JSON.stringify(selector?.options?.choices?.map((choice: any) => choice.slug)) !==
+						JSON.stringify(["mdvec", "hlmfv", "dy9ua", "g5ugt", "k0gr7"]) ||
+					JSON.stringify(targetColourFields.map(wapfFieldLabel)) !==
+						JSON.stringify([
+							"LeReve blockout colours",
+							"Linesque BO Colours",
+							"Palm Beach blockout colours",
+							"Vibe Blockout Colours",
+							"Duo Blockout Colours",
+						])
+				) {
+					throw new Error("Installed TotalBlock fabric subtree changed.");
+				}
+
+				const sourceSelector = sourceWapf.group.fields[111];
+				const sanctuaryChoice = sourceSelector?.options?.choices?.find(
+					(choice: any) => choice.slug === "eqis3",
+				);
+				const sanctuaryColours = sourceWapf.group.fields.find(
+					(field: any) => String(field?.id) === "698076068f9f0",
+				);
+				const expectedColours = [
+					["Baltic", "gjziy", 8807],
+					["Ceramic", "7elhw", 8813],
+					["Fossil", "qegps", 8811],
+					["Limestone", "ch1fd", 8814],
+					["Marble", "kqttw", 8815],
+					["Mineral", "3j2ob", 8809],
+					["Plaster", "8w0yu", 8816],
+					["Slate", "8hoea", 8808],
+					["Suede", "lejmd", 8810],
+					["Truffle", "qynf6", 8812],
+				];
+				if (
+					wapfFieldLabel(sourceSelector) !== "Blockout Fabric Options" ||
+					sanctuaryChoice?.label !== "Sanctuary Blockout" ||
+					sanctuaryChoice?.slug !== "eqis3" ||
+					sanctuaryChoice?.attachment !== 8818 ||
+					wapfFieldLabel(sanctuaryColours) !== "Sanctuary Blockout Colours" ||
+					JSON.stringify(
+						sanctuaryColours?.options?.choices?.map((choice: any) => [
+							choice.label,
+							choice.slug,
+							choice.attachment,
+						]),
+					) !== JSON.stringify(expectedColours)
+				) {
+					throw new Error("Everyday Sanctuary source changed after inspection.");
+				}
+
+				const updatedGroup = JSON.parse(JSON.stringify(targetWapf.group));
+				const updatedSelector = updatedGroup.fields[7];
+				const newChoice = JSON.parse(JSON.stringify(sanctuaryChoice));
+				newChoice.pricing_type = "fx";
+				newChoice.label = "Sanctuary";
+				newChoice.pricing_amount =
+					"lookuptable(rollerfabricgrp6_50pcgmgst_12000w;6714d030794c6;6714d0303b92e)*[qty]";
+				updatedSelector.options.choices.push(newChoice);
+				const newColours = JSON.parse(
+					JSON.stringify(sanctuaryColours).replaceAll(
+						"https://staging-online.blindmotion.com.au/",
+						"https://online.blindmotion.com.au/",
+					),
+				);
+				newColours.conditionals = [
+					{
+						rules: [
+							{
+								condition: "==",
+								value: "eqis3",
+								field: updatedSelector.id,
+								generated: false,
+							},
+						],
+					},
+				];
+				const retainedSerialized = JSON.stringify(updatedGroup.fields);
+				if (retainedSerialized.includes(`"id":"${newColours.id}"`)) {
+					throw new Error("Sanctuary colour field ID conflicts with retained TotalBlock fields.");
+				}
+				updatedGroup.fields.splice(13, 0, newColours);
+
+				const originalValue = targetWapf.meta.value;
+				const untouchedState = JSON.stringify({
+					name: target.name,
+					slug: target.slug,
+					price: target.price,
+					regular_price: target.regular_price,
+					sale_price: target.sale_price,
+					description: target.description,
+					short_description: target.short_description,
+					images: target.images,
+					categories: target.categories,
+					attributes: target.attributes,
+				});
+
+				try {
+					await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
+						status: "draft",
+						catalog_visibility: "hidden",
+						meta_data: [
+							{
+								id: TOTALBLOCK_FABRIC_TARGET_META_ID,
+								key: "_wapf_fieldgroup",
+								value: updatedGroup,
+							},
+						],
+					});
+					const verificationResponse = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
+					const verified = await verificationResponse.json<any>();
+					const verifiedWapf = lockedWapf(verified, TOTALBLOCK_FABRIC_TARGET_META_ID);
+					const verifiedState = JSON.stringify({
+						name: verified.name,
+						slug: verified.slug,
+						price: verified.price,
+						regular_price: verified.regular_price,
+						sale_price: verified.sale_price,
+						description: verified.description,
+						short_description: verified.short_description,
+						images: verified.images,
+						categories: verified.categories,
+						attributes: verified.attributes,
+					});
+					const verifiedSelector = verifiedWapf.group.fields[7];
+					if (
+						verified.status !== "draft" ||
+						verified.catalog_visibility !== "hidden" ||
+						verifiedWapf.group.fields.length !== 25 ||
+						JSON.stringify(verifiedWapf.group) !== JSON.stringify(updatedGroup) ||
+						verifiedState !== untouchedState ||
+						JSON.stringify(
+							verifiedSelector.options.choices.map((choice: any) => choice.label),
+						) !==
+							JSON.stringify([
+								"LeReve",
+								"Linesque",
+								"Palm Beach",
+								"Vibe",
+								"Duo Block",
+								"Sanctuary",
+							])
+					) {
+						throw new Error("Post-write TotalBlock Sanctuary verification failed.");
+					}
+					return toolResult({
+						updated: true,
+						product: {
+							id: verified.id,
+							name: verified.name,
+							status: verified.status,
+							catalog_visibility: verified.catalog_visibility,
+							price: verified.price,
+						},
+						fabric_ranges: ["LeReve", "Linesque", "Palm Beach", "Vibe", "Duo Block", "Sanctuary"],
+						sanctuary_colours: expectedColours.map(([label]) => label),
+						pricing_group: 6,
+						publication_performed: false,
+					});
+				} catch (writeError) {
+					await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
+						status: "draft",
+						catalog_visibility: "hidden",
+						meta_data: [
+							{
+								id: TOTALBLOCK_FABRIC_TARGET_META_ID,
+								key: "_wapf_fieldgroup",
+								value: originalValue,
+							},
+						],
+					});
+					const rollbackResponse = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
+					const rolledBack = await rollbackResponse.json<any>();
+					const rolledBackWapf = lockedWapf(rolledBack, TOTALBLOCK_FABRIC_TARGET_META_ID);
+					const rollbackHash = await sha256Hex(
+						new TextEncoder().encode(JSON.stringify(rolledBackWapf.meta.value)),
+					);
+					if (
+						rolledBack.status !== "draft" ||
+						rolledBack.catalog_visibility !== "hidden" ||
+						rollbackHash !== TOTALBLOCK_DUO_BLOCK_INSTALLED_HASH
+					) {
+						const rollbackError = new Error(
+							"TotalBlock Sanctuary write and rollback verification both failed.",
+						);
+						(rollbackError as any).cause = writeError;
+						throw rollbackError;
+					}
+					const rolledBackError = new Error(
+						`TotalBlock Sanctuary write failed; exact rollback succeeded: ${
+							writeError instanceof Error ? writeError.message : String(writeError)
+						}`,
+					);
+					(rolledBackError as any).cause = writeError;
+					throw rolledBackError;
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
 	server.registerTool(
 		"install_update_blindmotion_visualizer_plugin_guarded",
 		{
