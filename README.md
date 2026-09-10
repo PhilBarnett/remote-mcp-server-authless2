@@ -57,6 +57,25 @@ identities and Elementor source values match the reviewed state. It removes only
 sections already hidden on every device, replaces known placeholder content, updates
 the three locked outdoor products and attempts rollback if a write fails.
 
+## Repository-scoped GitHub App
+
+The Worker can authenticate as GitHub App `4894554`, installation `160530258`, using
+the encrypted `GITHUB_APP_PRIVATE_KEY` Cloudflare secret. Every installation token is
+further restricted to repository ID `1359135665`
+(`PhilBarnett/remote-mcp-server-authless2`) and expires automatically.
+
+- `get_blindmotion_github_app_status` verifies the installation without exposing a
+  credential or token.
+- `create_blindmotion_mcp_draft_pr_guarded` atomically creates a branch, commit and
+  draft PR from an exact reviewed `main` SHA. It can replace only `src/index.ts`
+  and/or `README.md`, checks each expected blob SHA, and cannot touch workflows,
+  dependencies or `main`.
+- `inspect_blindmotion_mcp_pull_request` reports PR state and changed files but cannot
+  approve or merge.
+
+No MCP tool can merge a PR or push directly to `main`. Production deployment remains
+limited to the existing GitHub Actions workflow after an externally reviewed merge.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
