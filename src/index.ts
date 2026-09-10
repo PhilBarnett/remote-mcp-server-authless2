@@ -1462,11 +1462,25 @@ function safeMetaBudgetObject(object: any, objectType: "campaign" | "adset") {
 
 const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
 const META_CREATE_SPRING_FORM_CONFIRMATION = "CONFIRM CREATE SPRING META FORM";
+const META_CLONE_WINTER_FORM_CONFIRMATION = "CONFIRM CLONE WINTER FORM FOR SPRING";
 const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
 const META_REPAIR_SPRING_ADS_CONFIRMATION = "CONFIRM REPAIR ACTIVE SPRING META ADS";
 const META_REFRESH_SPRING_OFFER_REASON = "PROMOTE 20.5 PERCENT OFFER";
 const META_LEAD_AD_LINK = "https://fb.me/";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
+const META_SPRING_REPAIR_CAMPAIGN_ID = "52674105076400";
+const META_SPRING_REPAIR_CAMPAIGN_NAME =
+	"META | Leads | Beat The Spring Rush | Sydney | Sep 2026";
+const META_SPRING_REPAIR_PAGE_ID = "1383784325241628";
+const META_WINTER_FORM_ID = "870161355942701";
+const META_WINTER_FORM_NAME = "Outdoor Blinds Winter Sale Quote Form (v1)";
+const META_SIMPLIFIED_SPRING_FORM_ID = "1915237879884343";
+const META_SIMPLIFIED_SPRING_FORM_NAME =
+	"Outdoor Blinds | Beat the Spring Rush | Quote Form | Sep 2026";
+const META_CORRECTED_SPRING_FORM_NAME =
+	"Outdoor Blinds | Spring Sale 20.5% Off | Full Quote Form | Sep 2026";
+const META_CORRECTED_SPRING_FORM_HEADLINE =
+	"Save 20.5% on Outdoor Blinds — Get Your Free Measure & Quote";
 
 async function assertMetaObjectOwnership(
 	objectId: string,
@@ -1668,6 +1682,57 @@ async function assertOwnedActiveMetaLeadForm(pageId: string, formId: string) {
 		throw new Error("Refusing creation: selected Instant Form is not ACTIVE.");
 	}
 	return form;
+}
+
+function normalizeMetaLeadFormQuestions(questions: unknown) {
+	if (!Array.isArray(questions)) {
+		throw new Error("Instant Form questions were not returned as an array.");
+	}
+	return questions.map((question: any) => {
+		const normalized: Record<string, unknown> = {
+			type: String(question.type ?? ""),
+			key: String(question.key ?? ""),
+		};
+		if (question.label !== undefined) normalized.label = String(question.label);
+		if (Array.isArray(question.options)) {
+			normalized.options = question.options.map((option: any) => ({
+				key: String(option.key ?? ""),
+				value: String(option.value ?? ""),
+			}));
+		}
+		return normalized;
+	});
+}
+
+function assertWinterOutdoorLeadQuestionSchema(questions: Array<Record<string, unknown>>) {
+	const expectedKeys = [
+		"full_name",
+		"phone",
+		"email",
+		"post_code",
+		"what_type_of_area_are_you_looking_to_cover?",
+		"approximately_how_many_blinds_do_you_need?",
+		"when_would_you_like_them_installed?",
+	].sort();
+	const actualKeys = questions.map((question) => String(question.key)).sort();
+	if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+		throw new Error(
+			"Refusing clone: source form does not contain the exact seven-field Winter outdoor schema.",
+		);
+	}
+	for (const question of questions) {
+		if (!question.type || !question.key) {
+			throw new Error("Refusing clone: a source question is missing its type or key.");
+		}
+		if (
+			question.type === "CUSTOM" &&
+			(!question.label || !Array.isArray(question.options) || question.options.length < 2)
+		) {
+			throw new Error(
+				`Refusing clone: custom question ${String(question.key)} is incomplete.`,
+			);
+		}
+	}
 }
 
 async function getOwnedMetaVideos(limit = 100, pageId?: string) {
@@ -7323,6 +7388,129 @@ function createServer() {
 					page,
 					form: verified,
 					note: "Meta Instant Forms do not have a PAUSED state. This ACTIVE form definition cannot deliver on its own and must be attached only to separately reviewed PAUSED ads.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"clone_winter_meta_form_for_spring_repair_guarded",
+		{
+			description:
+				"Create one unattached corrected Spring Instant Form for the locked live Spring campaign by cloning the exact seven-question schema from the locked Winter form and copying the current Spring form's policy and follow-up URLs. Verifies the clone and cannot create, activate, pause or delete ads.",
+			inputSchema: z.object({
+				confirmation: z.literal(META_CLONE_WINTER_FORM_CONFIRMATION),
+			}),
+		},
+		async () => {
+			try {
+				const campaign = await assertMetaObjectOwnership(
+					META_SPRING_REPAIR_CAMPAIGN_ID,
+					"campaign",
+				);
+				if (
+					campaign.name !== META_SPRING_REPAIR_CAMPAIGN_NAME ||
+					campaign.status !== "ACTIVE" ||
+					campaign.objective !== "OUTCOME_LEADS"
+				) {
+					throw new Error("Refusing clone: locked Spring campaign state did not match.");
+				}
+				const page = await assertOwnedMetaPage(META_SPRING_REPAIR_PAGE_ID);
+				const pageAccessToken = await getOwnedMetaPageAccessToken(
+					META_SPRING_REPAIR_PAGE_ID,
+				);
+				const ownedForms = await getOwnedMetaLeadForms(META_SPRING_REPAIR_PAGE_ID, 100);
+				const assertFormSummary = (id: string, name: string) => {
+					const form = ownedForms.find((item: any) => String(item.id) === id);
+					if (!form || form.status !== "ACTIVE" || String(form.name) !== name) {
+						throw new Error(`Refusing clone: locked form ${id} did not match.`);
+					}
+					return form;
+				};
+				assertFormSummary(META_WINTER_FORM_ID, META_WINTER_FORM_NAME);
+				assertFormSummary(
+					META_SIMPLIFIED_SPRING_FORM_ID,
+					META_SIMPLIFIED_SPRING_FORM_NAME,
+				);
+				if (
+					ownedForms.some(
+						(item: any) => String(item.name) === META_CORRECTED_SPRING_FORM_NAME,
+					)
+				) {
+					throw new Error("Refusing clone: corrected Spring form already exists.");
+				}
+
+				const [winterForm, springForm] = await Promise.all([
+					metaFetch(
+						META_WINTER_FORM_ID,
+						{ fields: "id,name,status,locale,questions" },
+						pageAccessToken,
+					),
+					metaFetch(
+						META_SIMPLIFIED_SPRING_FORM_ID,
+						{
+							fields:
+								"id,name,status,privacy_policy_url,follow_up_action_url",
+						},
+						pageAccessToken,
+					),
+				]);
+				const winterQuestions = normalizeMetaLeadFormQuestions(winterForm.questions);
+				assertWinterOutdoorLeadQuestionSchema(winterQuestions);
+				if (!springForm.privacy_policy_url || !springForm.follow_up_action_url) {
+					throw new Error(
+						"Refusing clone: current Spring form did not expose its policy and follow-up URLs.",
+					);
+				}
+
+				const created = await metaPost(
+					META_SPRING_REPAIR_PAGE_ID + "/leadgen_forms",
+					{
+						name: META_CORRECTED_SPRING_FORM_NAME,
+						locale: String(winterForm.locale ?? "en_US"),
+						questions: JSON.stringify(winterQuestions),
+						question_page_custom_headline: META_CORRECTED_SPRING_FORM_HEADLINE,
+						privacy_policy: JSON.stringify({
+							url: String(springForm.privacy_policy_url),
+							link_text: "View Privacy Policy",
+						}),
+						follow_up_action_url: String(springForm.follow_up_action_url),
+					},
+					pageAccessToken,
+				);
+				const verified = await metaFetch(
+					String(created.id),
+					{
+						fields:
+							"id,name,status,locale,created_time,questions,privacy_policy_url,follow_up_action_url,question_page_custom_headline",
+					},
+					pageAccessToken,
+				);
+				const verifiedQuestions = normalizeMetaLeadFormQuestions(verified.questions);
+				assertWinterOutdoorLeadQuestionSchema(verifiedQuestions);
+				if (
+					verified.status !== "ACTIVE" ||
+					verified.name !== META_CORRECTED_SPRING_FORM_NAME ||
+					JSON.stringify(verifiedQuestions) !== JSON.stringify(winterQuestions)
+				) {
+					throw new Error("Created Spring form failed exact Winter-schema verification.");
+				}
+				return toolResult({
+					created: true,
+					activation_performed: false,
+					delivery_possible_without_a_separate_ad: false,
+					campaign: { id: campaign.id, name: campaign.name, status: campaign.status },
+					page,
+					source_winter_form: {
+						id: winterForm.id,
+						name: winterForm.name,
+						question_count: winterQuestions.length,
+					},
+					form: verified,
+					verified_question_keys: verifiedQuestions.map((question) => question.key),
+					note: "This verified form is unattached and cannot deliver until replacement ads are separately created and switched.",
 				});
 			} catch (error) {
 				return toolError(error);
