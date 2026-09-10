@@ -52,6 +52,11 @@ rendered by those outdoor pages. It reports their identities, display conditions
 heading tags, responsive visibility and suspicious widget content without exposing a
 write path.
 
+`apply_outdoor_seo_fixes_guarded` applies one fixed cleanup after exact hashes, product
+identities and Elementor source values match the reviewed state. It removes only two
+sections already hidden on every device, replaces known placeholder content, updates
+the three locked outdoor products and attempts rollback if a write fails.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
