@@ -4703,8 +4703,12 @@ function createServer() {
 		},
 		async () => {
 			try {
-				const response = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
-				const product = await response.json<any>();
+				const [wcResponse, wpResponse] = await Promise.all([
+					wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`),
+					wpAuthenticatedFetch(`product/${TOTALBLOCK_PRODUCT_ID}?context=edit`),
+				]);
+				const product = await wcResponse.json<any>();
+				const wpProduct = await wpResponse.json<any>();
 				if (
 					product.id !== TOTALBLOCK_PRODUCT_ID ||
 					product.name !== TOTALBLOCK_PRODUCT_NAME ||
@@ -4715,15 +4719,12 @@ function createServer() {
 						"Locked TotalBlock product identity or draft/hidden state changed; refusing inspection.",
 					);
 				}
-				const elementorMeta = (product.meta_data ?? []).filter(
-					(meta: any) => meta.key === "_elementor_data",
-				);
-				if (elementorMeta.length !== 1) {
+				if (wpProduct.id !== TOTALBLOCK_PRODUCT_ID || wpProduct.status !== "draft") {
 					throw new Error(
-						`Expected exactly one TotalBlock _elementor_data record; found ${elementorMeta.length}.`,
+						"Authenticated WordPress TotalBlock identity or draft state changed; refusing inspection.",
 					);
 				}
-				const raw = elementorMeta[0].value;
+				const raw = wpProduct.meta?.["_elementor_data"];
 				const data = parseElementorData(raw);
 				if (!data || typeof raw !== "string") {
 					throw new Error("TotalBlock product-level Elementor data is unavailable or malformed.");
@@ -4735,7 +4736,6 @@ function createServer() {
 						status: product.status,
 						catalog_visibility: product.catalog_visibility,
 					},
-					elementor_meta_id: elementorMeta[0].id,
 					elementor_data_length: raw.length,
 					elementor_data_sha256: await sha256Hex(new TextEncoder().encode(raw)),
 					inherited_content_matches: totalBlockElementorMatches(data),
