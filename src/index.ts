@@ -602,6 +602,61 @@ function totalBlockElementorMatches(nodes: any[]) {
 	return matches;
 }
 
+function elementorLiteralSettingMatches(nodes: any[], searchTerms: string[]) {
+	const terms = searchTerms.map((term) => term.trim().toLowerCase()).filter(Boolean);
+	const matches: any[] = [];
+	function relevantSettings(settings: unknown) {
+		if (!settings || typeof settings !== "object") return {};
+		return Object.fromEntries(
+			Object.entries(settings as Record<string, unknown>).filter(([key]) =>
+				/(?:background|image|dce_|visibility|hide_|display|condition|css_classes)/i.test(key),
+			),
+		);
+	}
+	function visit(node: any, ancestors: any[] = []) {
+		if (!node || typeof node !== "object") return;
+		const settings = node.settings && typeof node.settings === "object" ? node.settings : {};
+		const matchedSettings = Object.entries(settings)
+			.map(([key, value]) => {
+				const serialized =
+					typeof value === "string" ? value : JSON.stringify(value ?? null);
+				const normalized = serialized.toLowerCase();
+				const matchedTerms = terms.filter((term) => normalized.includes(term));
+				return { key, value, serialized, matchedTerms };
+			})
+			.filter(({ matchedTerms }) => matchedTerms.length > 0)
+			.map(({ key, value, serialized, matchedTerms }) => ({
+				key,
+				matched_terms: matchedTerms,
+				value_preview:
+					typeof value === "string"
+						? htmlToPlainText(value).slice(0, 4000)
+						: serialized.slice(0, 4000),
+				value_length: serialized.length,
+			}));
+		if (matchedSettings.length > 0) {
+			matches.push({
+				id: node.id ?? null,
+				el_type: node.elType ?? null,
+				widget_type: node.widgetType ?? null,
+				matched_settings: matchedSettings,
+				relevant_settings: relevantSettings(settings),
+				ancestor_path: ancestors.map((ancestor) => ({
+					id: ancestor.id ?? null,
+					el_type: ancestor.elType ?? null,
+					widget_type: ancestor.widgetType ?? null,
+					relevant_settings: relevantSettings(ancestor.settings),
+				})),
+			});
+		}
+		for (const child of Array.isArray(node.elements) ? node.elements : []) {
+			visit(child, [...ancestors, node]);
+		}
+	}
+	for (const node of nodes) visit(node);
+	return matches;
+}
+
 function elementorWidgetInventory(nodes: any[]) {
 	const widgets: any[] = [];
 	function visit(node: any, ancestors: any[] = []) {
@@ -5178,6 +5233,77 @@ function createServer() {
 						meta_record_count: verified.meta_data?.length ?? 0,
 					},
 					publication_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_product_elementor_rendering",
+		{
+			description:
+				"Read-only inspection of explicitly selected Elementor templates for one exactly identified WooCommerce product. Searches only for caller-supplied literal terms and reports matching nodes, ancestor visibility/condition settings, image/background settings and stable template hashes. Performs no writes.",
+			inputSchema: z.object({
+				product_id: z.number().int().positive(),
+				expected_product_name: z.string().trim().min(1).max(200),
+				template_ids: z.array(z.number().int().positive()).min(1).max(20),
+				search_terms: z.array(z.string().trim().min(2).max(200)).min(1).max(20),
+			}),
+		},
+		async ({ product_id, expected_product_name, template_ids, search_terms }) => {
+			try {
+				if (new Set(template_ids).size !== template_ids.length) {
+					throw new Error("Duplicate Elementor template IDs are not allowed.");
+				}
+				const normalizedTerms = search_terms.map((term) => term.toLowerCase());
+				if (new Set(normalizedTerms).size !== normalizedTerms.length) {
+					throw new Error("Duplicate Elementor search terms are not allowed.");
+				}
+				const productResponse = await wcFetch(`products/${product_id}`);
+				const product = await productResponse.json<any>();
+				if (product.id !== product_id || product.name !== expected_product_name) {
+					throw new Error(
+						`Product ${product_id} identity does not match the exact expected name.`,
+					);
+				}
+				const templates = [];
+				for (const templateId of template_ids) {
+					const response = await wpAuthenticatedFetch(
+						`elementor_library/${templateId}?context=edit`,
+					);
+					const template = await response.json<any>();
+					if (template.id !== templateId) {
+						throw new Error(`Elementor template ${templateId} identity changed.`);
+					}
+					const raw = template.meta?.["_elementor_data"];
+					const data = parseElementorData(raw);
+					if (!data || typeof raw !== "string") {
+						throw new Error(`Elementor template ${templateId} data is unavailable or malformed.`);
+					}
+					templates.push({
+						id: template.id,
+						title: template.title?.raw ?? template.title?.rendered ?? null,
+						status: template.status,
+						template_type: template.meta?.["_elementor_template_type"] ?? null,
+						display_conditions: template.meta?.["_elementor_conditions"] ?? null,
+						elementor_data_length: raw.length,
+						elementor_data_sha256: await sha256Hex(new TextEncoder().encode(raw)),
+						matches: elementorLiteralSettingMatches(data, search_terms),
+					});
+				}
+				return toolResult({
+					read_only: true,
+					product: {
+						id: product.id,
+						name: product.name,
+						status: product.status,
+						catalog_visibility: product.catalog_visibility,
+					},
+					search_terms,
+					templates,
+					write_performed: false,
 				});
 			} catch (error) {
 				return toolError(error);
