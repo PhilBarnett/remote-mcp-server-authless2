@@ -18,6 +18,38 @@ npm create cloudflare@latest -- my-mcp-server --template=cloudflare/ai/demos/rem
 
 To add your own [tools](https://developers.cloudflare.com/agents/model-context-protocol/protocol/tools/) to the MCP server, register each tool on the `McpServer` created in the `createServer()` function in `src/index.ts` using `server.registerTool(...)`.
 
+## Reusable guarded product Performance Max builder
+
+The reusable Google Ads workflow removes product-specific campaign code while
+retaining paused-first safety. It remains fixed to Blindmotion customer
+`6610097637`, Merchant Center `5320593492`, Australia and English.
+
+- `preview_google_ads_product_pmax_paused` verifies the exact published
+  WooCommerce product, derives its canonical product URL and `gla_<product ID>`
+  Merchant Center item, rejects duplicate campaign names and runs the complete
+  Google Ads request with `validateOnly: true`.
+- `create_google_ads_product_pmax_paused` repeats those checks and creates one
+  campaign, one asset group and a one-product listing partition, all PAUSED.
+  Final URL expansion is disabled and the budget is limited to A$5–A$50/day.
+- `inspect_google_ads_product_pmax_asset_group` revalidates the WooCommerce
+  identity, campaign and asset-group IDs, canonical landing page, one-product
+  listing tree, live assets and completeness.
+- `bootstrap_google_ads_product_pmax_asset_group_guarded` accepts reviewed text,
+  existing Google Ads assets or exact image URLs below Blindmotion's WordPress
+  uploads directory. It validates image bytes, dimensions, ratios and size,
+  then uses a `validateOnly` preflight before one atomic asset mutation.
+- `link_google_ads_product_pmax_youtube_assets_guarded` safely adds reviewed
+  YouTube assets to the same validated paused asset group.
+
+The generic workflow derives campaign and asset-group names from a constrained
+campaign label, requires exact confirmation phrases for every write, and has no
+generic activation method. Launch remains a separate reviewed operation because
+exclusive product removal from existing Shopping/PMax partition trees can alter
+live campaign eligibility.
+
+The original ZipGrip-specific tools remain temporarily available for backwards
+compatibility and post-launch inspection of the existing ZipGrip campaign.
+
 ## Guarded ZipGrip Performance Max builder
 
 The server includes two narrowly scoped Google Ads tools for customer `6610097637`:
