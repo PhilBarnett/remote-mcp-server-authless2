@@ -87,6 +87,7 @@ one JPEG/PNG/WebP attachment, preserves the complete gallery and all other produ
 configuration, and records the prior featured attachment for rollback. It requires the
 exact phrase `CONFIRM REPLACE TOTALBLOCK FEATURED IMAGE` and never deletes media.
 
+
 `replace_totalblock_gallery_images_guarded` is locked to the reviewed five-image
 TotalBlock state. It preserves featured attachment `9417`, replaces exactly the four
 legacy outdoor gallery attachments with four distinct approved JPEG/PNG/WebP images,

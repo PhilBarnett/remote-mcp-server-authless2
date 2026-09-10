@@ -219,6 +219,13 @@ const TOTALBLOCK_GALLERY_CONFIRMATION =
 const TOTALBLOCK_EXPECTED_CURRENT_IMAGE_IDS = [9417, 6715, 6820, 6821, 7292] as const;
 const TOTALBLOCK_GALLERY_BACKUP_KEY =
 	"_blindmotion_mcp_totalblock_gallery_backups";
+const TOTALBLOCK_ELEMENTOR_ZIPGRIP_PATTERNS = [
+	/zip guided blinds/i,
+	/zipgrip/i,
+	/outdoor space/i,
+	/mesh fabric in 94%/i,
+	/available up to 6400mm wide/i,
+] as const;
 const TOTALBLOCK_FABRIC_INSTALLED_HASH =
 	"56baa1454189de29feda97493fc59405f76de11111c686379262c7458a8bed52";
 const TOTALBLOCK_DUO_BLOCK_INSTALLED_HASH =
@@ -540,6 +547,46 @@ function parseElementorData(value: unknown) {
 	} catch {
 		return null;
 	}
+}
+
+function totalBlockElementorMatches(nodes: any[]) {
+	const matches: any[] = [];
+	function visit(node: any, ancestors: string[] = []) {
+		if (!node || typeof node !== "object") return;
+		const settings = node.settings && typeof node.settings === "object" ? node.settings : {};
+		const matchedSettings = Object.entries(settings)
+			.filter((entry): entry is [string, string] => typeof entry[1] === "string")
+			.filter(([, value]) =>
+				TOTALBLOCK_ELEMENTOR_ZIPGRIP_PATTERNS.some((pattern) => pattern.test(value)),
+			)
+			.map(([key, value]) => ({
+				key,
+				plain_text: htmlToPlainText(value).slice(0, 4000),
+				sha256_input_length: value.length,
+			}));
+		const imageSettings = Object.fromEntries(
+			Object.entries(settings).filter(
+				([key, value]) =>
+					/(?:background|image)/i.test(key) &&
+					(value === null || ["string", "number", "object"].includes(typeof value)),
+			),
+		);
+		if (matchedSettings.length > 0) {
+			matches.push({
+				id: node.id ?? null,
+				el_type: node.elType ?? null,
+				widget_type: node.widgetType ?? null,
+				ancestor_ids: ancestors,
+				matched_settings: matchedSettings,
+				image_settings: imageSettings,
+			});
+		}
+		for (const child of Array.isArray(node.elements) ? node.elements : []) {
+			visit(child, [...ancestors, String(node.id ?? "")]);
+		}
+	}
+	for (const node of nodes) visit(node);
+	return matches;
 }
 
 function elementorWidgetInventory(nodes: any[]) {
@@ -4640,6 +4687,59 @@ function createServer() {
 						meta_record_count: verified.meta_data?.length ?? 0,
 					},
 					publication_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_totalblock_elementor_content",
+		{
+			description:
+				"Read-only inspection of product-level Elementor data on locked draft TotalBlock product 9413. Reports only widgets/settings containing inherited ZipGrip or outdoor-blind content, associated image settings and stable hashes. Performs no writes and does not inspect shared templates.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const response = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
+				const product = await response.json<any>();
+				if (
+					product.id !== TOTALBLOCK_PRODUCT_ID ||
+					product.name !== TOTALBLOCK_PRODUCT_NAME ||
+					product.status !== "draft" ||
+					product.catalog_visibility !== "hidden"
+				) {
+					throw new Error(
+						"Locked TotalBlock product identity or draft/hidden state changed; refusing inspection.",
+					);
+				}
+				const elementorMeta = (product.meta_data ?? []).filter(
+					(meta: any) => meta.key === "_elementor_data",
+				);
+				if (elementorMeta.length !== 1) {
+					throw new Error(
+						`Expected exactly one TotalBlock _elementor_data record; found ${elementorMeta.length}.`,
+					);
+				}
+				const raw = elementorMeta[0].value;
+				const data = parseElementorData(raw);
+				if (!data || typeof raw !== "string") {
+					throw new Error("TotalBlock product-level Elementor data is unavailable or malformed.");
+				}
+				return toolResult({
+					product: {
+						id: product.id,
+						name: product.name,
+						status: product.status,
+						catalog_visibility: product.catalog_visibility,
+					},
+					elementor_meta_id: elementorMeta[0].id,
+					elementor_data_length: raw.length,
+					elementor_data_sha256: await sha256Hex(new TextEncoder().encode(raw)),
+					inherited_content_matches: totalBlockElementorMatches(data),
+					write_performed: false,
 				});
 			} catch (error) {
 				return toolError(error);
