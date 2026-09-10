@@ -183,6 +183,8 @@ const TOTALBLOCK_PRODUCT_CATEGORY_ID = 74;
 const TOTALBLOCK_PRODUCT_CONFIRMATION = "CONFIRM APPLY TOTALBLOCK PRODUCT CONTENT";
 const TOTALBLOCK_FABRIC_SOURCE_ID = 4788;
 const TOTALBLOCK_FABRIC_SOURCE_NAME = "Premium Roller Blinds";
+const TOTALBLOCK_VIBE_PRICING_SOURCE_ID = 3839;
+const TOTALBLOCK_VIBE_PRICING_SOURCE_NAME = "Everyday Roller Blinds";
 const TOTALBLOCK_SEO_TITLE =
 	"Total Blockout Cassette Blinds with Side Channels | Blindmotion";
 const TOTALBLOCK_SEO_DESCRIPTION =
@@ -4254,17 +4256,19 @@ function createServer() {
 		"inspect_totalblock_blockout_fabric_options",
 		{
 			description:
-				"Read-only inspection of WAPF fabric-option candidates on locked TotalBlock product 9413 and Premium Roller Blinds product 4788. Reports locked fabric slices, choice production values, active pricing fields, fabric pricing-variable definitions, images and conditions without returning unrelated product metadata or performing writes.",
+				"Read-only inspection of WAPF fabric-option candidates on locked TotalBlock product 9413, Premium Roller Blinds product 4788 and Everyday Roller Blinds product 3839 as the Vibe pricing source. Reports locked fabric slices, choice production values, active pricing fields, fabric pricing-variable definitions, images and conditions without returning unrelated product metadata or performing writes.",
 			inputSchema: z.object({}),
 		},
 		async () => {
 			try {
-				const [targetResponse, sourceResponse] = await Promise.all([
+				const [targetResponse, sourceResponse, vibeSourceResponse] = await Promise.all([
 					wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`),
 					wcFetch(`products/${TOTALBLOCK_FABRIC_SOURCE_ID}`),
+					wcFetch(`products/${TOTALBLOCK_VIBE_PRICING_SOURCE_ID}`),
 				]);
 				const target = await targetResponse.json<any>();
 				const source = await sourceResponse.json<any>();
+				const vibeSource = await vibeSourceResponse.json<any>();
 				if (
 					target.id !== TOTALBLOCK_PRODUCT_ID ||
 					target.name !== TOTALBLOCK_PRODUCT_NAME ||
@@ -4279,6 +4283,13 @@ function createServer() {
 					source.status !== "publish"
 				) {
 					throw new Error("Locked Premium Roller Blinds source identity changed.");
+				}
+				if (
+					vibeSource.id !== TOTALBLOCK_VIBE_PRICING_SOURCE_ID ||
+					vibeSource.name !== TOTALBLOCK_VIBE_PRICING_SOURCE_NAME ||
+					vibeSource.status !== "publish"
+				) {
+					throw new Error("Locked Everyday Roller Blinds Vibe pricing source changed.");
 				}
 
 				async function inspect(product: any, lockedSlice: readonly [number, number]) {
@@ -4315,6 +4326,7 @@ function createServer() {
 					read_only: true,
 					target: await inspect(target, [7, 12]),
 					source: await inspect(source, [126, 130]),
+					vibe_pricing_source: await inspect(vibeSource, [0, -1]),
 					write_performed: false,
 				});
 			} catch (error) {
