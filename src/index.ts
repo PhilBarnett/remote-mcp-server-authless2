@@ -220,6 +220,7 @@ function normalizeTotalBlockHtml(value: unknown) {
 	return String(value ?? "")
 		.replace(/\r\n?/g, "\n")
 		.replace(/[\t ]+\n/g, "\n")
+		.replace(/>\s+</g, "><")
 		.trim();
 }
 
