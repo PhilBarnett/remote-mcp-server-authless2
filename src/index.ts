@@ -291,6 +291,7 @@ function wapfFieldSummary(field: any, index: number) {
 		label: wapfFieldLabel(field),
 		type: field?.type ?? null,
 		required: field?.required ?? field?.options?.required ?? null,
+		pricing: field?.pricing ?? null,
 		choices: Array.isArray(field?.options?.choices)
 			? field.options.choices.map((choice: any, choiceIndex: number) => ({
 					index: choiceIndex,
@@ -300,10 +301,32 @@ function wapfFieldSummary(field: any, index: number) {
 					pricing_amount: choice?.pricing_amount ?? null,
 					image: choice?.image ?? null,
 					attachment: choice?.attachment ?? null,
+					options: choice?.options ?? null,
 				}))
 			: [],
 		condition_data: field?.conditionals ?? field?.conditions ?? field?.rules ?? null,
 	};
+}
+
+function wapfPricingContext(group: Record<string, any>) {
+	const fields = Array.isArray(group.fields) ? group.fields : [];
+	return fields
+		.map((field: any, index: number) => ({ field, index }))
+		.filter(({ field }) => {
+			const choices = Array.isArray(field?.options?.choices) ? field.options.choices : [];
+			const fieldPricing = JSON.stringify(field?.pricing ?? null);
+			return (
+				/acf_option|lookuptable|\[qty\]|"enabled":true|"type":"(?!none)[^"]+"/i.test(
+					fieldPricing,
+				) ||
+				choices.some(
+					(choice: any) =>
+						String(choice?.pricing_type ?? "none") !== "none" ||
+						!["", "0"].includes(String(choice?.pricing_amount ?? "")),
+				)
+			);
+		})
+		.map(({ field, index }) => wapfFieldSummary(field, index));
 }
 
 const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
@@ -4207,7 +4230,7 @@ function createServer() {
 		"inspect_totalblock_blockout_fabric_options",
 		{
 			description:
-				"Read-only inspection of WAPF fabric-option candidates on locked TotalBlock product 9413 and Premium Roller Blinds product 4788. Reports structure, choice identifiers, prices, images and conditions without returning unrelated product metadata or performing writes.",
+				"Read-only inspection of WAPF fabric-option candidates on locked TotalBlock product 9413 and Premium Roller Blinds product 4788. Reports locked fabric slices, choice production values, pricing fields, images and conditions without returning unrelated product metadata or performing writes.",
 			inputSchema: z.object({}),
 		},
 		async () => {
@@ -4259,6 +4282,7 @@ function createServer() {
 							.map((field: any, offset: number) =>
 								wapfFieldSummary(field, lockedSlice[0] + offset),
 							),
+						pricing_context: wapfPricingContext(group),
 					};
 				}
 
