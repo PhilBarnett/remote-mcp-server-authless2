@@ -7,6 +7,17 @@ const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
 const SEARCH_CONSOLE_SITE_URL = "https://online.blindmotion.com.au/";
 
+const GITHUB_REPO_OWNER = "PhilBarnett";
+const GITHUB_REPO_NAME = "remote-mcp-server-authless2";
+const GITHUB_REPO_FULL_NAME = `${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}`;
+const GITHUB_REPO_ID = 1359135665;
+const GITHUB_APP_EXPECTED_ID = "4894554";
+const GITHUB_APP_EXPECTED_INSTALLATION_ID = "160530258";
+const GITHUB_PATCH_CONFIRMATION = "CONFIRM CREATE BLINDMOTION MCP DRAFT PR";
+const GITHUB_PATCHABLE_FILES = new Set(["src/index.ts", "README.md"]);
+const GITHUB_MAX_PATCH_FILES = 2;
+const GITHUB_MAX_FILE_BYTES = 750_000;
+
 const GOOGLE_ADS_ZIPGRIP_CONFIRMATION = "CONFIRM CREATE PAUSED ZIPGRIP PMAX";
 const GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID = "6610097637";
 const GOOGLE_ADS_ZIPGRIP_MERCHANT_ID = "5320593492";
@@ -3348,6 +3359,188 @@ function safeOrder(order: any) {
 	};
 }
 
+function githubBase64Url(bytes: Uint8Array) {
+	let binary = "";
+	for (const byte of bytes) binary += String.fromCharCode(byte);
+	return btoa(binary).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+function githubUtf8Base64Url(value: string) {
+	return githubBase64Url(new TextEncoder().encode(value));
+}
+
+function githubDerLength(length: number) {
+	if (length < 0x80) return new Uint8Array([length]);
+	const bytes: number[] = [];
+	for (let value = length; value > 0; value >>>= 8) bytes.unshift(value & 0xff);
+	return new Uint8Array([0x80 | bytes.length, ...bytes]);
+}
+
+function githubDer(tag: number, content: Uint8Array) {
+	const length = githubDerLength(content.length);
+	const result = new Uint8Array(1 + length.length + content.length);
+	result[0] = tag;
+	result.set(length, 1);
+	result.set(content, 1 + length.length);
+	return result;
+}
+
+function githubConcat(...parts: Uint8Array[]) {
+	const result = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+	let offset = 0;
+	for (const part of parts) {
+		result.set(part, offset);
+		offset += part.length;
+	}
+	return result;
+}
+
+function githubPemToPkcs8(pem: string) {
+	const normalized = pem.trim().replace(/\\n/g, "\n");
+	const isPkcs1 = normalized.includes("-----BEGIN RSA PRIVATE KEY-----");
+	const base64 = normalized
+		.replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----/g, "")
+		.replace(/-----END (?:RSA )?PRIVATE KEY-----/g, "")
+		.replace(/\s/g, "");
+	if (!base64) throw new Error("GITHUB_APP_PRIVATE_KEY is empty or invalid.");
+	const der = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+	if (!isPkcs1) return der;
+
+	const version = new Uint8Array([0x02, 0x01, 0x00]);
+	const rsaAlgorithmIdentifier = new Uint8Array([
+		0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+		0x05, 0x00,
+	]);
+	return githubDer(0x30, githubConcat(version, rsaAlgorithmIdentifier, githubDer(0x04, der)));
+}
+
+function getGithubAppConfig() {
+	const workerEnv = env as unknown as Record<string, string | undefined>;
+	const appId = workerEnv.GITHUB_APP_ID;
+	const installationId = workerEnv.GITHUB_INSTALLATION_ID;
+	const privateKey = workerEnv.GITHUB_APP_PRIVATE_KEY;
+	if (!appId || !installationId || !privateKey) {
+		throw new Error(
+			"GitHub App is not configured. Set GITHUB_APP_ID, GITHUB_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY in Cloudflare.",
+		);
+	}
+	if (appId !== GITHUB_APP_EXPECTED_ID || installationId !== GITHUB_APP_EXPECTED_INSTALLATION_ID) {
+		throw new Error("GitHub App IDs do not match the locked Blindmotion installation.");
+	}
+	return { appId, installationId, privateKey };
+}
+
+async function createGithubAppJwt() {
+	const { appId, privateKey } = getGithubAppConfig();
+	const now = Math.floor(Date.now() / 1000);
+	const header = githubUtf8Base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+	const payload = githubUtf8Base64Url(
+		JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }),
+	);
+	const signingInput = `${header}.${payload}`;
+	const key = await crypto.subtle.importKey(
+		"pkcs8",
+		githubPemToPkcs8(privateKey),
+		{ name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+		false,
+		["sign"],
+	);
+	const signature = await crypto.subtle.sign(
+		"RSASSA-PKCS1-v1_5",
+		key,
+		new TextEncoder().encode(signingInput),
+	);
+	return `${signingInput}.${githubBase64Url(new Uint8Array(signature))}`;
+}
+
+async function githubApi(
+	path: string,
+	options: {
+		method?: string;
+		body?: unknown;
+		token: string;
+		acceptedStatuses?: number[];
+	},
+) {
+	const response = await fetch(`https://api.github.com${path}`, {
+		method: options.method ?? "GET",
+		headers: {
+			Authorization: `Bearer ${options.token}`,
+			Accept: "application/vnd.github+json",
+			"Content-Type": "application/json",
+			"User-Agent": "Blindmotion-Business-MCP",
+			"X-GitHub-Api-Version": "2022-11-28",
+		},
+		...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+	});
+	const responseText = await response.text();
+	let data: any = null;
+	if (responseText) {
+		try {
+			data = JSON.parse(responseText);
+		} catch {
+			data = responseText;
+		}
+	}
+	if (!response.ok && !(options.acceptedStatuses ?? []).includes(response.status)) {
+		throw new Error(
+			`GitHub API request failed: ${response.status} ${typeof data === "string" ? data : JSON.stringify(data)}`,
+		);
+	}
+	return { status: response.status, data };
+}
+
+async function getGithubInstallationToken() {
+	const { installationId } = getGithubAppConfig();
+	const jwt = await createGithubAppJwt();
+	const response = await githubApi(`/app/installations/${installationId}/access_tokens`, {
+		method: "POST",
+		token: jwt,
+		body: {
+			repository_ids: [GITHUB_REPO_ID],
+			permissions: { contents: "write", pull_requests: "write" },
+		},
+	});
+	if (!response.data?.token) throw new Error("GitHub did not return an installation token.");
+	return String(response.data.token);
+}
+
+function githubRepoPath(path: string) {
+	return `/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}${path}`;
+}
+
+async function githubRepoRequest(
+	token: string,
+	path: string,
+	options: { method?: string; body?: unknown; acceptedStatuses?: number[] } = {},
+) {
+	return githubApi(githubRepoPath(path), { ...options, token });
+}
+
+function assertGithubPatchFile(path: string, content: string) {
+	if (!GITHUB_PATCHABLE_FILES.has(path)) {
+		throw new Error(
+			`Path ${path} is not permitted. This tool can change only ${[...GITHUB_PATCHABLE_FILES].join(", ")}.`,
+		);
+	}
+	if (new TextEncoder().encode(content).length > GITHUB_MAX_FILE_BYTES) {
+		throw new Error(`${path} exceeds the ${GITHUB_MAX_FILE_BYTES}-byte safety limit.`);
+	}
+	if (/-----BEGIN (?:RSA )?PRIVATE KEY-----/.test(content)) {
+		throw new Error(`${path} appears to contain a private key.`);
+	}
+}
+
+async function getGithubMainState(token: string) {
+	const ref = await githubRepoRequest(token, "/git/ref/heads/main");
+	const sha = String(ref.data?.object?.sha ?? "");
+	if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("Could not resolve the current main SHA.");
+	const commit = await githubRepoRequest(token, `/git/commits/${sha}`);
+	const treeSha = String(commit.data?.tree?.sha ?? "");
+	if (!/^[0-9a-f]{40}$/.test(treeSha)) throw new Error("Could not resolve the main tree SHA.");
+	return { sha, treeSha };
+}
+
 function toolResult(data: any) {
 	return {
 		content: [
@@ -3376,6 +3569,215 @@ function createServer() {
 		name: "Blindmotion WooCommerce",
 		version: "2.0.0",
 	});
+
+	server.registerTool(
+		"get_blindmotion_github_app_status",
+		{
+			description:
+				"Verify the fixed Blindmotion GitHub App installation and report the current main commit. Read-only; never returns credentials or an installation token.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const token = await getGithubInstallationToken();
+				const [repository, main] = await Promise.all([
+					githubRepoRequest(token, ""),
+					getGithubMainState(token),
+				]);
+				if (
+					Number(repository.data?.id) !== GITHUB_REPO_ID ||
+					String(repository.data?.full_name) !== GITHUB_REPO_FULL_NAME
+				) {
+					throw new Error("GitHub installation token resolved to an unexpected repository.");
+				}
+				return toolResult({
+					configured: true,
+					repository: GITHUB_REPO_FULL_NAME,
+					repository_id: GITHUB_REPO_ID,
+					default_branch: repository.data.default_branch,
+					main_sha: main.sha,
+					installation_token_exposed: false,
+					write_boundary: {
+						allowed_files: [...GITHUB_PATCHABLE_FILES],
+						draft_pull_requests_only: true,
+						direct_main_updates: false,
+						merge_tool_available: false,
+					},
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"create_blindmotion_mcp_draft_pr_guarded",
+		{
+			description:
+				`Create one atomic draft PR in ${GITHUB_REPO_FULL_NAME} from the exact current main SHA. It can replace only src/index.ts and/or README.md, cannot modify workflows or dependencies, cannot update main, and cannot merge. Requires exact confirmation: ${GITHUB_PATCH_CONFIRMATION}`,
+			inputSchema: z.object({
+				confirmation: z.string(),
+				expected_main_sha: z.string().regex(/^[0-9a-f]{40}$/),
+				branch_slug: z.string().regex(/^[a-z0-9][a-z0-9-]{2,50}$/),
+				commit_message: z.string().trim().min(5).max(120),
+				pull_request_title: z.string().trim().min(5).max(120),
+				pull_request_body: z.string().max(10_000).default(""),
+				files: z
+					.array(
+						z.object({
+							path: z.enum(["src/index.ts", "README.md"]),
+							expected_blob_sha: z.string().regex(/^[0-9a-f]{40}$/),
+							content: z.string().min(1),
+						}),
+					)
+					.min(1)
+					.max(GITHUB_MAX_PATCH_FILES),
+			}),
+		},
+		async ({
+			confirmation,
+			expected_main_sha,
+			branch_slug,
+			commit_message,
+			pull_request_title,
+			pull_request_body,
+			files,
+		}) => {
+			try {
+				if (confirmation !== GITHUB_PATCH_CONFIRMATION) {
+					throw new Error(`Confirmation must exactly equal: ${GITHUB_PATCH_CONFIRMATION}`);
+				}
+				if (new Set(files.map((file) => file.path)).size !== files.length) {
+					throw new Error("Each permitted file may appear only once.");
+				}
+				for (const file of files) assertGithubPatchFile(file.path, file.content);
+
+				const token = await getGithubInstallationToken();
+				const repository = await githubRepoRequest(token, "");
+				if (
+					Number(repository.data?.id) !== GITHUB_REPO_ID ||
+					String(repository.data?.full_name) !== GITHUB_REPO_FULL_NAME
+				) {
+					throw new Error("GitHub installation token resolved to an unexpected repository.");
+				}
+				const main = await getGithubMainState(token);
+				if (main.sha !== expected_main_sha) {
+					throw new Error(
+						`main changed since review. Expected ${expected_main_sha}, current ${main.sha}. Re-read and review before retrying.`,
+					);
+				}
+
+				const branchName = `codex/${branch_slug}-${main.sha.slice(0, 8)}`;
+				const existingBranch = await githubRepoRequest(
+					token,
+					`/git/ref/heads/${encodeURIComponent(branchName)}`,
+					{ acceptedStatuses: [404] },
+				);
+				if (existingBranch.status !== 404) {
+					throw new Error(`Branch ${branchName} already exists; choose a new branch_slug.`);
+				}
+
+				const tree: Array<{ path: string; mode: string; type: string; sha: string }> = [];
+				for (const file of files) {
+					const current = await githubRepoRequest(
+						token,
+						`/contents/${file.path}?ref=${main.sha}`,
+					);
+					if (String(current.data?.sha) !== file.expected_blob_sha) {
+						throw new Error(
+							`${file.path} changed since review. Expected blob ${file.expected_blob_sha}, current ${String(current.data?.sha)}.`,
+						);
+					}
+					const blob = await githubRepoRequest(token, "/git/blobs", {
+						method: "POST",
+						body: { content: file.content, encoding: "utf-8" },
+					});
+					tree.push({ path: file.path, mode: "100644", type: "blob", sha: blob.data.sha });
+				}
+
+				const createdTree = await githubRepoRequest(token, "/git/trees", {
+					method: "POST",
+					body: { base_tree: main.treeSha, tree },
+				});
+				const commit = await githubRepoRequest(token, "/git/commits", {
+					method: "POST",
+					body: {
+						message: commit_message,
+						tree: createdTree.data.sha,
+						parents: [main.sha],
+					},
+				});
+				await githubRepoRequest(token, "/git/refs", {
+					method: "POST",
+					body: { ref: `refs/heads/${branchName}`, sha: commit.data.sha },
+				});
+				const pullRequest = await githubRepoRequest(token, "/pulls", {
+					method: "POST",
+					body: {
+						title: pull_request_title,
+						body: pull_request_body,
+						head: branchName,
+						base: "main",
+						draft: true,
+						maintainer_can_modify: true,
+					},
+				});
+				return toolResult({
+					created: true,
+					repository: GITHUB_REPO_FULL_NAME,
+					base_sha: main.sha,
+					branch: branchName,
+					commit_sha: commit.data.sha,
+					pull_request_number: pullRequest.data.number,
+					pull_request_url: pullRequest.data.html_url,
+					draft: pullRequest.data.draft,
+					changed_files: files.map((file) => file.path),
+					merged: false,
+					next_step: "Review checks and diff in GitHub. Merge remains an external, explicit action.",
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_blindmotion_mcp_pull_request",
+		{
+			description:
+				`Inspect one pull request in ${GITHUB_REPO_FULL_NAME}, including its base/head commits and changed-file summary. Read-only and cannot approve or merge.`,
+			inputSchema: z.object({ pull_request_number: z.number().int().positive() }),
+		},
+		async ({ pull_request_number }) => {
+			try {
+				const token = await getGithubInstallationToken();
+				const [pullRequest, changedFiles] = await Promise.all([
+					githubRepoRequest(token, `/pulls/${pull_request_number}`),
+					githubRepoRequest(token, `/pulls/${pull_request_number}/files?per_page=100`),
+				]);
+				return toolResult({
+					repository: GITHUB_REPO_FULL_NAME,
+					pull_request_number,
+					url: pullRequest.data.html_url,
+					state: pullRequest.data.state,
+					draft: pullRequest.data.draft,
+					mergeable: pullRequest.data.mergeable,
+					mergeable_state: pullRequest.data.mergeable_state,
+					base: { ref: pullRequest.data.base?.ref, sha: pullRequest.data.base?.sha },
+					head: { ref: pullRequest.data.head?.ref, sha: pullRequest.data.head?.sha },
+					files: (changedFiles.data as any[]).map((file) => ({
+						path: file.filename,
+						status: file.status,
+						additions: file.additions,
+						deletions: file.deletions,
+						permitted_by_repo_agent: GITHUB_PATCHABLE_FILES.has(file.filename),
+					})),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
 
 	/*
 	 * Existing test tools
