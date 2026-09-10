@@ -128,6 +128,24 @@ async function wpAuthenticatedFetch(path: string) {
 	return response;
 }
 
+async function wpAuthenticatedWrite(path: string, body: unknown) {
+	const workerEnv = env as unknown as Record<string, string>;
+	const url = new URL(`${workerEnv.WC_SITE}/wp-json/wp/v2/${path}`);
+	const response = await fetch(url.toString(), {
+		method: "POST",
+		headers: {
+			Authorization: getWpWriteAuthHeader(),
+			Accept: "application/json",
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(body),
+	});
+	if (!response.ok) {
+		throw new Error(`Authenticated WordPress write failed: ${response.status} ${await response.text()}`);
+	}
+	return response;
+}
+
 function getWpWriteAuthHeader() {
 	const workerEnv = env as unknown as Record<string, string | undefined>;
 	if (!workerEnv.WP_USERNAME || !workerEnv.WP_APPLICATION_PASSWORD) {
@@ -186,6 +204,18 @@ const OUTDOOR_SEO_TARGETS = {
 type OutdoorSeoTargetKey = keyof typeof OUTDOOR_SEO_TARGETS;
 
 const OUTDOOR_SEO_ELEMENTOR_TEMPLATE_IDS = [425, 557, 885, 1640, 1691, 1990] as const;
+
+const OUTDOOR_SEO_FIX_CONFIRMATION = "CONFIRM APPLY OUTDOOR SEO FIXES";
+const OUTDOOR_SEO_EXPECTED_TEMPLATE_HASHES = {
+	557: "55130c1ac5dd9e8479dbd8f717aa4cf6bac33aa9894a80aa1204c6ad3c6bd6b4",
+	1640: "f10529504a7c829c56abc2f88feb8890230a16de017bc9abc80f3fad28aa208b",
+	1691: "27d7819e3c99cf1ce32aaeadee85adf073b26dcb968ce2d5669b7d16ca6176dd",
+} as const;
+const OUTDOOR_SEO_EXPECTED_PRODUCT_HASHES = {
+	111: "aacc6af3c037b2d8990720b039ab8ef5680ead7711fe0ea0dd2924c509689ee1",
+	1301: "42bd7e018ed8914dfba674b5a90b13ce20f690799ed3b47a2d68ddd54b6bfd03",
+	1615: "071a010da90ed51e5e37498b99b085dc70993f440d92eb611d85a8389f8638b3",
+} as const;
 
 type OutdoorSeoElementorTemplateId = (typeof OUTDOOR_SEO_ELEMENTOR_TEMPLATE_IDS)[number];
 
@@ -393,6 +423,300 @@ async function inspectOutdoorSeoElementorTemplate(templateId: OutdoorSeoElemento
 		elementor_data_sha256: elementorDataSha256,
 		suspicious_matches: suspiciousContentMatches(serialized),
 		widgets: elementorData ? elementorWidgetInventory(elementorData) : [],
+	};
+}
+
+function mutateElementorWidgetSetting(
+	nodes: any[],
+	widgetId: string,
+	setting: string,
+	expectedValue: string,
+	newValue: string,
+) {
+	let matches = 0;
+	function visit(node: any) {
+		if (!node || typeof node !== "object") return;
+		if (node.id === widgetId) {
+			matches += 1;
+			if (node.elType !== "widget" || node.settings?.[setting] !== expectedValue) {
+				throw new Error(`Unexpected Elementor widget state for ${widgetId}.${setting}.`);
+			}
+			node.settings[setting] = newValue;
+		}
+		for (const child of Array.isArray(node.elements) ? node.elements : []) visit(child);
+	}
+	for (const node of nodes) visit(node);
+	if (matches !== 1) throw new Error(`Expected exactly one Elementor widget ${widgetId}; found ${matches}.`);
+}
+
+function removeElementorElement(nodes: any[], elementId: string) {
+	let matches = 0;
+	function visit(elements: any[]) {
+		for (let index = elements.length - 1; index >= 0; index -= 1) {
+			const element = elements[index];
+			if (element?.id === elementId) {
+				if (
+				element.elType !== "section" ||
+				element.settings?.hide_desktop !== "hidden-desktop" ||
+				element.settings?.hide_tablet !== "hidden-tablet" ||
+				element.settings?.hide_mobile !== "hidden-mobile"
+				) {
+					throw new Error(`Refusing to remove visible or unexpected Elementor element ${elementId}.`);
+				}
+				elements.splice(index, 1);
+				matches += 1;
+				continue;
+			}
+			if (Array.isArray(element?.elements)) visit(element.elements);
+		}
+	}
+	visit(nodes);
+	if (matches !== 1) throw new Error(`Expected exactly one hidden Elementor element ${elementId}; found ${matches}.`);
+}
+
+function productMetaUpdate(product: any, key: string, expectedValue: string, value: string) {
+	const matches = (product.meta_data ?? []).filter((meta: any) => meta.key === key);
+	if (matches.length > 1 || String(matches[0]?.value ?? "") !== expectedValue) {
+		throw new Error(`Unexpected product ${product.id} metadata state for ${key}.`);
+	}
+	return matches.length === 1 ? { id: matches[0].id, key, value } : { key, value };
+}
+
+async function getLockedElementorTemplateForUpdate(templateId: 557 | 1640 | 1691) {
+	const response = await wpAuthenticatedFetch(`elementor_library/${templateId}?context=edit`);
+	const template = await response.json<any>();
+	if (template.id !== templateId || template.status !== "publish") {
+		throw new Error(`Locked Elementor template identity mismatch for ${templateId}.`);
+	}
+	const raw = template.meta?.["_elementor_data"];
+	const data = parseElementorData(raw);
+	if (!data || typeof raw !== "string") {
+		throw new Error(`Elementor data is unavailable for locked template ${templateId}.`);
+	}
+	const hash = await sha256Hex(new TextEncoder().encode(raw));
+	if (hash !== OUTDOOR_SEO_EXPECTED_TEMPLATE_HASHES[templateId]) {
+		throw new Error(`Template ${templateId} changed after review; refusing the SEO update.`);
+	}
+	return { template, raw, data };
+}
+
+async function applyOutdoorSeoFixes() {
+	const templateIds = [557, 1640, 1691] as const;
+	const productIds = [1615, 111, 1301] as const;
+	const [template557, template1640, template1691, product1615, product111, product1301] =
+		await Promise.all([
+			getLockedElementorTemplateForUpdate(557),
+			getLockedElementorTemplateForUpdate(1640),
+			getLockedElementorTemplateForUpdate(1691),
+			wcFetch("products/1615").then((response) => response.json<any>()),
+			wcFetch("products/111").then((response) => response.json<any>()),
+			wcFetch("products/1301").then((response) => response.json<any>()),
+		]);
+	const products = [product1615, product111, product1301];
+	for (const product of products) {
+		const target = Object.values(OUTDOOR_SEO_TARGETS).find(
+			(candidate) => candidate.productId === product.id,
+		);
+		if (
+			!target ||
+			product.status !== "publish" ||
+			product.slug !== target.slug ||
+			product.permalink !== new URL(target.path, (env as any).WC_SITE).toString()
+		) {
+			throw new Error(`Locked product identity mismatch for ${product.id}.`);
+		}
+		const stored = `${product.short_description ?? ""}\n${product.description ?? ""}`;
+		const hash = await sha256Hex(new TextEncoder().encode(stored));
+		if (hash !== OUTDOOR_SEO_EXPECTED_PRODUCT_HASHES[product.id as 111 | 1301 | 1615]) {
+			throw new Error(`Product ${product.id} changed after review; refusing the SEO update.`);
+		}
+	}
+
+	removeElementorElement(template557.data, "a706128");
+	removeElementorElement(template557.data, "7c67552");
+	const widgetChanges557: Array<[string, string, string, string]> = [
+		["6e4e86a", "title_text", "Feature 1", "Made to Measure"],
+		["6e4e86a", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Built to your measurements for a clean, accurate fit."],
+		["cbfb487", "title_text", "Feature 1", "Australian Made"],
+		["cbfb487", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Manufactured in Sydney with carefully selected components."],
+		["72a727a", "title_text", "Feature 1", "Simple Online Ordering"],
+		["72a727a", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Choose your options, enter your sizes and see your price online."],
+		["c2d0215", "title_text", "Feature 1", "Helpful Support"],
+		["c2d0215", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Get practical measuring and installation guidance when you need it."],
+		["f8a6e76", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Made-to-measure quality, ordered online."],
+		["365824d", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien.", "Explore made-to-measure blinds designed for a clean fit, dependable operation and straightforward DIY installation."],
+		["6a2f18b", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien.", "Made-to-measure blinds with practical options, reliable components and clear support from order to installation."],
+		["7796e5f", "title_text", "This is the heading", "Made to Measure"],
+		["7796e5f", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.", "Manufactured to your measurements for a precise, professional result."],
+		["167feb8", "title_text", "This is the heading", "Reliable Components"],
+		["167feb8", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.", "Quality mechanisms and fabrics selected for dependable everyday operation."],
+		["97491d9", "title_text", "This is the heading", "Manual or Motorised"],
+		["97491d9", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.", "Choose a practical manual control or convenient motorisation."],
+		["ae71a5f", "title_text", "This is the heading", "DIY Support"],
+		["ae71a5f", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.", "Clear measuring and installation guidance is available when you need it."],
+		["71ecc75e", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien. Aenean sed adipiscing diam donec adipiscing tristique.", "Made-to-measure blinds designed for a clean fit, practical operation and lasting performance."],
+		["6ee12791", "description_text", "Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed", "Clean, practical designs suited to Australian homes and outdoor spaces."],
+		["30e3412b", "description_text", "Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed", "Components and fabrics selected for reliable everyday performance."],
+		["1bfd6403", "description_text", "Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed", "Robust mechanisms and quality materials designed for years of use."],
+		["592237b6", "description_text", "Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed", "Choose colours and finishes that work naturally with your space."],
+		["43aafc86", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. \nScelerisque eleifend donec pretium vulputate sapien.", "Made-to-measure blinds designed for shade, privacy and comfortable everyday living."],
+		["b55a68a", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. \nScelerisque eleifend donec pretium vulputate sapien.", "Enter your measurements and select your preferred options to see your made-to-measure price."],
+	];
+	for (const change of widgetChanges557) mutateElementorWidgetSetting(template557.data, ...change);
+
+	mutateElementorWidgetSetting(template1640.data, "f72fde8", "description", "Lorem ipsum dolor sit amet consectetur adipiscing elit dolor", "");
+	const widgetChanges1691: Array<[string, string, string, string]> = [
+		["16da5d2", "description_text", "Scelerisque eleifend donec pretium vulputate sapien.", "Free delivery on orders over $399."],
+		["bbe55f7", "title_text", "Way To Buy??", "Easy Online Ordering"],
+		["bbe55f7", "description_text", "Scelerisque eleifend donec pretium vulputate sapien.", "Choose your options, enter your measurements and see your price online."],
+		["efa92fa", "title_text", "Shipping & Returns", "Delivery & Support"],
+		["efa92fa", "description_text", "Scelerisque eleifend donec pretium vulputate sapien.", "Made-to-measure blinds delivered Australia-wide, with help available when you need it."],
+		["85234d5", "title_text", "Gift Voucher", "Made to Measure"],
+		["85234d5", "description_text", "Scelerisque eleifend donec pretium vulputate sapien.", "Manufactured to your measurements for a precise, professional result."],
+	];
+	for (const change of widgetChanges1691) mutateElementorWidgetSetting(template1691.data, ...change);
+
+	const nextTemplateData = new Map<number, string>([
+		[557, JSON.stringify(template557.data)],
+		[1640, JSON.stringify(template1640.data)],
+		[1691, JSON.stringify(template1691.data)],
+	]);
+	for (const [templateId, raw] of nextTemplateData) {
+		if (suspiciousContentMatches(raw).length > 0) {
+			throw new Error(`Template ${templateId} still contains known suspicious content after preflight.`);
+		}
+	}
+
+	const productUpdates = [
+		{
+			product: product1615,
+			short_description: "<p>Made-to-measure outdoor blinds manufactured in Sydney for DIY installation across Australia.</p>",
+			description: "<h2>DIY Outdoor Blinds, Made to Measure</h2><p>Choose from Straight Drop, Cable Guide and ZipGrip zip-guided outdoor blinds, manufactured in Sydney to your measurements.</p><p>Order DIY blinds for delivery Australia-wide, with manual and motorised options available. Professional measuring and installation are also available across Greater Sydney.</p>",
+			title: "DIY Outdoor Blinds Online | Made to Measure | Blindmotion",
+			metadesc: "Shop Australian-made outdoor blinds online, including Straight Drop, Cable Guide and ZipGrip options. DIY delivery Australia-wide and Sydney installation.",
+		},
+		{
+			product: product111,
+			short_description: "<p>A simple, durable outdoor blind with crank or motorised control, made to measure in Sydney.</p>",
+			description: "<h2>Straight Drop Outdoor Blinds</h2><p>A practical, good-looking outdoor blind made with durable galvanised and stainless-steel components. Straight Drop blinds can span wide openings and are available in outdoor mesh or clear PVC.</p><h2>Motorised Outdoor Blinds</h2><p>Choose convenient motorisation or a straightforward manual crank control to suit your outdoor area.</p><h2>Outdoor Blinds in Sydney</h2><p>Blindmotion manufactures these blinds in Sydney. Order DIY for delivery Australia-wide, or ask about professional measuring and installation across Greater Sydney.</p>",
+			title: "Straight Drop Outdoor Blinds | DIY From $229 | Blindmotion",
+			metadesc: "Australian-made Straight Drop outdoor blinds from $229. Custom sizes, manual or motorised controls, DIY delivery Australia-wide and Sydney installation.",
+			previousMetadesc: "A heavy duty, traditional outdoor blind able to span up to 6 metres and drop 3 metres. Made with heavy duty galvanised and stainless steel parts.",
+		},
+		{
+			product: product1301,
+			short_description: "<p>ZipGrip side-retention outdoor blinds, made to measure with manual or motorised control.</p>",
+			description: "<h2>ZipGrip Zip-Guided Outdoor Blinds</h2><p>ZipGrip uses a side-retention system to hold the fabric neatly within its guides, creating a clean and practical enclosure for patios, pergolas and alfresco areas.</p><p>Choose outdoor mesh or clear PVC, manual or motorised control, and colours to suit your space. Each blind is made to measure in Sydney and can be ordered for DIY delivery Australia-wide.</p>",
+			title: "Zip Track Outdoor Blinds | ZipGrip From $399 | Blindmotion",
+			metadesc: "Shop ZipGrip zip-guided outdoor blinds from $399. Made to measure in Sydney with manual or motorised controls and DIY delivery Australia-wide.",
+		},
+	] as const;
+	const templateBackups = new Map<number, string>([
+		[557, template557.raw],
+		[1640, template1640.raw],
+		[1691, template1691.raw],
+	]);
+	const appliedTemplates: number[] = [];
+	const appliedProducts: any[] = [];
+	try {
+		for (const templateId of templateIds) {
+			const expectedRaw = nextTemplateData.get(templateId)!;
+			await wpAuthenticatedWrite(`elementor_library/${templateId}`, {
+				meta: { _elementor_data: expectedRaw },
+			});
+			appliedTemplates.push(templateId);
+			const verificationResponse = await wpAuthenticatedFetch(
+				`elementor_library/${templateId}?context=edit`,
+			);
+			const verification = await verificationResponse.json<any>();
+			if (verification.meta?.["_elementor_data"] !== expectedRaw) {
+				throw new Error(`Template ${templateId} did not verify after the WordPress write.`);
+			}
+		}
+		for (const update of productUpdates) {
+			const titleMeta = productMetaUpdate(update.product, "_yoast_wpseo_title", "", update.title);
+			const descriptionMeta = productMetaUpdate(
+				update.product,
+				"_yoast_wpseo_metadesc",
+				"previousMetadesc" in update ? update.previousMetadesc : "",
+				update.metadesc,
+			);
+			const writeResponse = await wcWrite(`products/${update.product.id}`, {
+				short_description: update.short_description,
+				description: update.description,
+				meta_data: [titleMeta, descriptionMeta],
+			});
+			const writtenProduct = await writeResponse.json<any>();
+			appliedProducts.push({ update, writtenProduct });
+			if (
+				writtenProduct.short_description !== update.short_description ||
+				writtenProduct.description !== update.description ||
+				!writtenProduct.meta_data?.some(
+					(meta: any) => meta.key === "_yoast_wpseo_title" && meta.value === update.title,
+				) ||
+				!writtenProduct.meta_data?.some(
+					(meta: any) =>
+						meta.key === "_yoast_wpseo_metadesc" && meta.value === update.metadesc,
+				)
+			) {
+				throw new Error(`Product ${update.product.id} did not verify after the WooCommerce write.`);
+			}
+		}
+	} catch (error) {
+		const rollbackErrors: string[] = [];
+		for (const applied of appliedProducts.reverse()) {
+			try {
+				const { update, writtenProduct } = applied;
+				const writtenTitle = writtenProduct.meta_data?.find(
+					(meta: any) => meta.key === "_yoast_wpseo_title",
+				);
+				const writtenDescription = writtenProduct.meta_data?.find(
+					(meta: any) => meta.key === "_yoast_wpseo_metadesc",
+				);
+				if (!writtenTitle?.id || !writtenDescription?.id) {
+					const missingMetadataError = new Error(
+						"Updated Yoast metadata IDs are unavailable for rollback.",
+					);
+					(missingMetadataError as Error & { cause?: unknown }).cause = error;
+					throw missingMetadataError;
+				}
+				await wcWrite(`products/${update.product.id}`, {
+					short_description: update.product.short_description,
+					description: update.product.description,
+					meta_data: [
+						{ id: writtenTitle.id, key: "_yoast_wpseo_title", value: "" },
+						{
+							id: writtenDescription.id,
+							key: "_yoast_wpseo_metadesc",
+							value: "previousMetadesc" in update ? update.previousMetadesc : "",
+						},
+					],
+				});
+			} catch (rollbackError) {
+				rollbackErrors.push(`product ${applied.update.product.id}: ${String(rollbackError)}`);
+			}
+		}
+		for (const templateId of appliedTemplates.reverse()) {
+			try {
+				await wpAuthenticatedWrite(`elementor_library/${templateId}`, {
+					meta: { _elementor_data: templateBackups.get(templateId) },
+				});
+			} catch (rollbackError) {
+				rollbackErrors.push(`template ${templateId}: ${String(rollbackError)}`);
+			}
+		}
+		const wrappedError = new Error(
+			`${error instanceof Error ? error.message : String(error)} Rollback errors: ${rollbackErrors.length ? rollbackErrors.join("; ") : "none"}.`,
+		);
+		(wrappedError as Error & { cause?: unknown }).cause = error;
+		throw wrappedError;
+	}
+	return {
+		updated: true,
+		templates_updated: templateIds,
+		products_updated: productIds,
+		removed_hidden_sections: ["a706128", "7c67552"],
+		rollback_errors: [],
 	};
 }
 
@@ -3445,6 +3769,24 @@ function createServer() {
 					inspection_count: templates.length,
 					templates,
 				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_outdoor_seo_fixes_guarded",
+		{
+			description:
+				"Apply the fixed, reviewed Blindmotion outdoor SEO cleanup. Exact product and Elementor hashes, identities and source values must match; removes only two all-device-hidden sections, replaces known placeholder copy, updates three locked product descriptions/Yoast snippets, verifies preflight and attempts rollback on failure.",
+			inputSchema: z.object({
+				confirmation: z.literal(OUTDOOR_SEO_FIX_CONFIRMATION),
+			}),
+		},
+		async () => {
+			try {
+				return toolResult(await applyOutdoorSeoFixes());
 			} catch (error) {
 				return toolError(error);
 			}
