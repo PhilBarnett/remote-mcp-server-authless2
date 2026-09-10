@@ -185,6 +185,17 @@ const TOTALBLOCK_FABRIC_SOURCE_ID = 4788;
 const TOTALBLOCK_FABRIC_SOURCE_NAME = "Premium Roller Blinds";
 const TOTALBLOCK_VIBE_PRICING_SOURCE_ID = 3839;
 const TOTALBLOCK_VIBE_PRICING_SOURCE_NAME = "Everyday Roller Blinds";
+const TOTALBLOCK_FABRIC_WRITE_CONFIRMATION =
+	"CONFIRM INSTALL TOTALBLOCK BLOCKOUT FABRICS";
+const TOTALBLOCK_FABRIC_TARGET_META_ID = 191905;
+const TOTALBLOCK_FABRIC_SOURCE_META_ID = 130508;
+const TOTALBLOCK_VIBE_SOURCE_META_ID = 35347;
+const TOTALBLOCK_FABRIC_TARGET_HASH =
+	"5dc1f08038b72c69ef90d678b01656e4cc21991fdcec600440c0e432679af45d";
+const TOTALBLOCK_FABRIC_SOURCE_HASH =
+	"51564461699d5a47790fa37b788c4b14c311d695e4ed5ffd949ad3f19648d025";
+const TOTALBLOCK_VIBE_SOURCE_HASH =
+	"3f3fa49e2404e185214d9ed99de2c2e1327b1b989b5a957508f91f7b3e3ecb5b";
 const TOTALBLOCK_SEO_TITLE =
 	"Total Blockout Cassette Blinds with Side Channels | Blindmotion";
 const TOTALBLOCK_SEO_DESCRIPTION =
@@ -4329,6 +4340,304 @@ function createServer() {
 					vibe_pricing_source: await inspect(vibeSource, [0, -1]),
 					write_performed: false,
 				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"install_totalblock_blockout_fabrics_guarded",
+		{
+			description:
+				"Install only the reviewed internal blockout fabric subtree on locked draft TotalBlock product 9413: discounted Vibe plus premium LeReve, Linesque and Palm Beach, with conditional colours and source-derived pricing groups. Exact identities, WAPF IDs and inspected hashes must match. Removes only the inherited outdoor fabric subtree, forces draft/hidden state, verifies untouched product data and performs an exact rollback on failure. Cannot publish the product.",
+			inputSchema: z.object({
+				product_id: z.literal(TOTALBLOCK_PRODUCT_ID),
+				premium_source_product_id: z.literal(TOTALBLOCK_FABRIC_SOURCE_ID),
+				vibe_source_product_id: z.literal(TOTALBLOCK_VIBE_PRICING_SOURCE_ID),
+				confirmation: z.literal(TOTALBLOCK_FABRIC_WRITE_CONFIRMATION),
+			}),
+		},
+		async () => {
+			try {
+				const responses = await Promise.all([
+					wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`),
+					wcFetch(`products/${TOTALBLOCK_FABRIC_SOURCE_ID}`),
+					wcFetch(`products/${TOTALBLOCK_VIBE_PRICING_SOURCE_ID}`),
+				]);
+				const [target, premium, everyday] = await Promise.all(
+					responses.map((response) => response.json<any>()),
+				);
+				if (
+					target.id !== TOTALBLOCK_PRODUCT_ID ||
+					target.name !== TOTALBLOCK_PRODUCT_NAME ||
+					target.slug !== TOTALBLOCK_PRODUCT_SLUG ||
+					target.status !== "draft" ||
+					target.catalog_visibility !== "hidden"
+				) {
+					throw new Error("Locked TotalBlock identity or draft/hidden state changed.");
+				}
+				if (
+					premium.id !== TOTALBLOCK_FABRIC_SOURCE_ID ||
+					premium.name !== TOTALBLOCK_FABRIC_SOURCE_NAME ||
+					premium.status !== "publish"
+				) {
+					throw new Error("Locked Premium Roller Blinds source identity changed.");
+				}
+				if (
+					everyday.id !== TOTALBLOCK_VIBE_PRICING_SOURCE_ID ||
+					everyday.name !== TOTALBLOCK_VIBE_PRICING_SOURCE_NAME ||
+					everyday.status !== "publish"
+				) {
+					throw new Error("Locked Everyday Roller Blinds source identity changed.");
+				}
+
+				function lockedWapf(product: any, metaId: number) {
+					const matches = (product.meta_data ?? []).filter(
+						(meta: any) => String(meta.key) === "_wapf_fieldgroup",
+					);
+					if (matches.length !== 1 || matches[0].id !== metaId) {
+						throw new Error(`Locked WAPF metadata ${metaId} changed on product ${product.id}.`);
+					}
+					const group = parseWapfFieldGroup(matches[0].value);
+					if (!group || !Array.isArray(group.fields)) {
+						throw new Error(`Product ${product.id} WAPF group is not readable.`);
+					}
+					return { meta: matches[0], group };
+				}
+
+				const targetWapf = lockedWapf(target, TOTALBLOCK_FABRIC_TARGET_META_ID);
+				const premiumWapf = lockedWapf(premium, TOTALBLOCK_FABRIC_SOURCE_META_ID);
+				const vibeWapf = lockedWapf(everyday, TOTALBLOCK_VIBE_SOURCE_META_ID);
+				const hashes = await Promise.all(
+					[targetWapf.meta.value, premiumWapf.meta.value, vibeWapf.meta.value].map((value) =>
+						sha256Hex(new TextEncoder().encode(JSON.stringify(value))),
+					),
+				);
+				if (
+					hashes[0] !== TOTALBLOCK_FABRIC_TARGET_HASH ||
+					hashes[1] !== TOTALBLOCK_FABRIC_SOURCE_HASH ||
+					hashes[2] !== TOTALBLOCK_VIBE_SOURCE_HASH
+				) {
+					throw new Error("A locked WAPF source changed after inspection; refusing write.");
+				}
+				if (
+					targetWapf.group.fields.length !== 26 ||
+					premiumWapf.group.fields.length !== 144 ||
+					vibeWapf.group.fields.length !== 125
+				) {
+					throw new Error("A locked WAPF field count changed after inspection.");
+				}
+
+				const oldFabricFields = targetWapf.group.fields.slice(7, 15);
+				const oldLabels = oldFabricFields.map(wapfFieldLabel);
+				const expectedOldLabels = [
+					"Fabric Options",
+					"Skyline 94 Colours",
+					"Skyline 99 Colours",
+					"Vistaweave 95 Colours",
+					"Vistaweave Privacy 99 Colours",
+					"Vistaweave MAX Blockout Colours",
+					"1mm PVC Colours",
+					"MegaScreen 80 Colour",
+				];
+				if (JSON.stringify(oldLabels) !== JSON.stringify(expectedOldLabels)) {
+					throw new Error("TotalBlock outdoor fabric subtree changed after inspection.");
+				}
+				const premiumFields = premiumWapf.group.fields.slice(126, 131);
+				if (
+					JSON.stringify(premiumFields.map(wapfFieldLabel)) !==
+					JSON.stringify([
+						"Blockout Fabric Options",
+						"LeReve blockout colours",
+						"Linesque BO Colours",
+						"Palm Beach blockout colours",
+						"Vibe Blockout Colours",
+					])
+				) {
+					throw new Error("Premium blockout fabric subtree changed after inspection.");
+				}
+				const everydaySelector = vibeWapf.group.fields[111];
+				const vibeChoice = everydaySelector?.options?.choices?.[0];
+				if (
+					wapfFieldLabel(everydaySelector) !== "Blockout Fabric Options" ||
+					vibeChoice?.label !== "Vibe Blockout" ||
+					vibeChoice?.slug !== "g5ugt" ||
+					vibeChoice?.attachment !== 4957
+				) {
+					throw new Error("Everyday Vibe selector identity changed after inspection.");
+				}
+
+				const removedIds = oldFabricFields.map((field: any) => String(field.id));
+				const retainedFields = [
+					...targetWapf.group.fields.slice(0, 7),
+					...targetWapf.group.fields.slice(15),
+				];
+				const retainedSerialized = JSON.stringify(retainedFields);
+				const staleReferences = removedIds.filter((id: string) => retainedSerialized.includes(id));
+				if (staleReferences.length > 0) {
+					throw new Error(`Retained TotalBlock fields reference removed fabric IDs: ${staleReferences}.`);
+				}
+
+				const newFabricFields = JSON.parse(
+					JSON.stringify(premiumFields).replaceAll(
+						"https://staging-online.blindmotion.com.au/",
+						"https://online.blindmotion.com.au/",
+					),
+				);
+				const selector = newFabricFields[0];
+				selector.conditionals = [];
+				if (
+					JSON.stringify(selector.options?.choices?.map((choice: any) => choice.slug)) !==
+					JSON.stringify(["mdvec", "hlmfv", "dy9ua"])
+				) {
+					throw new Error("Premium blockout selector choices changed after inspection.");
+				}
+				const newVibeChoice = JSON.parse(JSON.stringify(vibeChoice));
+				newVibeChoice.label = "Vibe";
+				selector.options.choices.push(newVibeChoice);
+				const widthId = "6714d030794c6";
+				const dropId = "6714d0303b92e";
+				const pricingBySlug: Record<string, string> = {
+					mdvec: `lookuptable(rollerfabricgrp8_50pcgmgst_12000w;${widthId};${dropId})*[qty]`,
+					hlmfv: `lookuptable(roller_fabric_grp9_12000w_50pcgm_gst;${widthId};${dropId})*[qty]`,
+					dy9ua: `lookuptable(rollerfabricgrp8_50pcgmgst_12000w;${widthId};${dropId})*[qty]`,
+					g5ugt: `lookuptable(roller_fabric_grp2_12000w_50pcgm_gst;${widthId};${dropId})*[qty]`,
+				};
+				for (const choice of selector.options.choices) {
+					const formula = pricingBySlug[String(choice.slug)];
+					if (!formula) throw new Error(`Unexpected TotalBlock fabric choice ${choice.slug}.`);
+					choice.pricing_type = "fx";
+					choice.pricing_amount = formula;
+				}
+				newFabricFields[4].conditionals = [
+					{
+						rules: [
+							{
+								condition: "==",
+								value: "g5ugt",
+								field: selector.id,
+								generated: false,
+							},
+						],
+					},
+				];
+				const newIds = newFabricFields.map((field: any) => String(field.id));
+				const conflictingNewIds = newIds.filter((id: string) => retainedSerialized.includes(id));
+				if (new Set(newIds).size !== newIds.length || conflictingNewIds.length > 0) {
+					throw new Error("New TotalBlock fabric field IDs are duplicated or conflict with retained fields.");
+				}
+				const conditionalFieldIds = [
+					...JSON.stringify(newFabricFields.slice(1)).matchAll(/"field":"([^"]+)"/g),
+				].map((match) => match[1]);
+				if (conditionalFieldIds.some((id) => !newIds.includes(id))) {
+					throw new Error("New TotalBlock fabric subtree has an external field dependency.");
+				}
+
+				const updatedGroup = JSON.parse(JSON.stringify(targetWapf.group));
+				updatedGroup.fields.splice(7, 8, ...newFabricFields);
+				const originalValue = targetWapf.meta.value;
+				const untouchedState = JSON.stringify({
+					name: target.name,
+					slug: target.slug,
+					price: target.price,
+					regular_price: target.regular_price,
+					sale_price: target.sale_price,
+					description: target.description,
+					short_description: target.short_description,
+					images: target.images,
+					categories: target.categories,
+					attributes: target.attributes,
+				});
+
+				try {
+					await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
+						status: "draft",
+						catalog_visibility: "hidden",
+						meta_data: [
+							{
+								id: TOTALBLOCK_FABRIC_TARGET_META_ID,
+								key: "_wapf_fieldgroup",
+								value: updatedGroup,
+							},
+						],
+					});
+					const verificationResponse = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
+					const verified = await verificationResponse.json<any>();
+					const verifiedWapf = lockedWapf(verified, TOTALBLOCK_FABRIC_TARGET_META_ID);
+					const verifiedState = JSON.stringify({
+						name: verified.name,
+						slug: verified.slug,
+						price: verified.price,
+						regular_price: verified.regular_price,
+						sale_price: verified.sale_price,
+						description: verified.description,
+						short_description: verified.short_description,
+						images: verified.images,
+						categories: verified.categories,
+						attributes: verified.attributes,
+					});
+					if (
+						verified.status !== "draft" ||
+						verified.catalog_visibility !== "hidden" ||
+						verifiedWapf.group.fields.length !== 23 ||
+						JSON.stringify(verifiedWapf.group) !== JSON.stringify(updatedGroup) ||
+						verifiedState !== untouchedState
+					) {
+						throw new Error("Post-write TotalBlock fabric verification failed.");
+					}
+					return toolResult({
+						updated: true,
+						product: {
+							id: verified.id,
+							name: verified.name,
+							status: verified.status,
+							catalog_visibility: verified.catalog_visibility,
+							price: verified.price,
+						},
+						fabric_ranges: ["Vibe", "LeReve", "Linesque", "Palm Beach"],
+						pricing_groups: { Vibe: 2, LeReve: 8, Linesque: 9, "Palm Beach": 8 },
+						colour_choice_count: 45,
+						removed_outdoor_fabric_fields: expectedOldLabels,
+						publication_performed: false,
+					});
+				} catch (writeError) {
+					await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
+						status: "draft",
+						catalog_visibility: "hidden",
+						meta_data: [
+							{
+								id: TOTALBLOCK_FABRIC_TARGET_META_ID,
+								key: "_wapf_fieldgroup",
+								value: originalValue,
+							},
+						],
+					});
+					const rollbackResponse = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
+					const rolledBack = await rollbackResponse.json<any>();
+					const rolledBackWapf = lockedWapf(rolledBack, TOTALBLOCK_FABRIC_TARGET_META_ID);
+					const rollbackHash = await sha256Hex(
+						new TextEncoder().encode(JSON.stringify(rolledBackWapf.meta.value)),
+					);
+					if (
+						rolledBack.status !== "draft" ||
+						rolledBack.catalog_visibility !== "hidden" ||
+						rollbackHash !== TOTALBLOCK_FABRIC_TARGET_HASH
+					) {
+						const rollbackError = new Error(
+							"TotalBlock fabric write and rollback verification both failed.",
+						);
+						(rollbackError as any).cause = writeError;
+						throw rollbackError;
+					}
+					const rolledBackError = new Error(
+						`TotalBlock fabric write failed; exact rollback succeeded: ${
+							writeError instanceof Error ? writeError.message : String(writeError)
+						}`,
+					);
+					(rolledBackError as any).cause = writeError;
+					throw rolledBackError;
+				}
 			} catch (error) {
 				return toolError(error);
 			}
