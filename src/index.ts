@@ -176,6 +176,45 @@ async function wpMcpWrite(path: string, body: unknown) {
 }
 
 const CLONE_PRODUCT_CONFIRMATION = "CONFIRM CLONE PRODUCT AS DRAFT";
+const TOTALBLOCK_PRODUCT_ID = 9413;
+const TOTALBLOCK_PRODUCT_NAME = "Blindmotion TotalBlock Cassette Blind";
+const TOTALBLOCK_PRODUCT_SLUG = "totalblock-cassette-blinds";
+const TOTALBLOCK_PRODUCT_CATEGORY_ID = 74;
+const TOTALBLOCK_PRODUCT_CONFIRMATION = "CONFIRM APPLY TOTALBLOCK PRODUCT CONTENT";
+const TOTALBLOCK_SEO_TITLE =
+	"Total Blockout Cassette Blinds with Side Channels | Blindmotion";
+const TOTALBLOCK_SEO_DESCRIPTION =
+	"Made-to-measure TotalBlock cassette blinds with side channels and a bottom seal, designed to dramatically reduce the light gaps around ordinary roller blinds.";
+const TOTALBLOCK_SHORT_DESCRIPTION = `<p><strong>When an ordinary blockout blind isn’t dark enough.</strong></p>
+<p>TotalBlock is a made-to-measure blockout cassette blind with side channels and a bottom seal. The enclosed system dramatically reduces the light gaps normally found around conventional roller blinds for a darker, more comfortable room.</p>`;
+const TOTALBLOCK_DESCRIPTION = `<h2>Blockout fabric is only part of the answer</h2>
+<p>A conventional blockout roller blind uses light-blocking fabric, but light can still enter around the top, sides and bottom of the blind. Blindmotion TotalBlock addresses those gaps with a complete cassette roller blind system.</p>
+<p>The fabric rolls neatly into an enclosed head cassette. Side channels guide and contain the fabric edges, while the bottom seal helps close the remaining gap at the sill. The result is dramatically better room darkening than an ordinary blockout roller blind.</p>
+
+<h2>Designed for rooms where darkness matters</h2>
+<p>TotalBlock cassette blinds are particularly well suited to:</p>
+<ul>
+	<li>Bedrooms and nurseries</li>
+	<li>Media rooms and home cinemas</li>
+	<li>Shift workers and daytime sleepers</li>
+	<li>Streetlights, early sunrise and other unwanted outside light</li>
+	<li>Anyone frustrated by light leaking around standard roller blinds</li>
+</ul>
+
+<h2>How the TotalBlock system reduces light gaps</h2>
+<ul>
+	<li><strong>Enclosed cassette:</strong> houses the roller and reduces light entering above the blind.</li>
+	<li><strong>Side channels:</strong> contain the fabric edges and reduce the bright strips commonly visible beside a roller blind.</li>
+	<li><strong>Bottom seal:</strong> helps reduce light beneath the lowered blind.</li>
+	<li><strong>Made-to-measure construction:</strong> manufactured to suit the dimensions of your window opening.</li>
+</ul>
+
+<h2>TotalBlock compared with an ordinary blockout roller blind</h2>
+<p>Both products use blockout fabric. The important difference is what happens around that fabric. A normal roller blind leaves operating clearances around its edges. TotalBlock surrounds the blind with a cassette, side channels and a bottom seal to control those common sources of light leakage.</p>
+
+<h2>A complete blockout cassette blind system</h2>
+<p>TotalBlock combines practical room-darkening performance with the clean appearance of a purpose-built cassette blind. It is a strong choice when a standard blockout blind is not dark enough, without resorting to bulky layers of additional window coverings.</p>
+<p><small>TotalBlock is designed to dramatically reduce incoming light. The final result depends on the window, opening, installation and surrounding sources of light; absolute darkness cannot be guaranteed in every room.</small></p>`;
 const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
 const VISUALIZER_PLUGIN_SLUG = "blindmotion-visualizer";
 const VISUALIZER_PLUGIN_MAIN_FILE = "blindmotion-visualizer/blindmotion-visualizer.php";
@@ -3909,6 +3948,138 @@ function createServer() {
 						type: verified.type,
 						meta_record_count: verified.meta_data?.length ?? 0,
 					},
+					publication_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_totalblock_product_content_guarded",
+		{
+			description:
+				"Apply the fixed, reviewed TotalBlock identity, internal-blind category, product copy and Yoast SEO fields only to locked product 9413. Requires the exact cloned draft identity and SEO source state, forces DRAFT/hidden status, does not change prices, images, attributes, product options or other metadata, and cannot publish the product.",
+			inputSchema: z.object({
+				product_id: z.literal(TOTALBLOCK_PRODUCT_ID),
+				expected_name: z.literal(TOTALBLOCK_PRODUCT_NAME),
+				confirmation: z.literal(TOTALBLOCK_PRODUCT_CONFIRMATION),
+			}),
+		},
+		async () => {
+			try {
+				const [targetResponse, sourceResponse, categoryResponse, slugResponse] =
+					await Promise.all([
+						wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`),
+						wcFetch("products/1301"),
+						wcFetch(`products/categories/${TOTALBLOCK_PRODUCT_CATEGORY_ID}`),
+						wcFetch("products", {
+							slug: TOTALBLOCK_PRODUCT_SLUG,
+							status: "any",
+							per_page: 100,
+						}),
+					]);
+				const target = await targetResponse.json<any>();
+				const source = await sourceResponse.json<any>();
+				const category = await categoryResponse.json<any>();
+				const slugMatches = await slugResponse.json<any[]>();
+
+				if (
+					target.id !== TOTALBLOCK_PRODUCT_ID ||
+					target.name !== TOTALBLOCK_PRODUCT_NAME ||
+					target.status !== "draft" ||
+					target.catalog_visibility !== "hidden"
+				) {
+					throw new Error(
+						"Locked TotalBlock product identity or draft/hidden state changed; refusing the content update.",
+					);
+				}
+				if (!["", "blindmotion-totalblock-cassette-blind", TOTALBLOCK_PRODUCT_SLUG].includes(target.slug)) {
+					throw new Error(`Unexpected current slug on locked TotalBlock product: ${target.slug}.`);
+				}
+				if (source.id !== 1301 || source.name !== "Zip Sided Outdoor Blinds") {
+					throw new Error("Source product 1301 identity changed; refusing the content update.");
+				}
+				if (category.id !== TOTALBLOCK_PRODUCT_CATEGORY_ID || category.name !== "Blinds [Geo]") {
+					throw new Error("Locked internal-blinds category 74 identity changed.");
+				}
+				const slugConflict = slugMatches.find(
+					(product) => product.id !== TOTALBLOCK_PRODUCT_ID,
+				);
+				if (slugConflict) {
+					throw new Error(
+						`Slug ${TOTALBLOCK_PRODUCT_SLUG} is already used by product ${slugConflict.id}.`,
+					);
+				}
+
+				const sourceMeta = new Map<string, string>(
+					(source.meta_data ?? []).map((meta: any) => [String(meta.key), String(meta.value ?? "")]),
+				);
+				const seoUpdates = [
+					["_yoast_wpseo_title", TOTALBLOCK_SEO_TITLE],
+					["_yoast_wpseo_metadesc", TOTALBLOCK_SEO_DESCRIPTION],
+					["_yoast_wpseo_focuskw", "blockout blinds with side tracks"],
+				] as const;
+				const metaData = seoUpdates.map(([key, value]) =>
+					productMetaUpdate(target, key, sourceMeta.get(key) ?? "", value),
+				);
+
+				const updateResponse = await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
+					name: TOTALBLOCK_PRODUCT_NAME,
+					slug: TOTALBLOCK_PRODUCT_SLUG,
+					status: "draft",
+					catalog_visibility: "hidden",
+					description: TOTALBLOCK_DESCRIPTION,
+					short_description: TOTALBLOCK_SHORT_DESCRIPTION,
+					categories: [{ id: TOTALBLOCK_PRODUCT_CATEGORY_ID }],
+					meta_data: metaData,
+				});
+				await updateResponse.json<any>();
+
+				const verificationResponse = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
+				const verified = await verificationResponse.json<any>();
+				const verifiedMeta = new Map(
+					(verified.meta_data ?? []).map((meta: any) => [String(meta.key), String(meta.value ?? "")]),
+				);
+				if (
+					verified.name !== TOTALBLOCK_PRODUCT_NAME ||
+					verified.slug !== TOTALBLOCK_PRODUCT_SLUG ||
+					verified.status !== "draft" ||
+					verified.catalog_visibility !== "hidden" ||
+					verified.description !== TOTALBLOCK_DESCRIPTION ||
+					verified.short_description !== TOTALBLOCK_SHORT_DESCRIPTION ||
+					verified.categories?.length !== 1 ||
+					verified.categories[0]?.id !== TOTALBLOCK_PRODUCT_CATEGORY_ID ||
+					seoUpdates.some(([key, value]) => verifiedMeta.get(key) !== value)
+				) {
+					throw new Error(
+						"TotalBlock content write did not pass exact post-write verification; product remains draft and hidden.",
+					);
+				}
+
+				return toolResult({
+					updated: true,
+					product: {
+						id: verified.id,
+						name: verified.name,
+						slug: verified.slug,
+						status: verified.status,
+						catalog_visibility: verified.catalog_visibility,
+						category: verified.categories[0],
+					},
+					seo: {
+						title: verifiedMeta.get("_yoast_wpseo_title"),
+						meta_description: verifiedMeta.get("_yoast_wpseo_metadesc"),
+						focus_keyword: verifiedMeta.get("_yoast_wpseo_focuskw"),
+					},
+					untouched: [
+						"price",
+						"images",
+						"attributes",
+						"product options",
+						"non-SEO metadata",
+					],
 					publication_performed: false,
 				});
 			} catch (error) {
