@@ -9412,6 +9412,56 @@ function createServer() {
 	);
 
 	server.registerTool(
+		"get_ga4_event_performance",
+		{
+			description:
+				"Return read-only Blindmotion GA4 event counts by event name, source/medium and campaign for a date range, with optional exact filters for acquisition and event attribution.",
+			inputSchema: z.object({
+				start_date: z.string(),
+				end_date: z.string(),
+				source_medium: z.string().trim().min(1).max(200).optional(),
+				campaign_name: z.string().trim().min(1).max(500).optional(),
+				event_name: z.string().trim().min(1).max(200).optional(),
+				limit: z.number().int().min(1).max(250).default(100),
+			}),
+		},
+		async ({ start_date, end_date, source_medium, campaign_name, event_name, limit }) => {
+			try {
+				const filters = [
+					["sessionSourceMedium", source_medium],
+					["sessionCampaignName", campaign_name],
+					["eventName", event_name],
+				]
+					.filter((entry): entry is [string, string] => Boolean(entry[1]))
+					.map(([fieldName, value]) => ({
+						filter: {
+							fieldName,
+							stringFilter: { matchType: "EXACT", value, caseSensitive: false },
+						},
+					}));
+
+				const report = await ga4RunReport({
+					dateRanges: [{ startDate: start_date, endDate: end_date }],
+					dimensions: [
+						{ name: "eventName" },
+						{ name: "sessionSourceMedium" },
+						{ name: "sessionCampaignName" },
+					],
+					metrics: [{ name: "eventCount" }, { name: "keyEvents" }],
+					...(filters.length
+						? { dimensionFilter: { andGroup: { expressions: filters } } }
+						: {}),
+					limit: String(limit),
+					orderBys: [{ metric: { metricName: "eventCount" }, desc: true }],
+				});
+				return toolResult(ga4ReportResult(report, start_date, end_date));
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"get_ga4_landing_pages",
 		{
 			description:
