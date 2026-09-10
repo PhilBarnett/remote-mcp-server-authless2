@@ -32,8 +32,7 @@ const GOOGLE_ADS_ZIPGRIP_IMAGE_CONFIRMATION = "CONFIRM ADD PAUSED ZIPGRIP IMAGE 
 const GOOGLE_ADS_ZIPGRIP_BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP PAUSED ZIPGRIP ASSET GROUP";
 const GOOGLE_ADS_ZIPGRIP_VIDEO_CONFIRMATION = "CONFIRM LINK PAUSED ZIPGRIP YOUTUBE ASSETS";
 const GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION = "CONFIRM EXCLUSIVE ZIPGRIP LAUNCH";
-const GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_REPAIR_CONFIRMATION =
-	"CONFIRM ENABLE ZIPGRIP ASSET GROUP";
+const GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_REPAIR_CONFIRMATION = "CONFIRM ENABLE ZIPGRIP ASSET GROUP";
 const GOOGLE_ADS_ZIPGRIP_SOURCE_PMAX_ID = "22733226130";
 const GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS = ["22732181006", "21527804393"] as const;
 const GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID = "2036";
@@ -45,12 +44,9 @@ const GOOGLE_ADS_ENGLISH_LANGUAGE_ID = "1000";
 const GOOGLE_ADS_PRODUCT_PMAX_CUSTOMER_ID = "6610097637";
 const GOOGLE_ADS_PRODUCT_PMAX_MERCHANT_ID = "5320593492";
 const GOOGLE_ADS_PRODUCT_PMAX_FEED_LABEL = "AU";
-const GOOGLE_ADS_PRODUCT_PMAX_CREATE_CONFIRMATION =
-	"CONFIRM CREATE PAUSED PRODUCT PMAX";
-const GOOGLE_ADS_PRODUCT_PMAX_BOOTSTRAP_CONFIRMATION =
-	"CONFIRM BOOTSTRAP PAUSED PRODUCT PMAX";
-const GOOGLE_ADS_PRODUCT_PMAX_VIDEO_CONFIRMATION =
-	"CONFIRM LINK PAUSED PRODUCT PMAX VIDEOS";
+const GOOGLE_ADS_PRODUCT_PMAX_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED PRODUCT PMAX";
+const GOOGLE_ADS_PRODUCT_PMAX_BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP PAUSED PRODUCT PMAX";
+const GOOGLE_ADS_PRODUCT_PMAX_VIDEO_CONFIRMATION = "CONFIRM LINK PAUSED PRODUCT PMAX VIDEOS";
 
 const GENUINE_STATUSES = new Set(["processing", "completed", "on-hold"]);
 
@@ -165,7 +161,9 @@ async function wpAuthenticatedWrite(path: string, body: unknown) {
 		body: JSON.stringify(body),
 	});
 	if (!response.ok) {
-		throw new Error(`Authenticated WordPress write failed: ${response.status} ${await response.text()}`);
+		throw new Error(
+			`Authenticated WordPress write failed: ${response.status} ${await response.text()}`,
+		);
 	}
 	return response;
 }
@@ -200,6 +198,7 @@ async function wpMcpWrite(path: string, body: unknown) {
 }
 
 const CLONE_PRODUCT_CONFIRMATION = "CONFIRM CLONE PRODUCT AS DRAFT";
+const FABRIC_SAMPLE_SETUP_CONFIRMATION = "CONFIRM APPLY FABRIC SAMPLE SETUP";
 const TOTALBLOCK_PRODUCT_ID = 9413;
 const TOTALBLOCK_PRODUCT_NAME = "Blindmotion TotalBlock Cassette Blind";
 const TOTALBLOCK_PRODUCT_SLUG = "totalblock-cassette-blinds";
@@ -209,8 +208,7 @@ const TOTALBLOCK_FABRIC_SOURCE_ID = 4788;
 const TOTALBLOCK_FABRIC_SOURCE_NAME = "Premium Roller Blinds";
 const TOTALBLOCK_VIBE_PRICING_SOURCE_ID = 3839;
 const TOTALBLOCK_VIBE_PRICING_SOURCE_NAME = "Everyday Roller Blinds";
-const TOTALBLOCK_FABRIC_WRITE_CONFIRMATION =
-	"CONFIRM INSTALL TOTALBLOCK BLOCKOUT FABRICS";
+const TOTALBLOCK_FABRIC_WRITE_CONFIRMATION = "CONFIRM INSTALL TOTALBLOCK BLOCKOUT FABRICS";
 const TOTALBLOCK_FABRIC_TARGET_META_ID = 191905;
 const TOTALBLOCK_FABRIC_SOURCE_META_ID = 130508;
 const TOTALBLOCK_VIBE_SOURCE_META_ID = 35347;
@@ -222,16 +220,12 @@ const TOTALBLOCK_VIBE_SOURCE_HASH =
 	"000f7ac1a42c6193be39703cf19177dc0cb1e7c44c5b7af13195833a0ab94175";
 const TOTALBLOCK_DUO_BLOCK_CONFIRMATION = "CONFIRM ADD DUO BLOCK TO TOTALBLOCK";
 const TOTALBLOCK_SANCTUARY_CONFIRMATION = "CONFIRM ADD SANCTUARY TO TOTALBLOCK";
-const TOTALBLOCK_FEATURED_IMAGE_CONFIRMATION =
-	"CONFIRM REPLACE TOTALBLOCK FEATURED IMAGE";
+const TOTALBLOCK_FEATURED_IMAGE_CONFIRMATION = "CONFIRM REPLACE TOTALBLOCK FEATURED IMAGE";
 const TOTALBLOCK_EXPECTED_FEATURED_IMAGE_ID = 6704;
-const TOTALBLOCK_FEATURED_IMAGE_BACKUP_KEY =
-	"_blindmotion_mcp_totalblock_featured_backups";
-const TOTALBLOCK_GALLERY_CONFIRMATION =
-	"CONFIRM REPLACE TOTALBLOCK GALLERY IMAGES";
+const TOTALBLOCK_FEATURED_IMAGE_BACKUP_KEY = "_blindmotion_mcp_totalblock_featured_backups";
+const TOTALBLOCK_GALLERY_CONFIRMATION = "CONFIRM REPLACE TOTALBLOCK GALLERY IMAGES";
 const TOTALBLOCK_EXPECTED_CURRENT_IMAGE_IDS = [9417, 6715, 6820, 6821, 7292] as const;
-const TOTALBLOCK_GALLERY_BACKUP_KEY =
-	"_blindmotion_mcp_totalblock_gallery_backups";
+const TOTALBLOCK_GALLERY_BACKUP_KEY = "_blindmotion_mcp_totalblock_gallery_backups";
 const TOTALBLOCK_ELEMENTOR_ZIPGRIP_PATTERNS = [
 	/zip guided blinds/i,
 	/zipgrip/i,
@@ -243,8 +237,7 @@ const TOTALBLOCK_FABRIC_INSTALLED_HASH =
 	"56baa1454189de29feda97493fc59405f76de11111c686379262c7458a8bed52";
 const TOTALBLOCK_DUO_BLOCK_INSTALLED_HASH =
 	"6dac64e0b458af244027410655e4fdc6dcf8e48e741810a408393cd9db60c741";
-const TOTALBLOCK_SEO_TITLE =
-	"Total Blockout Cassette Blinds with Side Channels | Blindmotion";
+const TOTALBLOCK_SEO_TITLE = "Total Blockout Cassette Blinds with Side Channels | Blindmotion";
 const TOTALBLOCK_SEO_DESCRIPTION =
 	"Made-to-measure TotalBlock cassette blinds with side channels and a bottom seal, designed to dramatically reduce the light gaps around ordinary roller blinds.";
 const TOTALBLOCK_SHORT_DESCRIPTION = `<p><strong>When an ordinary blockout blind isn’t dark enough.</strong></p>
@@ -311,7 +304,9 @@ function wapfFabricCandidates(group: Record<string, any>) {
 			const choiceLabels = Array.isArray(field?.options?.choices)
 				? field.options.choices
 						.slice(0, 10)
-						.map((choice: any) => String(choice?.label ?? choice?.name ?? choice?.value ?? ""))
+						.map((choice: any) =>
+							String(choice?.label ?? choice?.name ?? choice?.value ?? ""),
+						)
 						.join(" ")
 				: "";
 			return /fabric|blockout|blackout/i.test(`${label} ${choiceLabels}`);
@@ -411,6 +406,318 @@ function wapfFabricPricingDefinitions(group: Record<string, any>) {
 	}
 	visit(group, "group", 0);
 	return matches.slice(0, 100);
+}
+
+function singleWapfFieldGroup(product: any) {
+	const matches = (product.meta_data ?? []).filter(
+		(meta: any) => String(meta.key) === "_wapf_fieldgroup",
+	);
+	if (matches.length !== 1) {
+		throw new Error(
+			`Expected exactly one WAPF field group on product ${product.id}; found ${matches.length}.`,
+		);
+	}
+	const group = parseWapfFieldGroup(matches[0].value);
+	if (!group || !Array.isArray(group.fields)) {
+		throw new Error(`Product ${product.id} WAPF field group is not readable.`);
+	}
+	return { meta: matches[0], group };
+}
+
+function wapfConditionalRules(field: any) {
+	const conditionals = field?.conditionals;
+	if (!Array.isArray(conditionals)) return [];
+	return conditionals.flatMap((group: any) => (Array.isArray(group?.rules) ? group.rules : []));
+}
+
+function clearWapfPricing(value: any) {
+	if (value && typeof value === "object") {
+		value.pricing_type = "none";
+		value.pricing_amount = 0;
+	}
+}
+
+async function deterministicWapfToken(
+	prefix: string,
+	destinationProductId: number,
+	sourceProductId: number,
+	sourceToken: string,
+	length: number,
+) {
+	const digest = await sha256Hex(
+		new TextEncoder().encode(
+			`${prefix}:${destinationProductId}:${sourceProductId}:${sourceToken}`,
+		),
+	);
+	return digest.slice(0, length);
+}
+
+type FabricSamplePlanInput = {
+	sourceProductId: number;
+	destinationProductId: number;
+	sourceFabricSelectorFieldId: string;
+	destinationProductSelectorFieldId: string;
+	destinationColourTemplateFieldId: string;
+	sampleProductLabel: string;
+};
+
+async function buildFabricSamplePlan(source: any, destination: any, input: FabricSamplePlanInput) {
+	const sourceWapf = singleWapfFieldGroup(source);
+	const destinationWapf = singleWapfFieldGroup(destination);
+	const sourceFields = sourceWapf.group.fields as any[];
+	const destinationFields = destinationWapf.group.fields as any[];
+	const sourceSelector = sourceFields.find(
+		(field) => String(field?.id) === input.sourceFabricSelectorFieldId,
+	);
+	if (!sourceSelector) {
+		throw new Error("The exact source fabric selector field was not found.");
+	}
+	const sourceChoices = sourceSelector?.options?.choices;
+	if (!Array.isArray(sourceChoices) || sourceChoices.length < 1 || sourceChoices.length > 30) {
+		throw new Error("The source fabric selector must contain between 1 and 30 choices.");
+	}
+	const sourceChoiceSlugs = sourceChoices.map((choice: any) => String(choice?.slug ?? ""));
+	if (
+		sourceChoiceSlugs.some((slug: string) => !/^[A-Za-z0-9_-]{1,80}$/.test(slug)) ||
+		new Set(sourceChoiceSlugs).size !== sourceChoiceSlugs.length
+	) {
+		throw new Error("The source fabric selector has missing or duplicate choice slugs.");
+	}
+
+	const dependentFields = sourceFields.filter((field) => {
+		const rules = wapfConditionalRules(field);
+		return rules.some((rule: any) => String(rule?.field) === input.sourceFabricSelectorFieldId);
+	});
+	if (dependentFields.length !== sourceChoices.length) {
+		throw new Error(
+			`Expected one colour field per source fabric choice; found ${dependentFields.length} colour fields for ${sourceChoices.length} choices.`,
+		);
+	}
+	const dependentChoiceSlugs: string[] = [];
+	for (const field of dependentFields) {
+		const rules = wapfConditionalRules(field);
+		if (
+			rules.length !== 1 ||
+			String(rules[0]?.field) !== input.sourceFabricSelectorFieldId ||
+			rules[0]?.condition !== "==" ||
+			!sourceChoiceSlugs.includes(String(rules[0]?.value ?? ""))
+		) {
+			throw new Error(
+				`Source colour field ${field?.id ?? "unknown"} has an unsupported conditional dependency.`,
+			);
+		}
+		const choices = field?.options?.choices;
+		if (!Array.isArray(choices) || choices.length < 1 || choices.length > 100) {
+			throw new Error(
+				`Source colour field ${field?.id ?? "unknown"} must contain between 1 and 100 choices.`,
+			);
+		}
+		dependentChoiceSlugs.push(String(rules[0].value));
+	}
+	if (
+		new Set(dependentChoiceSlugs).size !== sourceChoiceSlugs.length ||
+		sourceChoiceSlugs.some((slug: string) => !dependentChoiceSlugs.includes(slug))
+	) {
+		throw new Error("Source fabric choices do not map one-to-one to colour fields.");
+	}
+
+	const destinationProductSelector = destinationFields.find(
+		(field) => String(field?.id) === input.destinationProductSelectorFieldId,
+	);
+	const destinationProductChoices = destinationProductSelector?.options?.choices;
+	if (!destinationProductSelector || !Array.isArray(destinationProductChoices)) {
+		throw new Error("The exact destination product selector field was not found.");
+	}
+	if (destinationProductChoices.length < 1 || destinationProductChoices.length >= 30) {
+		throw new Error("The destination product selector cannot accept another product choice.");
+	}
+	if (
+		destinationProductChoices.some(
+			(choice: any) =>
+				String(choice?.label ?? "")
+					.trim()
+					.toLowerCase() === input.sampleProductLabel.trim().toLowerCase(),
+		)
+	) {
+		throw new Error("The destination already contains this sample-product label.");
+	}
+	const destinationColourTemplate = destinationFields.find(
+		(field) => String(field?.id) === input.destinationColourTemplateFieldId,
+	);
+	if (
+		!destinationColourTemplate ||
+		destinationColourTemplate.type !== "multi-image-swatch" ||
+		!Array.isArray(destinationColourTemplate?.options?.choices)
+	) {
+		throw new Error(
+			"The exact destination colour template must be a multi-image-swatch field.",
+		);
+	}
+	if (!source?.images?.[0]?.id || typeof source.images[0]?.src !== "string") {
+		throw new Error("The source product requires a featured image for its sample choice.");
+	}
+
+	const occupiedFieldIds = new Set(destinationFields.map((field) => String(field?.id ?? "")));
+	const occupiedChoiceSlugs = new Set(
+		destinationFields.flatMap((field) =>
+			Array.isArray(field?.options?.choices)
+				? field.options.choices.map((choice: any) => String(choice?.slug ?? ""))
+				: [],
+		),
+	);
+	const newProductChoiceSlug = await deterministicWapfToken(
+		"sample-product-choice",
+		input.destinationProductId,
+		input.sourceProductId,
+		String(source.id),
+		5,
+	);
+	if (occupiedChoiceSlugs.has(newProductChoiceSlug)) {
+		throw new Error(
+			"The deterministic sample-product choice slug conflicts with the destination.",
+		);
+	}
+	const plannedChoiceSlugs = new Set([newProductChoiceSlug]);
+
+	const newProductChoice = structuredClone(destinationProductChoices[0]);
+	newProductChoice.label = input.sampleProductLabel.trim();
+	newProductChoice.slug = newProductChoiceSlug;
+	newProductChoice.image = source.images[0].src;
+	newProductChoice.attachment = Number(source.images[0].id);
+	newProductChoice.selected = false;
+	clearWapfPricing(newProductChoice);
+
+	const newSelector = structuredClone(sourceSelector);
+	newSelector.id = await deterministicWapfToken(
+		"sample-fabric-field",
+		input.destinationProductId,
+		input.sourceProductId,
+		String(sourceSelector.id),
+		13,
+	);
+	if (occupiedFieldIds.has(String(newSelector.id))) {
+		throw new Error(
+			"The deterministic fabric-selector field ID conflicts with the destination.",
+		);
+	}
+	newSelector.conditionals = [
+		{
+			rules: [
+				{
+					condition: "==",
+					value: newProductChoiceSlug,
+					field: String(destinationProductSelector.id),
+					generated: false,
+				},
+			],
+		},
+	];
+	newSelector.pricing = { type: "fixed", amount: 0, enabled: false };
+
+	const sourceToNewChoiceSlug = new Map<string, string>();
+	for (const choice of newSelector.options.choices) {
+		const oldSlug = String(choice.slug);
+		const newSlug = await deterministicWapfToken(
+			"sample-fabric-choice",
+			input.destinationProductId,
+			input.sourceProductId,
+			`${sourceSelector.id}:${oldSlug}`,
+			5,
+		);
+		if (occupiedChoiceSlugs.has(newSlug) || plannedChoiceSlugs.has(newSlug)) {
+			throw new Error("A deterministic fabric-choice slug conflicts with the destination.");
+		}
+		sourceToNewChoiceSlug.set(oldSlug, newSlug);
+		plannedChoiceSlugs.add(newSlug);
+		choice.slug = newSlug;
+		choice.selected = false;
+		clearWapfPricing(choice);
+	}
+
+	const newColourFields: any[] = [];
+	for (const sourceColourField of dependentFields) {
+		const rule = wapfConditionalRules(sourceColourField)[0];
+		const newColourField = structuredClone(destinationColourTemplate);
+		newColourField.id = await deterministicWapfToken(
+			"sample-colour-field",
+			input.destinationProductId,
+			input.sourceProductId,
+			String(sourceColourField.id),
+			13,
+		);
+		if (
+			occupiedFieldIds.has(String(newColourField.id)) ||
+			String(newColourField.id) === String(newSelector.id) ||
+			newColourFields.some((field) => String(field.id) === String(newColourField.id))
+		) {
+			throw new Error("A deterministic colour-field ID conflicts with the destination.");
+		}
+		newColourField.label = sourceColourField.label;
+		newColourField.description = sourceColourField.description ?? "";
+		newColourField.required = sourceColourField.required !== false;
+		newColourField.options.choices = structuredClone(sourceColourField.options.choices);
+		newColourField.conditionals = [
+			{
+				rules: [
+					{
+						condition: "==",
+						value: sourceToNewChoiceSlug.get(String(rule.value)),
+						field: String(newSelector.id),
+						generated: false,
+					},
+				],
+			},
+		];
+		newColourField.pricing = { type: "fixed", amount: 0, enabled: false };
+		for (const colourChoice of newColourField.options.choices) {
+			const oldSlug = String(colourChoice?.slug ?? "");
+			if (!/^[A-Za-z0-9_-]{1,80}$/.test(oldSlug)) {
+				throw new Error(
+					`Source colour field ${sourceColourField.id} has an invalid choice slug.`,
+				);
+			}
+			const newSlug = await deterministicWapfToken(
+				"sample-colour-choice",
+				input.destinationProductId,
+				input.sourceProductId,
+				`${sourceColourField.id}:${oldSlug}`,
+				5,
+			);
+			if (occupiedChoiceSlugs.has(newSlug) || plannedChoiceSlugs.has(newSlug)) {
+				throw new Error(
+					"A deterministic colour-choice slug conflicts with the destination.",
+				);
+			}
+			plannedChoiceSlugs.add(newSlug);
+			colourChoice.slug = newSlug;
+			colourChoice.selected = false;
+			clearWapfPricing(colourChoice);
+		}
+		newColourFields.push(newColourField);
+	}
+
+	const updatedGroup = structuredClone(destinationWapf.group);
+	const updatedProductSelector = updatedGroup.fields.find(
+		(field: any) => String(field?.id) === input.destinationProductSelectorFieldId,
+	);
+	updatedProductSelector.options.choices.push(newProductChoice);
+	updatedGroup.fields.push(newSelector, ...newColourFields);
+	const [sourceHash, destinationHash, planHash] = await Promise.all([
+		sha256Hex(new TextEncoder().encode(JSON.stringify(sourceWapf.meta.value))),
+		sha256Hex(new TextEncoder().encode(JSON.stringify(destinationWapf.meta.value))),
+		sha256Hex(new TextEncoder().encode(JSON.stringify(updatedGroup))),
+	]);
+	return {
+		sourceWapf,
+		destinationWapf,
+		updatedGroup,
+		sourceHash,
+		destinationHash,
+		planHash,
+		newProductChoice,
+		newSelector,
+		newColourFields,
+	};
 }
 
 const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
@@ -514,9 +821,10 @@ function extractHtmlSeo(html: string) {
 }
 
 function extractHtmlHeadings(html: string) {
-	const headings = [...html.matchAll(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi)].map(
-		(match) => ({ level: Number(match[1]), text: htmlToPlainText(match[2]) }),
-	);
+	const headings = [...html.matchAll(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1>/gi)].map((match) => ({
+		level: Number(match[1]),
+		text: htmlToPlainText(match[2]),
+	}));
 	const counts = new Map<string, { text: string; count: number; levels: Set<number> }>();
 	for (const heading of headings) {
 		if (!heading.text) continue;
@@ -705,7 +1013,9 @@ function elementorWidgetInventory(nodes: any[]) {
 									? ancestor.settings
 									: {},
 							).filter(([key]) =>
-								/(?:dce_|visibility|hide_|display|css_classes|condition)/i.test(key),
+								/(?:dce_|visibility|hide_|display|css_classes|condition)/i.test(
+									key,
+								),
 							),
 						),
 					})),
@@ -778,7 +1088,8 @@ function mutateElementorWidgetSetting(
 		for (const child of Array.isArray(node.elements) ? node.elements : []) visit(child);
 	}
 	for (const node of nodes) visit(node);
-	if (matches !== 1) throw new Error(`Expected exactly one Elementor widget ${widgetId}; found ${matches}.`);
+	if (matches !== 1)
+		throw new Error(`Expected exactly one Elementor widget ${widgetId}; found ${matches}.`);
 }
 
 function removeElementorElement(nodes: any[], elementId: string) {
@@ -788,12 +1099,14 @@ function removeElementorElement(nodes: any[], elementId: string) {
 			const element = elements[index];
 			if (element?.id === elementId) {
 				if (
-				element.elType !== "section" ||
-				element.settings?.hide_desktop !== "hidden-desktop" ||
-				element.settings?.hide_tablet !== "hidden-tablet" ||
-				element.settings?.hide_mobile !== "hidden-mobile"
+					element.elType !== "section" ||
+					element.settings?.hide_desktop !== "hidden-desktop" ||
+					element.settings?.hide_tablet !== "hidden-tablet" ||
+					element.settings?.hide_mobile !== "hidden-mobile"
 				) {
-					throw new Error(`Refusing to remove visible or unexpected Elementor element ${elementId}.`);
+					throw new Error(
+						`Refusing to remove visible or unexpected Elementor element ${elementId}.`,
+					);
 				}
 				elements.splice(index, 1);
 				matches += 1;
@@ -803,7 +1116,10 @@ function removeElementorElement(nodes: any[], elementId: string) {
 		}
 	}
 	visit(nodes);
-	if (matches !== 1) throw new Error(`Expected exactly one hidden Elementor element ${elementId}; found ${matches}.`);
+	if (matches !== 1)
+		throw new Error(
+			`Expected exactly one hidden Elementor element ${elementId}; found ${matches}.`,
+		);
 }
 
 function productMetaUpdate(product: any, key: string, expectedValue: string, value: string) {
@@ -868,45 +1184,163 @@ async function applyOutdoorSeoFixes() {
 	removeElementorElement(template557.data, "7c67552");
 	const widgetChanges557: Array<[string, string, string, string]> = [
 		["6e4e86a", "title_text", "Feature 1", "Made to Measure"],
-		["6e4e86a", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Built to your measurements for a clean, accurate fit."],
+		[
+			"6e4e86a",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+			"Built to your measurements for a clean, accurate fit.",
+		],
 		["cbfb487", "title_text", "Feature 1", "Australian Made"],
-		["cbfb487", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Manufactured in Sydney with carefully selected components."],
+		[
+			"cbfb487",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+			"Manufactured in Sydney with carefully selected components.",
+		],
 		["72a727a", "title_text", "Feature 1", "Simple Online Ordering"],
-		["72a727a", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Choose your options, enter your sizes and see your price online."],
+		[
+			"72a727a",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+			"Choose your options, enter your sizes and see your price online.",
+		],
 		["c2d0215", "title_text", "Feature 1", "Helpful Support"],
-		["c2d0215", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Get practical measuring and installation guidance when you need it."],
-		["f8a6e76", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", "Made-to-measure quality, ordered online."],
-		["365824d", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien.", "Explore made-to-measure blinds designed for a clean fit, dependable operation and straightforward DIY installation."],
-		["6a2f18b", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien.", "Made-to-measure blinds with practical options, reliable components and clear support from order to installation."],
+		[
+			"c2d0215",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+			"Get practical measuring and installation guidance when you need it.",
+		],
+		[
+			"f8a6e76",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+			"Made-to-measure quality, ordered online.",
+		],
+		[
+			"365824d",
+			"editor",
+			"Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien.",
+			"Explore made-to-measure blinds designed for a clean fit, dependable operation and straightforward DIY installation.",
+		],
+		[
+			"6a2f18b",
+			"editor",
+			"Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien.",
+			"Made-to-measure blinds with practical options, reliable components and clear support from order to installation.",
+		],
 		["7796e5f", "title_text", "This is the heading", "Made to Measure"],
-		["7796e5f", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.", "Manufactured to your measurements for a precise, professional result."],
+		[
+			"7796e5f",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.",
+			"Manufactured to your measurements for a precise, professional result.",
+		],
 		["167feb8", "title_text", "This is the heading", "Reliable Components"],
-		["167feb8", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.", "Quality mechanisms and fabrics selected for dependable everyday operation."],
+		[
+			"167feb8",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.",
+			"Quality mechanisms and fabrics selected for dependable everyday operation.",
+		],
 		["97491d9", "title_text", "This is the heading", "Manual or Motorised"],
-		["97491d9", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.", "Choose a practical manual control or convenient motorisation."],
+		[
+			"97491d9",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.",
+			"Choose a practical manual control or convenient motorisation.",
+		],
 		["ae71a5f", "title_text", "This is the heading", "DIY Support"],
-		["ae71a5f", "description_text", "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.", "Clear measuring and installation guidance is available when you need it."],
-		["71ecc75e", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien. Aenean sed adipiscing diam donec adipiscing tristique.", "Made-to-measure blinds designed for a clean fit, practical operation and lasting performance."],
-		["6ee12791", "description_text", "Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed", "Clean, practical designs suited to Australian homes and outdoor spaces."],
-		["30e3412b", "description_text", "Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed", "Components and fabrics selected for reliable everyday performance."],
-		["1bfd6403", "description_text", "Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed", "Robust mechanisms and quality materials designed for years of use."],
-		["592237b6", "description_text", "Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed", "Choose colours and finishes that work naturally with your space."],
-		["43aafc86", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. \nScelerisque eleifend donec pretium vulputate sapien.", "Made-to-measure blinds designed for shade, privacy and comfortable everyday living."],
-		["b55a68a", "editor", "Aenean sed adipiscing diam donec adipiscing tristique. \nScelerisque eleifend donec pretium vulputate sapien.", "Enter your measurements and select your preferred options to see your made-to-measure price."],
+		[
+			"ae71a5f",
+			"description_text",
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit. Ut elit tellus, luctus nec ullamcorper mattis, pulvinar dapibus leo.",
+			"Clear measuring and installation guidance is available when you need it.",
+		],
+		[
+			"71ecc75e",
+			"editor",
+			"Aenean sed adipiscing diam donec adipiscing tristique. Scelerisque eleifend donec pretium vulputate sapien. Aenean sed adipiscing diam donec adipiscing tristique.",
+			"Made-to-measure blinds designed for a clean fit, practical operation and lasting performance.",
+		],
+		[
+			"6ee12791",
+			"description_text",
+			"Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed",
+			"Clean, practical designs suited to Australian homes and outdoor spaces.",
+		],
+		[
+			"30e3412b",
+			"description_text",
+			"Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed",
+			"Components and fabrics selected for reliable everyday performance.",
+		],
+		[
+			"1bfd6403",
+			"description_text",
+			"Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed",
+			"Robust mechanisms and quality materials designed for years of use.",
+		],
+		[
+			"592237b6",
+			"description_text",
+			"Lorem ipsum dolor sit amet,consectetur adipisicing elit, sed",
+			"Choose colours and finishes that work naturally with your space.",
+		],
+		[
+			"43aafc86",
+			"editor",
+			"Aenean sed adipiscing diam donec adipiscing tristique. \nScelerisque eleifend donec pretium vulputate sapien.",
+			"Made-to-measure blinds designed for shade, privacy and comfortable everyday living.",
+		],
+		[
+			"b55a68a",
+			"editor",
+			"Aenean sed adipiscing diam donec adipiscing tristique. \nScelerisque eleifend donec pretium vulputate sapien.",
+			"Enter your measurements and select your preferred options to see your made-to-measure price.",
+		],
 	];
-	for (const change of widgetChanges557) mutateElementorWidgetSetting(template557.data, ...change);
+	for (const change of widgetChanges557)
+		mutateElementorWidgetSetting(template557.data, ...change);
 
-	mutateElementorWidgetSetting(template1640.data, "f72fde8", "description", "Lorem ipsum dolor sit amet consectetur adipiscing elit dolor", "");
+	mutateElementorWidgetSetting(
+		template1640.data,
+		"f72fde8",
+		"description",
+		"Lorem ipsum dolor sit amet consectetur adipiscing elit dolor",
+		"",
+	);
 	const widgetChanges1691: Array<[string, string, string, string]> = [
-		["16da5d2", "description_text", "Scelerisque eleifend donec pretium vulputate sapien.", "Free delivery on orders over $399."],
+		[
+			"16da5d2",
+			"description_text",
+			"Scelerisque eleifend donec pretium vulputate sapien.",
+			"Free delivery on orders over $399.",
+		],
 		["bbe55f7", "title_text", "Way To Buy??", "Easy Online Ordering"],
-		["bbe55f7", "description_text", "Scelerisque eleifend donec pretium vulputate sapien.", "Choose your options, enter your measurements and see your price online."],
+		[
+			"bbe55f7",
+			"description_text",
+			"Scelerisque eleifend donec pretium vulputate sapien.",
+			"Choose your options, enter your measurements and see your price online.",
+		],
 		["efa92fa", "title_text", "Shipping & Returns", "Delivery & Support"],
-		["efa92fa", "description_text", "Scelerisque eleifend donec pretium vulputate sapien.", "Made-to-measure blinds delivered Australia-wide, with help available when you need it."],
+		[
+			"efa92fa",
+			"description_text",
+			"Scelerisque eleifend donec pretium vulputate sapien.",
+			"Made-to-measure blinds delivered Australia-wide, with help available when you need it.",
+		],
 		["85234d5", "title_text", "Gift Voucher", "Made to Measure"],
-		["85234d5", "description_text", "Scelerisque eleifend donec pretium vulputate sapien.", "Manufactured to your measurements for a precise, professional result."],
+		[
+			"85234d5",
+			"description_text",
+			"Scelerisque eleifend donec pretium vulputate sapien.",
+			"Manufactured to your measurements for a precise, professional result.",
+		],
 	];
-	for (const change of widgetChanges1691) mutateElementorWidgetSetting(template1691.data, ...change);
+	for (const change of widgetChanges1691)
+		mutateElementorWidgetSetting(template1691.data, ...change);
 
 	const nextTemplateData = new Map<number, string>([
 		[557, JSON.stringify(template557.data)],
@@ -915,32 +1349,44 @@ async function applyOutdoorSeoFixes() {
 	]);
 	for (const [templateId, raw] of nextTemplateData) {
 		if (suspiciousContentMatches(raw).length > 0) {
-			throw new Error(`Template ${templateId} still contains known suspicious content after preflight.`);
+			throw new Error(
+				`Template ${templateId} still contains known suspicious content after preflight.`,
+			);
 		}
 	}
 
 	const productUpdates = [
 		{
 			product: product1615,
-			short_description: "<p>Made-to-measure outdoor blinds manufactured in Sydney for DIY installation across Australia.</p>",
-			description: "<h2>DIY Outdoor Blinds, Made to Measure</h2><p>Choose from Straight Drop, Cable Guide and ZipGrip zip-guided outdoor blinds, manufactured in Sydney to your measurements.</p><p>Order DIY blinds for delivery Australia-wide, with manual and motorised options available. Professional measuring and installation are also available across Greater Sydney.</p>",
+			short_description:
+				"<p>Made-to-measure outdoor blinds manufactured in Sydney for DIY installation across Australia.</p>",
+			description:
+				"<h2>DIY Outdoor Blinds, Made to Measure</h2><p>Choose from Straight Drop, Cable Guide and ZipGrip zip-guided outdoor blinds, manufactured in Sydney to your measurements.</p><p>Order DIY blinds for delivery Australia-wide, with manual and motorised options available. Professional measuring and installation are also available across Greater Sydney.</p>",
 			title: "DIY Outdoor Blinds Online | Made to Measure | Blindmotion",
-			metadesc: "Shop Australian-made outdoor blinds online, including Straight Drop, Cable Guide and ZipGrip options. DIY delivery Australia-wide and Sydney installation.",
+			metadesc:
+				"Shop Australian-made outdoor blinds online, including Straight Drop, Cable Guide and ZipGrip options. DIY delivery Australia-wide and Sydney installation.",
 		},
 		{
 			product: product111,
-			short_description: "<p>A simple, durable outdoor blind with crank or motorised control, made to measure in Sydney.</p>",
-			description: "<h2>Straight Drop Outdoor Blinds</h2><p>A practical, good-looking outdoor blind made with durable galvanised and stainless-steel components. Straight Drop blinds can span wide openings and are available in outdoor mesh or clear PVC.</p><h2>Motorised Outdoor Blinds</h2><p>Choose convenient motorisation or a straightforward manual crank control to suit your outdoor area.</p><h2>Outdoor Blinds in Sydney</h2><p>Blindmotion manufactures these blinds in Sydney. Order DIY for delivery Australia-wide, or ask about professional measuring and installation across Greater Sydney.</p>",
+			short_description:
+				"<p>A simple, durable outdoor blind with crank or motorised control, made to measure in Sydney.</p>",
+			description:
+				"<h2>Straight Drop Outdoor Blinds</h2><p>A practical, good-looking outdoor blind made with durable galvanised and stainless-steel components. Straight Drop blinds can span wide openings and are available in outdoor mesh or clear PVC.</p><h2>Motorised Outdoor Blinds</h2><p>Choose convenient motorisation or a straightforward manual crank control to suit your outdoor area.</p><h2>Outdoor Blinds in Sydney</h2><p>Blindmotion manufactures these blinds in Sydney. Order DIY for delivery Australia-wide, or ask about professional measuring and installation across Greater Sydney.</p>",
 			title: "Straight Drop Outdoor Blinds | DIY From $229 | Blindmotion",
-			metadesc: "Australian-made Straight Drop outdoor blinds from $229. Custom sizes, manual or motorised controls, DIY delivery Australia-wide and Sydney installation.",
-			previousMetadesc: "A heavy duty, traditional outdoor blind able to span up to 6 metres and drop 3 metres. Made with heavy duty galvanised and stainless steel parts.",
+			metadesc:
+				"Australian-made Straight Drop outdoor blinds from $229. Custom sizes, manual or motorised controls, DIY delivery Australia-wide and Sydney installation.",
+			previousMetadesc:
+				"A heavy duty, traditional outdoor blind able to span up to 6 metres and drop 3 metres. Made with heavy duty galvanised and stainless steel parts.",
 		},
 		{
 			product: product1301,
-			short_description: "<p>ZipGrip side-retention outdoor blinds, made to measure with manual or motorised control.</p>",
-			description: "<h2>ZipGrip Zip-Guided Outdoor Blinds</h2><p>ZipGrip uses a side-retention system to hold the fabric neatly within its guides, creating a clean and practical enclosure for patios, pergolas and alfresco areas.</p><p>Choose outdoor mesh or clear PVC, manual or motorised control, and colours to suit your space. Each blind is made to measure in Sydney and can be ordered for DIY delivery Australia-wide.</p>",
+			short_description:
+				"<p>ZipGrip side-retention outdoor blinds, made to measure with manual or motorised control.</p>",
+			description:
+				"<h2>ZipGrip Zip-Guided Outdoor Blinds</h2><p>ZipGrip uses a side-retention system to hold the fabric neatly within its guides, creating a clean and practical enclosure for patios, pergolas and alfresco areas.</p><p>Choose outdoor mesh or clear PVC, manual or motorised control, and colours to suit your space. Each blind is made to measure in Sydney and can be ordered for DIY delivery Australia-wide.</p>",
 			title: "Zip Track Outdoor Blinds | ZipGrip From $399 | Blindmotion",
-			metadesc: "Shop ZipGrip zip-guided outdoor blinds from $399. Made to measure in Sydney with manual or motorised controls and DIY delivery Australia-wide.",
+			metadesc:
+				"Shop ZipGrip zip-guided outdoor blinds from $399. Made to measure in Sydney with manual or motorised controls and DIY delivery Australia-wide.",
 		},
 	] as const;
 	const templateBackups = new Map<number, string>([
@@ -966,7 +1412,12 @@ async function applyOutdoorSeoFixes() {
 			}
 		}
 		for (const update of productUpdates) {
-			const titleMeta = productMetaUpdate(update.product, "_yoast_wpseo_title", "", update.title);
+			const titleMeta = productMetaUpdate(
+				update.product,
+				"_yoast_wpseo_title",
+				"",
+				update.title,
+			);
 			const descriptionMeta = productMetaUpdate(
 				update.product,
 				"_yoast_wpseo_metadesc",
@@ -991,7 +1442,9 @@ async function applyOutdoorSeoFixes() {
 						meta.key === "_yoast_wpseo_metadesc" && meta.value === update.metadesc,
 				)
 			) {
-				throw new Error(`Product ${update.product.id} did not verify after the WooCommerce write.`);
+				throw new Error(
+					`Product ${update.product.id} did not verify after the WooCommerce write.`,
+				);
 			}
 		}
 	} catch (error) {
@@ -1025,7 +1478,9 @@ async function applyOutdoorSeoFixes() {
 					],
 				});
 			} catch (rollbackError) {
-				rollbackErrors.push(`product ${applied.update.product.id}: ${String(rollbackError)}`);
+				rollbackErrors.push(
+					`product ${applied.update.product.id}: ${String(rollbackError)}`,
+				);
 			}
 		}
 		for (const templateId of appliedTemplates.reverse()) {
@@ -1589,8 +2044,7 @@ const META_REFRESH_SPRING_OFFER_REASON = "PROMOTE 20.5 PERCENT OFFER";
 const META_LEAD_AD_LINK = "https://fb.me/";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
 const META_SPRING_REPAIR_CAMPAIGN_ID = "52674105076400";
-const META_SPRING_REPAIR_CAMPAIGN_NAME =
-	"META | Leads | Beat The Spring Rush | Sydney | Sep 2026";
+const META_SPRING_REPAIR_CAMPAIGN_NAME = "META | Leads | Beat The Spring Rush | Sydney | Sep 2026";
 const META_SPRING_REPAIR_PAGE_ID = "1383784325241628";
 const META_WINTER_FORM_ID = "870161355942701";
 const META_WINTER_FORM_NAME = "Outdoor Blinds Winter Sale Quote Form (v1)";
@@ -2723,36 +3177,27 @@ function summarizeZipGripPmaxTree(rows: any[]) {
 		asset_group_status: row.assetGroup?.status ?? null,
 		filter_id: String(row.assetGroupListingGroupFilter?.id ?? ""),
 		resource_name: row.assetGroupListingGroupFilter?.resourceName ?? null,
-		parent_resource_name:
-			row.assetGroupListingGroupFilter?.parentListingGroupFilter ?? null,
+		parent_resource_name: row.assetGroupListingGroupFilter?.parentListingGroupFilter ?? null,
 		type: row.assetGroupListingGroupFilter?.type ?? null,
 		listing_source: row.assetGroupListingGroupFilter?.listingSource ?? null,
 		case_value: row.assetGroupListingGroupFilter?.caseValue ?? null,
 		path: row.assetGroupListingGroupFilter?.path ?? null,
-		product_brand:
-			row.assetGroupListingGroupFilter?.caseValue?.productBrand?.value ?? null,
+		product_brand: row.assetGroupListingGroupFilter?.caseValue?.productBrand?.value ?? null,
 		product_category_id:
-			row.assetGroupListingGroupFilter?.caseValue?.productCategory?.categoryId ??
-			null,
+			row.assetGroupListingGroupFilter?.caseValue?.productCategory?.categoryId ?? null,
 		product_category_level:
 			row.assetGroupListingGroupFilter?.caseValue?.productCategory?.level ?? null,
 		product_channel:
 			row.assetGroupListingGroupFilter?.caseValue?.productChannel?.channel ?? null,
 		product_condition:
-			row.assetGroupListingGroupFilter?.caseValue?.productCondition?.condition ??
-			null,
+			row.assetGroupListingGroupFilter?.caseValue?.productCondition?.condition ?? null,
 		product_custom_attribute_index:
-			row.assetGroupListingGroupFilter?.caseValue?.productCustomAttribute?.index ??
-			null,
+			row.assetGroupListingGroupFilter?.caseValue?.productCustomAttribute?.index ?? null,
 		product_custom_attribute_value:
-			row.assetGroupListingGroupFilter?.caseValue?.productCustomAttribute?.value ??
-			null,
-		product_item_id:
-			row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ?? null,
-		product_type_level:
-			row.assetGroupListingGroupFilter?.caseValue?.productType?.level ?? null,
-		product_type_value:
-			row.assetGroupListingGroupFilter?.caseValue?.productType?.value ?? null,
+			row.assetGroupListingGroupFilter?.caseValue?.productCustomAttribute?.value ?? null,
+		product_item_id: row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ?? null,
+		product_type_level: row.assetGroupListingGroupFilter?.caseValue?.productType?.level ?? null,
+		product_type_value: row.assetGroupListingGroupFilter?.caseValue?.productType?.value ?? null,
 		is_root: !row.assetGroupListingGroupFilter?.parentListingGroupFilter,
 	}));
 }
@@ -2767,8 +3212,7 @@ function summarizeZipGripShoppingTree(rows: any[]) {
 		ad_group_status: row.adGroup?.status ?? null,
 		criterion_id: String(row.adGroupCriterion?.criterionId ?? ""),
 		resource_name: row.adGroupCriterion?.resourceName ?? null,
-		parent_resource_name:
-			row.adGroupCriterion?.listingGroup?.parentAdGroupCriterion ?? null,
+		parent_resource_name: row.adGroupCriterion?.listingGroup?.parentAdGroupCriterion ?? null,
 		type: row.adGroupCriterion?.listingGroup?.type ?? null,
 		status: row.adGroupCriterion?.status ?? null,
 		negative: Boolean(row.adGroupCriterion?.negative),
@@ -2779,11 +3223,7 @@ function summarizeZipGripShoppingTree(rows: any[]) {
 	}));
 }
 
-function zipGripLaunchTreeError(
-	message: string,
-	pmaxRows: any[],
-	shoppingRows: any[],
-) {
+function zipGripLaunchTreeError(message: string, pmaxRows: any[], shoppingRows: any[]) {
 	return Object.assign(new Error(message), {
 		zipGripLaunchDiagnostics: {
 			source_pmax_listing_tree: summarizeZipGripPmaxTree(pmaxRows),
@@ -2952,8 +3392,7 @@ async function getZipGripExclusiveLaunchPlan() {
 				String(row.assetGroup?.id ?? "") === "6591192784" &&
 				filter?.type === "UNIT_INCLUDED" &&
 				filter?.caseValue?.productType?.level === "LEVEL2" &&
-				filter?.caseValue?.productType?.value ===
-					"zip sided outdoor blinds" &&
+				filter?.caseValue?.productType?.value === "zip sided outdoor blinds" &&
 				Boolean(filter.parentListingGroupFilter) &&
 				Boolean(filter.resourceName)
 			);
@@ -2971,8 +3410,7 @@ async function getZipGripExclusiveLaunchPlan() {
 		const assetGroup =
 			row.assetGroup?.resourceName ??
 			`customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroups/${assetGroupId}`;
-		const subdivision =
-			`customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`;
+		const subdivision = `customers/${GOOGLE_ADS_ZIPGRIP_CUSTOMER_ID}/assetGroupListingGroupFilters/${assetGroupId}~${tempId--}`;
 		operations.push(
 			{ assetGroupListingGroupFilterOperation: { remove: leaf.resourceName } },
 			{
@@ -3317,8 +3755,7 @@ function productPmaxPlan(identity: ProductPmaxIdentity, dailyBudgetAud: number) 
 	const budgetResource = `customers/${customerId}/campaignBudgets/-1`;
 	const campaignResource = `customers/${customerId}/campaigns/-2`;
 	const assetGroupResource = `customers/${customerId}/assetGroups/-3`;
-	const rootFilterResource =
-		`customers/${customerId}/assetGroupListingGroupFilters/-3~-4`;
+	const rootFilterResource = `customers/${customerId}/assetGroupListingGroupFilters/-3~-4`;
 	const mutateOperations = [
 		{
 			campaignBudgetOperation: {
@@ -3346,13 +3783,11 @@ function productPmaxPlan(identity: ProductPmaxIdentity, dailyBudgetAud: number) 
 					},
 					assetAutomationSettings: [
 						{
-							assetAutomationType:
-								"FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION",
+							assetAutomationType: "FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION",
 							assetAutomationStatus: "OPTED_OUT",
 						},
 					],
-					containsEuPoliticalAdvertising:
-						"DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+					containsEuPoliticalAdvertising: "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
 				},
 			},
 		},
@@ -3361,8 +3796,7 @@ function productPmaxPlan(identity: ProductPmaxIdentity, dailyBudgetAud: number) 
 				create: {
 					campaign: campaignResource,
 					location: {
-						geoTargetConstant:
-							`geoTargetConstants/${GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID}`,
+						geoTargetConstant: `geoTargetConstants/${GOOGLE_ADS_AUSTRALIA_GEO_TARGET_ID}`,
 					},
 				},
 			},
@@ -3372,8 +3806,7 @@ function productPmaxPlan(identity: ProductPmaxIdentity, dailyBudgetAud: number) 
 				create: {
 					campaign: campaignResource,
 					language: {
-						languageConstant:
-							`languageConstants/${GOOGLE_ADS_ENGLISH_LANGUAGE_ID}`,
+						languageConstant: `languageConstants/${GOOGLE_ADS_ENGLISH_LANGUAGE_ID}`,
 					},
 				},
 			},
@@ -3403,8 +3836,7 @@ function productPmaxPlan(identity: ProductPmaxIdentity, dailyBudgetAud: number) 
 		{
 			assetGroupListingGroupFilterOperation: {
 				create: {
-					resourceName:
-						`customers/${customerId}/assetGroupListingGroupFilters/-3~-5`,
+					resourceName: `customers/${customerId}/assetGroupListingGroupFilters/-3~-5`,
 					assetGroup: assetGroupResource,
 					parentListingGroupFilter: rootFilterResource,
 					type: "UNIT_INCLUDED",
@@ -3416,8 +3848,7 @@ function productPmaxPlan(identity: ProductPmaxIdentity, dailyBudgetAud: number) 
 		{
 			assetGroupListingGroupFilterOperation: {
 				create: {
-					resourceName:
-						`customers/${customerId}/assetGroupListingGroupFilters/-3~-6`,
+					resourceName: `customers/${customerId}/assetGroupListingGroupFilters/-3~-6`,
 					assetGroup: assetGroupResource,
 					parentListingGroupFilter: rootFilterResource,
 					type: "UNIT_EXCLUDED",
@@ -3492,8 +3923,7 @@ async function getProductPmaxAssetState(args: {
 		assetGroup?.name !== identity.assetGroupName ||
 		assetGroup?.finalUrls?.length !== 1 ||
 		assetGroup.finalUrls[0] !== identity.finalUrl ||
-		(requirePaused &&
-			(campaign?.status !== "PAUSED" || assetGroup?.status !== "PAUSED"))
+		(requirePaused && (campaign?.status !== "PAUSED" || assetGroup?.status !== "PAUSED"))
 	) {
 		throw new Error(
 			"Refusing product PMax access: campaign, asset group, landing page or paused state did not match.",
@@ -3511,8 +3941,7 @@ async function getProductPmaxAssetState(args: {
 	const included = listing.filter(
 		(row) =>
 			row.assetGroupListingGroupFilter?.type === "UNIT_INCLUDED" &&
-			row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ===
-				identity.itemId,
+			row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value === identity.itemId,
 	);
 	const excludedOther = listing.filter(
 		(row) =>
@@ -3598,9 +4027,7 @@ async function getProductPmaxAssetState(args: {
 		campaign_brand_assets: campaignAssets,
 		counts,
 		completeness,
-		minimum_complete: Object.values(completeness).every(
-			(value: any) => value.meets_minimum,
-		),
+		minimum_complete: Object.values(completeness).every((value: any) => value.meets_minimum),
 	};
 }
 
@@ -3611,9 +4038,7 @@ function buildProductPmaxAssetLinkOperation(
 	fieldType: string,
 	brandGuidelinesEnabled: boolean,
 ) {
-	const isBrandAsset = ["BUSINESS_NAME", "LOGO", "LANDSCAPE_LOGO"].includes(
-		fieldType,
-	);
+	const isBrandAsset = ["BUSINESS_NAME", "LOGO", "LANDSCAPE_LOGO"].includes(fieldType);
 	if (brandGuidelinesEnabled && isBrandAsset) {
 		return {
 			campaignAssetOperation: {
@@ -4076,8 +4501,7 @@ function githubPemToPkcs8(pem: string) {
 
 	const version = new Uint8Array([0x02, 0x01, 0x00]);
 	const rsaAlgorithmIdentifier = new Uint8Array([
-		0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
-		0x05, 0x00,
+		0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
 	]);
 	return githubDer(0x30, githubConcat(version, rsaAlgorithmIdentifier, githubDer(0x04, der)));
 }
@@ -4092,7 +4516,10 @@ function getGithubAppConfig() {
 			"GitHub App is not configured. Set GITHUB_APP_ID, GITHUB_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY in Cloudflare.",
 		);
 	}
-	if (appId !== GITHUB_APP_EXPECTED_ID || installationId !== GITHUB_APP_EXPECTED_INSTALLATION_ID) {
+	if (
+		appId !== GITHUB_APP_EXPECTED_ID ||
+		installationId !== GITHUB_APP_EXPECTED_INSTALLATION_ID
+	) {
 		throw new Error("GitHub App IDs do not match the locked Blindmotion installation.");
 	}
 	return { appId, installationId, privateKey };
@@ -4265,7 +4692,9 @@ function createServer() {
 					Number(repository.data?.id) !== GITHUB_REPO_ID ||
 					String(repository.data?.full_name) !== GITHUB_REPO_FULL_NAME
 				) {
-					throw new Error("GitHub installation token resolved to an unexpected repository.");
+					throw new Error(
+						"GitHub installation token resolved to an unexpected repository.",
+					);
 				}
 				return toolResult({
 					configured: true,
@@ -4294,7 +4723,10 @@ function createServer() {
 				"Read one permitted Blindmotion MCP source file from the exact current main commit through the repository-scoped GitHub App. Returns content and blob SHA; cannot read any other path or ref.",
 			inputSchema: z.object({
 				path: z.enum(["src/index.ts", "README.md"]),
-				expected_main_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+				expected_main_sha: z
+					.string()
+					.regex(/^[0-9a-f]{40}$/)
+					.optional(),
 			}),
 		},
 		async ({ path, expected_main_sha }) => {
@@ -4306,10 +4738,7 @@ function createServer() {
 						`main changed since review. Expected ${expected_main_sha}, current ${main.sha}. Re-read before continuing.`,
 					);
 				}
-				const file = await githubRepoRequest(
-					token,
-					`/contents/${path}?ref=${main.sha}`,
-				);
+				const file = await githubRepoRequest(token, `/contents/${path}?ref=${main.sha}`);
 				if (
 					file.data?.type !== "file" ||
 					typeof file.data?.content !== "string" ||
@@ -4338,8 +4767,7 @@ function createServer() {
 	server.registerTool(
 		"create_blindmotion_mcp_draft_pr_guarded",
 		{
-			description:
-				`Create one atomic draft PR in ${GITHUB_REPO_FULL_NAME} from the exact current main SHA. It can replace only src/index.ts and/or README.md, cannot modify workflows or dependencies, cannot update main, and cannot merge. Requires exact confirmation: ${GITHUB_PATCH_CONFIRMATION}`,
+			description: `Create one atomic draft PR in ${GITHUB_REPO_FULL_NAME} from the exact current main SHA. It can replace only src/index.ts and/or README.md, cannot modify workflows or dependencies, cannot update main, and cannot merge. Requires exact confirmation: ${GITHUB_PATCH_CONFIRMATION}`,
 			inputSchema: z.object({
 				confirmation: z.string(),
 				expected_main_sha: z.string().regex(/^[0-9a-f]{40}$/),
@@ -4370,7 +4798,9 @@ function createServer() {
 		}) => {
 			try {
 				if (confirmation !== GITHUB_PATCH_CONFIRMATION) {
-					throw new Error(`Confirmation must exactly equal: ${GITHUB_PATCH_CONFIRMATION}`);
+					throw new Error(
+						`Confirmation must exactly equal: ${GITHUB_PATCH_CONFIRMATION}`,
+					);
 				}
 				if (new Set(files.map((file) => file.path)).size !== files.length) {
 					throw new Error("Each permitted file may appear only once.");
@@ -4383,7 +4813,9 @@ function createServer() {
 					Number(repository.data?.id) !== GITHUB_REPO_ID ||
 					String(repository.data?.full_name) !== GITHUB_REPO_FULL_NAME
 				) {
-					throw new Error("GitHub installation token resolved to an unexpected repository.");
+					throw new Error(
+						"GitHub installation token resolved to an unexpected repository.",
+					);
 				}
 				const main = await getGithubMainState(token);
 				if (main.sha !== expected_main_sha) {
@@ -4399,7 +4831,9 @@ function createServer() {
 					{ acceptedStatuses: [404] },
 				);
 				if (existingBranch.status !== 404) {
-					throw new Error(`Branch ${branchName} already exists; choose a new branch_slug.`);
+					throw new Error(
+						`Branch ${branchName} already exists; choose a new branch_slug.`,
+					);
 				}
 
 				const tree: Array<{ path: string; mode: string; type: string; sha: string }> = [];
@@ -4417,7 +4851,12 @@ function createServer() {
 						method: "POST",
 						body: { content: file.content, encoding: "utf-8" },
 					});
-					tree.push({ path: file.path, mode: "100644", type: "blob", sha: blob.data.sha });
+					tree.push({
+						path: file.path,
+						mode: "100644",
+						type: "blob",
+						sha: blob.data.sha,
+					});
 				}
 
 				const createdTree = await githubRepoRequest(token, "/git/trees", {
@@ -4458,7 +4897,8 @@ function createServer() {
 					draft: pullRequest.data.draft,
 					changed_files: files.map((file) => file.path),
 					merged: false,
-					next_step: "Review checks and diff in GitHub. Merge remains an external, explicit action.",
+					next_step:
+						"Review checks and diff in GitHub. Merge remains an external, explicit action.",
 				});
 			} catch (error) {
 				return toolError(error);
@@ -4469,8 +4909,7 @@ function createServer() {
 	server.registerTool(
 		"inspect_blindmotion_mcp_pull_request",
 		{
-			description:
-				`Inspect one pull request in ${GITHUB_REPO_FULL_NAME}, including its base/head commits and changed-file summary. Read-only and cannot approve or merge.`,
+			description: `Inspect one pull request in ${GITHUB_REPO_FULL_NAME}, including its base/head commits and changed-file summary. Read-only and cannot approve or merge.`,
 			inputSchema: z.object({ pull_request_number: z.number().int().positive() }),
 		},
 		async ({ pull_request_number }) => {
@@ -5240,6 +5679,282 @@ function createServer() {
 		},
 	);
 
+	const fabricSamplePlanSchema = z
+		.object({
+			source_product_id: z.number().int().positive(),
+			expected_source_name: z.string().trim().min(1).max(200),
+			expected_source_status: z.enum(["publish", "draft", "private", "pending"]),
+			destination_product_id: z.number().int().positive(),
+			expected_destination_name: z.string().trim().min(1).max(200),
+			source_fabric_selector_field_id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
+			destination_product_selector_field_id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
+			destination_colour_template_field_id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
+			sample_product_label: z.string().trim().min(1).max(100),
+		})
+		.refine((value) => value.source_product_id !== value.destination_product_id, {
+			message: "Source and destination products must differ.",
+		});
+
+	async function loadFabricSampleProducts(input: z.infer<typeof fabricSamplePlanSchema>) {
+		const [sourceResponse, destinationResponse] = await Promise.all([
+			wcFetch(`products/${input.source_product_id}`),
+			wcFetch(`products/${input.destination_product_id}`),
+		]);
+		const [source, destination] = await Promise.all([
+			sourceResponse.json<any>(),
+			destinationResponse.json<any>(),
+		]);
+		if (
+			source.id !== input.source_product_id ||
+			source.name !== input.expected_source_name ||
+			source.status !== input.expected_source_status
+		) {
+			throw new Error("The source product identity or expected status changed.");
+		}
+		if (
+			destination.id !== input.destination_product_id ||
+			destination.name !== input.expected_destination_name ||
+			destination.status !== "draft" ||
+			destination.catalog_visibility !== "hidden"
+		) {
+			throw new Error(
+				"The destination must be the exactly named draft, hidden Fabric Sample copy.",
+			);
+		}
+		return { source, destination };
+	}
+
+	server.registerTool(
+		"preview_product_fabric_sample_setup",
+		{
+			description:
+				"Build a read-only, deterministic plan for adding one source product's fabric ranges and colour swatches to an explicitly identified draft/hidden Fabric Sample copy. Product IDs, names and WAPF field IDs are parameters; it performs no writes and returns exact hashes required by the guarded apply tool.",
+			inputSchema: fabricSamplePlanSchema,
+		},
+		async (input) => {
+			try {
+				const { source, destination } = await loadFabricSampleProducts(input);
+				const plan = await buildFabricSamplePlan(source, destination, {
+					sourceProductId: input.source_product_id,
+					destinationProductId: input.destination_product_id,
+					sourceFabricSelectorFieldId: input.source_fabric_selector_field_id,
+					destinationProductSelectorFieldId: input.destination_product_selector_field_id,
+					destinationColourTemplateFieldId: input.destination_colour_template_field_id,
+					sampleProductLabel: input.sample_product_label,
+				});
+				return toolResult({
+					read_only: true,
+					source: {
+						id: source.id,
+						name: source.name,
+						status: source.status,
+						wapf_meta_data_id: plan.sourceWapf.meta.id,
+						wapf_sha256: plan.sourceHash,
+					},
+					destination: {
+						id: destination.id,
+						name: destination.name,
+						status: destination.status,
+						catalog_visibility: destination.catalog_visibility,
+						wapf_meta_data_id: plan.destinationWapf.meta.id,
+						wapf_sha256: plan.destinationHash,
+						current_field_count: plan.destinationWapf.group.fields.length,
+						planned_field_count: plan.updatedGroup.fields.length,
+					},
+					plan: {
+						plan_sha256: plan.planHash,
+						product_choice: {
+							label: plan.newProductChoice.label,
+							slug: plan.newProductChoice.slug,
+							attachment: plan.newProductChoice.attachment,
+						},
+						fabric_selector: wapfFieldSummary(plan.newSelector, -1),
+						colour_fields: plan.newColourFields.map((field, index) =>
+							wapfFieldSummary(field, index),
+						),
+						colour_choice_count: plan.newColourFields.reduce(
+							(total, field) => total + field.options.choices.length,
+							0,
+						),
+					},
+					write_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_product_fabric_sample_setup_guarded",
+		{
+			description: `Apply one exact preflighted fabric-sample plan to an explicitly identified draft/hidden Fabric Sample copy. Revalidates product identities, source/destination WAPF hashes and the deterministic plan hash; preserves the live sample product, strips pricing from copied choices, verifies the full result and rolls back exactly on failure. Cannot publish. Requires exact confirmation: ${FABRIC_SAMPLE_SETUP_CONFIRMATION}`,
+			inputSchema: fabricSamplePlanSchema.extend({
+				expected_source_wapf_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+				expected_destination_wapf_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+				expected_plan_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+				confirmation: z.literal(FABRIC_SAMPLE_SETUP_CONFIRMATION),
+			}),
+		},
+		async (input) => {
+			let originalValue: unknown;
+			let destinationMetaId: number | undefined;
+			let writeCompleted = false;
+			try {
+				const { source, destination } = await loadFabricSampleProducts(input);
+				const plan = await buildFabricSamplePlan(source, destination, {
+					sourceProductId: input.source_product_id,
+					destinationProductId: input.destination_product_id,
+					sourceFabricSelectorFieldId: input.source_fabric_selector_field_id,
+					destinationProductSelectorFieldId: input.destination_product_selector_field_id,
+					destinationColourTemplateFieldId: input.destination_colour_template_field_id,
+					sampleProductLabel: input.sample_product_label,
+				});
+				if (
+					plan.sourceHash !== input.expected_source_wapf_sha256 ||
+					plan.destinationHash !== input.expected_destination_wapf_sha256 ||
+					plan.planHash !== input.expected_plan_sha256
+				) {
+					throw new Error(
+						"The source, destination or planned Fabric Sample configuration changed after preflight.",
+					);
+				}
+
+				originalValue = plan.destinationWapf.meta.value;
+				destinationMetaId = Number(plan.destinationWapf.meta.id);
+				if (!Number.isInteger(destinationMetaId) || destinationMetaId <= 0) {
+					throw new Error("The destination WAPF metadata ID is invalid.");
+				}
+				const untouchedState = JSON.stringify({
+					name: destination.name,
+					slug: destination.slug,
+					type: destination.type,
+					price: destination.price,
+					regular_price: destination.regular_price,
+					sale_price: destination.sale_price,
+					description: destination.description,
+					short_description: destination.short_description,
+					images: destination.images,
+					categories: destination.categories,
+					attributes: destination.attributes,
+					sold_individually: destination.sold_individually,
+				});
+
+				await wcWrite(`products/${input.destination_product_id}`, {
+					status: "draft",
+					catalog_visibility: "hidden",
+					meta_data: [
+						{
+							id: destinationMetaId,
+							key: "_wapf_fieldgroup",
+							value: plan.updatedGroup,
+						},
+					],
+				});
+				writeCompleted = true;
+
+				const verificationResponse = await wcFetch(
+					`products/${input.destination_product_id}`,
+				);
+				const verified = await verificationResponse.json<any>();
+				const verifiedWapf = singleWapfFieldGroup(verified);
+				const verifiedHash = await sha256Hex(
+					new TextEncoder().encode(JSON.stringify(verifiedWapf.group)),
+				);
+				const verifiedUntouchedState = JSON.stringify({
+					name: verified.name,
+					slug: verified.slug,
+					type: verified.type,
+					price: verified.price,
+					regular_price: verified.regular_price,
+					sale_price: verified.sale_price,
+					description: verified.description,
+					short_description: verified.short_description,
+					images: verified.images,
+					categories: verified.categories,
+					attributes: verified.attributes,
+					sold_individually: verified.sold_individually,
+				});
+				if (
+					verified.id !== input.destination_product_id ||
+					verified.name !== input.expected_destination_name ||
+					verified.status !== "draft" ||
+					verified.catalog_visibility !== "hidden" ||
+					Number(verifiedWapf.meta.id) !== destinationMetaId ||
+					verifiedHash !== plan.planHash ||
+					verifiedUntouchedState !== untouchedState
+				) {
+					throw new Error("Post-write Fabric Sample verification failed.");
+				}
+
+				return toolResult({
+					updated: true,
+					source: { id: source.id, name: source.name, modified: false },
+					destination: {
+						id: verified.id,
+						name: verified.name,
+						status: verified.status,
+						catalog_visibility: verified.catalog_visibility,
+						wapf_meta_data_id: destinationMetaId,
+						wapf_sha256: verifiedHash,
+					},
+					added_product_choice: plan.newProductChoice.label,
+					added_fabric_ranges: plan.newSelector.options.choices.map(
+						(choice: any) => choice.label,
+					),
+					added_colour_choice_count: plan.newColourFields.reduce(
+						(total, field) => total + field.options.choices.length,
+						0,
+					),
+					pricing_removed: true,
+					publication_performed: false,
+				});
+			} catch (error) {
+				if (writeCompleted && destinationMetaId && originalValue !== undefined) {
+					try {
+						await wcWrite(`products/${input.destination_product_id}`, {
+							status: "draft",
+							catalog_visibility: "hidden",
+							meta_data: [
+								{
+									id: destinationMetaId,
+									key: "_wapf_fieldgroup",
+									value: originalValue,
+								},
+							],
+						});
+						const rollbackResponse = await wcFetch(
+							`products/${input.destination_product_id}`,
+						);
+						const rolledBack = await rollbackResponse.json<any>();
+						const rolledBackWapf = singleWapfFieldGroup(rolledBack);
+						const rollbackHash = await sha256Hex(
+							new TextEncoder().encode(JSON.stringify(rolledBackWapf.meta.value)),
+						);
+						if (
+							rolledBack.status !== "draft" ||
+							rolledBack.catalog_visibility !== "hidden" ||
+							rollbackHash !== input.expected_destination_wapf_sha256
+						) {
+							const rollbackVerificationError = new Error(
+								"Exact Fabric Sample rollback verification failed.",
+							);
+							(rollbackVerificationError as any).cause = error;
+							throw rollbackVerificationError;
+						}
+					} catch (rollbackError) {
+						return toolError(
+							new Error(
+								`${error instanceof Error ? error.message : String(error)} Rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+							),
+						);
+					}
+				}
+				return toolError(error);
+			}
+		},
+	);
+
 	server.registerTool(
 		"inspect_product_elementor_rendering",
 		{
@@ -5344,7 +6059,9 @@ function createServer() {
 				const raw = wpProduct.meta?.["_elementor_data"];
 				const data = parseElementorData(raw);
 				if (!data || typeof raw !== "string") {
-					throw new Error("TotalBlock product-level Elementor data is unavailable or malformed.");
+					throw new Error(
+						"TotalBlock product-level Elementor data is unavailable or malformed.",
+					);
 				}
 				return toolResult({
 					product: {
@@ -5403,13 +6120,26 @@ function createServer() {
 						"Locked TotalBlock product identity or draft/hidden state changed; refusing the content update.",
 					);
 				}
-				if (!["", "blindmotion-totalblock-cassette-blind", TOTALBLOCK_PRODUCT_SLUG].includes(target.slug)) {
-					throw new Error(`Unexpected current slug on locked TotalBlock product: ${target.slug}.`);
+				if (
+					![
+						"",
+						"blindmotion-totalblock-cassette-blind",
+						TOTALBLOCK_PRODUCT_SLUG,
+					].includes(target.slug)
+				) {
+					throw new Error(
+						`Unexpected current slug on locked TotalBlock product: ${target.slug}.`,
+					);
 				}
 				if (source.id !== 1301 || source.name !== "Zip Sided Outdoor Blinds") {
-					throw new Error("Source product 1301 identity changed; refusing the content update.");
+					throw new Error(
+						"Source product 1301 identity changed; refusing the content update.",
+					);
 				}
-				if (category.id !== TOTALBLOCK_PRODUCT_CATEGORY_ID || category.name !== "Blinds [Geo]") {
+				if (
+					category.id !== TOTALBLOCK_PRODUCT_CATEGORY_ID ||
+					category.name !== "Blinds [Geo]"
+				) {
 					throw new Error("Locked internal-blinds category 74 identity changed.");
 				}
 				const slugConflict = slugMatches.find(
@@ -5422,7 +6152,10 @@ function createServer() {
 				}
 
 				const sourceMeta = new Map<string, string>(
-					(source.meta_data ?? []).map((meta: any) => [String(meta.key), String(meta.value ?? "")]),
+					(source.meta_data ?? []).map((meta: any) => [
+						String(meta.key),
+						String(meta.value ?? ""),
+					]),
 				);
 				const seoUpdates = [
 					["_yoast_wpseo_title", TOTALBLOCK_SEO_TITLE],
@@ -5465,7 +6198,10 @@ function createServer() {
 				const verificationResponse = await wcFetch(`products/${TOTALBLOCK_PRODUCT_ID}`);
 				const verified = await verificationResponse.json<any>();
 				const verifiedMeta = new Map(
-					(verified.meta_data ?? []).map((meta: any) => [String(meta.key), String(meta.value ?? "")]),
+					(verified.meta_data ?? []).map((meta: any) => [
+						String(meta.key),
+						String(meta.value ?? ""),
+					]),
 				);
 				const verificationFailures = [
 					verified.name !== TOTALBLOCK_PRODUCT_NAME && "name",
@@ -5475,9 +6211,11 @@ function createServer() {
 					normalizeTotalBlockHtml(verified.description) !==
 						normalizeTotalBlockHtml(TOTALBLOCK_DESCRIPTION) && "description",
 					normalizeTotalBlockHtml(verified.short_description) !==
-						normalizeTotalBlockHtml(TOTALBLOCK_SHORT_DESCRIPTION) && "short_description",
+						normalizeTotalBlockHtml(TOTALBLOCK_SHORT_DESCRIPTION) &&
+						"short_description",
 					(verified.categories?.length !== 1 ||
-						verified.categories[0]?.id !== TOTALBLOCK_PRODUCT_CATEGORY_ID) && "categories",
+						verified.categories[0]?.id !== TOTALBLOCK_PRODUCT_CATEGORY_ID) &&
+						"categories",
 					...seoUpdates.map(
 						([key, value]) => verifiedMeta.get(key) !== value && `metadata:${key}`,
 					),
@@ -5654,7 +6392,9 @@ function createServer() {
 						(meta: any) => String(meta.key) === "_wapf_fieldgroup",
 					);
 					if (matches.length !== 1 || matches[0].id !== metaId) {
-						throw new Error(`Locked WAPF metadata ${metaId} changed on product ${product.id}.`);
+						throw new Error(
+							`Locked WAPF metadata ${metaId} changed on product ${product.id}.`,
+						);
 					}
 					const group = parseWapfFieldGroup(matches[0].value);
 					if (!group || !Array.isArray(group.fields)) {
@@ -5667,8 +6407,8 @@ function createServer() {
 				const premiumWapf = lockedWapf(premium, TOTALBLOCK_FABRIC_SOURCE_META_ID);
 				const vibeWapf = lockedWapf(everyday, TOTALBLOCK_VIBE_SOURCE_META_ID);
 				const hashes = await Promise.all(
-					[targetWapf.meta.value, premiumWapf.meta.value, vibeWapf.meta.value].map((value) =>
-						sha256Hex(new TextEncoder().encode(JSON.stringify(value))),
+					[targetWapf.meta.value, premiumWapf.meta.value, vibeWapf.meta.value].map(
+						(value) => sha256Hex(new TextEncoder().encode(JSON.stringify(value))),
 					),
 				);
 				if (
@@ -5676,7 +6416,9 @@ function createServer() {
 					hashes[1] !== TOTALBLOCK_FABRIC_SOURCE_HASH ||
 					hashes[2] !== TOTALBLOCK_VIBE_SOURCE_HASH
 				) {
-					throw new Error("A locked WAPF source changed after inspection; refusing write.");
+					throw new Error(
+						"A locked WAPF source changed after inspection; refusing write.",
+					);
 				}
 				if (
 					targetWapf.group.fields.length !== 26 ||
@@ -5731,9 +6473,13 @@ function createServer() {
 					...targetWapf.group.fields.slice(15),
 				];
 				const retainedSerialized = JSON.stringify(retainedFields);
-				const staleReferences = removedIds.filter((id: string) => retainedSerialized.includes(id));
+				const staleReferences = removedIds.filter((id: string) =>
+					retainedSerialized.includes(id),
+				);
 				if (staleReferences.length > 0) {
-					throw new Error(`Retained TotalBlock fields reference removed fabric IDs: ${staleReferences}.`);
+					throw new Error(
+						`Retained TotalBlock fields reference removed fabric IDs: ${staleReferences}.`,
+					);
 				}
 
 				const newFabricFields = JSON.parse(
@@ -5763,7 +6509,8 @@ function createServer() {
 				};
 				for (const choice of selector.options.choices) {
 					const formula = pricingBySlug[String(choice.slug)];
-					if (!formula) throw new Error(`Unexpected TotalBlock fabric choice ${choice.slug}.`);
+					if (!formula)
+						throw new Error(`Unexpected TotalBlock fabric choice ${choice.slug}.`);
 					choice.pricing_type = "fx";
 					choice.pricing_amount = formula;
 				}
@@ -5780,15 +6527,21 @@ function createServer() {
 					},
 				];
 				const newIds = newFabricFields.map((field: any) => String(field.id));
-				const conflictingNewIds = newIds.filter((id: string) => retainedSerialized.includes(id));
+				const conflictingNewIds = newIds.filter((id: string) =>
+					retainedSerialized.includes(id),
+				);
 				if (new Set(newIds).size !== newIds.length || conflictingNewIds.length > 0) {
-					throw new Error("New TotalBlock fabric field IDs are duplicated or conflict with retained fields.");
+					throw new Error(
+						"New TotalBlock fabric field IDs are duplicated or conflict with retained fields.",
+					);
 				}
 				const conditionalFieldIds = [
 					...JSON.stringify(newFabricFields.slice(1)).matchAll(/"field":"([^"]+)"/g),
 				].map((match) => match[1]);
 				if (conditionalFieldIds.some((id) => !newIds.includes(id))) {
-					throw new Error("New TotalBlock fabric subtree has an external field dependency.");
+					throw new Error(
+						"New TotalBlock fabric subtree has an external field dependency.",
+					);
 				}
 
 				const updatedGroup = JSON.parse(JSON.stringify(targetWapf.group));
@@ -5944,7 +6697,9 @@ function createServer() {
 						(meta: any) => String(meta.key) === "_wapf_fieldgroup",
 					);
 					if (matches.length !== 1 || matches[0].id !== metaId) {
-						throw new Error(`Locked WAPF metadata ${metaId} changed on product ${product.id}.`);
+						throw new Error(
+							`Locked WAPF metadata ${metaId} changed on product ${product.id}.`,
+						);
 					}
 					const group = parseWapfFieldGroup(matches[0].value);
 					if (!group || !Array.isArray(group.fields)) {
@@ -5966,7 +6721,9 @@ function createServer() {
 					targetWapf.group.fields.length !== 23 ||
 					sourceWapf.group.fields.length !== 125
 				) {
-					throw new Error("A locked TotalBlock or Duo Block source changed; refusing write.");
+					throw new Error(
+						"A locked TotalBlock or Duo Block source changed; refusing write.",
+					);
 				}
 
 				const selector = targetWapf.group.fields[7];
@@ -5974,8 +6731,9 @@ function createServer() {
 				if (
 					String(selector?.id) !== "690277bc86553" ||
 					wapfFieldLabel(selector) !== "Blockout Fabric Options" ||
-					JSON.stringify(selector?.options?.choices?.map((choice: any) => choice.slug)) !==
-						JSON.stringify(["mdvec", "hlmfv", "dy9ua", "g5ugt"]) ||
+					JSON.stringify(
+						selector?.options?.choices?.map((choice: any) => choice.slug),
+					) !== JSON.stringify(["mdvec", "hlmfv", "dy9ua", "g5ugt"]) ||
 					JSON.stringify(targetColourFields.map(wapfFieldLabel)) !==
 						JSON.stringify([
 							"LeReve blockout colours",
@@ -6045,7 +6803,9 @@ function createServer() {
 				];
 				const retainedSerialized = JSON.stringify(updatedGroup.fields);
 				if (retainedSerialized.includes(`"id":"${newColours.id}"`)) {
-					throw new Error("Duo Block colour field ID conflicts with retained TotalBlock fields.");
+					throw new Error(
+						"Duo Block colour field ID conflicts with retained TotalBlock fields.",
+					);
 				}
 				updatedGroup.fields.splice(12, 0, newColours);
 
@@ -6099,7 +6859,14 @@ function createServer() {
 						verifiedState !== untouchedState ||
 						JSON.stringify(
 							verifiedSelector.options.choices.map((choice: any) => choice.label),
-						) !== JSON.stringify(["LeReve", "Linesque", "Palm Beach", "Vibe", "Duo Block"])
+						) !==
+							JSON.stringify([
+								"LeReve",
+								"Linesque",
+								"Palm Beach",
+								"Vibe",
+								"Duo Block",
+							])
 					) {
 						throw new Error("Post-write TotalBlock Duo Block verification failed.");
 					}
@@ -6203,7 +6970,9 @@ function createServer() {
 						(meta: any) => String(meta.key) === "_wapf_fieldgroup",
 					);
 					if (matches.length !== 1 || matches[0].id !== metaId) {
-						throw new Error(`Locked WAPF metadata ${metaId} changed on product ${product.id}.`);
+						throw new Error(
+							`Locked WAPF metadata ${metaId} changed on product ${product.id}.`,
+						);
 					}
 					const group = parseWapfFieldGroup(matches[0].value);
 					if (!group || !Array.isArray(group.fields)) {
@@ -6225,7 +6994,9 @@ function createServer() {
 					targetWapf.group.fields.length !== 24 ||
 					sourceWapf.group.fields.length !== 125
 				) {
-					throw new Error("A locked TotalBlock or Sanctuary source changed; refusing write.");
+					throw new Error(
+						"A locked TotalBlock or Sanctuary source changed; refusing write.",
+					);
 				}
 
 				const selector = targetWapf.group.fields[7];
@@ -6233,8 +7004,9 @@ function createServer() {
 				if (
 					String(selector?.id) !== "690277bc86553" ||
 					wapfFieldLabel(selector) !== "Blockout Fabric Options" ||
-					JSON.stringify(selector?.options?.choices?.map((choice: any) => choice.slug)) !==
-						JSON.stringify(["mdvec", "hlmfv", "dy9ua", "g5ugt", "k0gr7"]) ||
+					JSON.stringify(
+						selector?.options?.choices?.map((choice: any) => choice.slug),
+					) !== JSON.stringify(["mdvec", "hlmfv", "dy9ua", "g5ugt", "k0gr7"]) ||
 					JSON.stringify(targetColourFields.map(wapfFieldLabel)) !==
 						JSON.stringify([
 							"LeReve blockout colours",
@@ -6311,7 +7083,9 @@ function createServer() {
 				];
 				const retainedSerialized = JSON.stringify(updatedGroup.fields);
 				if (retainedSerialized.includes(`"id":"${newColours.id}"`)) {
-					throw new Error("Sanctuary colour field ID conflicts with retained TotalBlock fields.");
+					throw new Error(
+						"Sanctuary colour field ID conflicts with retained TotalBlock fields.",
+					);
 				}
 				updatedGroup.fields.splice(13, 0, newColours);
 
@@ -6386,7 +7160,14 @@ function createServer() {
 							catalog_visibility: verified.catalog_visibility,
 							price: verified.price,
 						},
-						fabric_ranges: ["LeReve", "Linesque", "Palm Beach", "Vibe", "Duo Block", "Sanctuary"],
+						fabric_ranges: [
+							"LeReve",
+							"Linesque",
+							"Palm Beach",
+							"Vibe",
+							"Duo Block",
+							"Sanctuary",
+						],
 						sanctuary_colours: expectedColours.map(([label]) => label),
 						pricing_group: 6,
 						publication_performed: false,
@@ -6502,8 +7283,7 @@ function createServer() {
 	server.registerTool(
 		"replace_totalblock_featured_image_guarded",
 		{
-			description:
-				`Upload or reuse an approved image and replace only the featured image of TotalBlock product ${TOTALBLOCK_PRODUCT_ID}. Preserves gallery images and all product configuration, records the previous attachment for rollback, and requires exact confirmation: ${TOTALBLOCK_FEATURED_IMAGE_CONFIRMATION}`,
+			description: `Upload or reuse an approved image and replace only the featured image of TotalBlock product ${TOTALBLOCK_PRODUCT_ID}. Preserves gallery images and all product configuration, records the previous attachment for rollback, and requires exact confirmation: ${TOTALBLOCK_FEATURED_IMAGE_CONFIRMATION}`,
 			inputSchema: z
 				.object({
 					expected_current_attachment_id: z
@@ -6563,7 +7343,9 @@ function createServer() {
 					product.name !== TOTALBLOCK_PRODUCT_NAME ||
 					product.slug !== TOTALBLOCK_PRODUCT_SLUG
 				) {
-					throw new Error("TotalBlock product identity check failed; no write performed.");
+					throw new Error(
+						"TotalBlock product identity check failed; no write performed.",
+					);
 				}
 				if (product.status !== "draft") {
 					throw new Error("TotalBlock is no longer draft; no write performed.");
@@ -6577,10 +7359,10 @@ function createServer() {
 					);
 				}
 				originalImages = product.images.map((image: any) => ({ id: Number(image.id) }));
-				if (
-					originalImages.some((image) => !Number.isInteger(image.id) || image.id <= 0)
-				) {
-					throw new Error("The current product image list is invalid; no write performed.");
+				if (originalImages.some((image) => !Number.isInteger(image.id) || image.id <= 0)) {
+					throw new Error(
+						"The current product image list is invalid; no write performed.",
+					);
 				}
 
 				let replacement: any;
@@ -6614,10 +7396,14 @@ function createServer() {
 					typeof replacement.source_url !== "string" ||
 					!/^image\/(jpeg|png|webp)$/i.test(replacement.mime_type ?? "")
 				) {
-					throw new Error("The replacement attachment is not a supported WordPress image.");
+					throw new Error(
+						"The replacement attachment is not a supported WordPress image.",
+					);
 				}
 				if (Number(replacement.id) === expected_current_attachment_id) {
-					throw new Error("The replacement attachment is already the current featured image.");
+					throw new Error(
+						"The replacement attachment is already the current featured image.",
+					);
 				}
 
 				const backupMeta = (product.meta_data ?? []).find(
@@ -6632,15 +7418,14 @@ function createServer() {
 					old_featured_source_url: product.images[0]?.src ?? null,
 					new_featured_attachment_id: Number(replacement.id),
 					new_featured_source_url: replacement.source_url,
-					original_gallery_attachment_ids: originalImages.slice(1).map((image) => image.id),
+					original_gallery_attachment_ids: originalImages
+						.slice(1)
+						.map((image) => image.id),
 				};
 				backups.push(backup);
 
 				await wcWrite(`products/${TOTALBLOCK_PRODUCT_ID}`, {
-					images: [
-						{ id: Number(replacement.id) },
-						...originalImages.slice(1),
-					],
+					images: [{ id: Number(replacement.id) }, ...originalImages.slice(1)],
 					meta_data: [
 						{
 							...(backupMeta?.id ? { id: backupMeta.id } : {}),
@@ -6715,8 +7500,7 @@ function createServer() {
 	server.registerTool(
 		"replace_totalblock_gallery_images_guarded",
 		{
-			description:
-				`Upload or reuse exactly four approved images and replace only the four gallery images of TotalBlock product ${TOTALBLOCK_PRODUCT_ID}. Preserves featured image 9417 and all product configuration, records the previous gallery for rollback, and requires exact confirmation: ${TOTALBLOCK_GALLERY_CONFIRMATION}`,
+			description: `Upload or reuse exactly four approved images and replace only the four gallery images of TotalBlock product ${TOTALBLOCK_PRODUCT_ID}. Preserves featured image 9417 and all product configuration, records the previous gallery for rollback, and requires exact confirmation: ${TOTALBLOCK_GALLERY_CONFIRMATION}`,
 			inputSchema: z.object({
 				replacements: z
 					.array(
@@ -6771,7 +7555,9 @@ function createServer() {
 					product.name !== TOTALBLOCK_PRODUCT_NAME ||
 					product.slug !== TOTALBLOCK_PRODUCT_SLUG
 				) {
-					throw new Error("TotalBlock product identity check failed; no write performed.");
+					throw new Error(
+						"TotalBlock product identity check failed; no write performed.",
+					);
 				}
 				if (product.status !== "draft") {
 					throw new Error("TotalBlock is no longer draft; no write performed.");
@@ -6810,12 +7596,7 @@ function createServer() {
 								"Each replacement image must decode to between 1 byte and 6 MB.",
 							);
 						}
-						if (
-							!hasExpectedImageSignature(
-								bytes,
-								replacement.replacement_mime_type!,
-							)
-						) {
+						if (!hasExpectedImageSignature(bytes, replacement.replacement_mime_type!)) {
 							throw new Error(
 								"Replacement bytes do not match the declared image MIME type.",
 							);
@@ -6843,14 +7624,14 @@ function createServer() {
 					});
 				}
 
-				const replacementIds = resolvedReplacements.map(({ media }) =>
-					Number(media.id),
-				);
+				const replacementIds = resolvedReplacements.map(({ media }) => Number(media.id));
 				if (new Set(replacementIds).size !== 4) {
 					throw new Error("The four gallery replacements must be four distinct images.");
 				}
 				if (replacementIds.includes(TOTALBLOCK_EXPECTED_CURRENT_IMAGE_IDS[0])) {
-					throw new Error("The featured image cannot also be used as a gallery replacement.");
+					throw new Error(
+						"The featured image cannot also be used as a gallery replacement.",
+					);
 				}
 
 				const backupMeta = (product.meta_data ?? []).find(
@@ -8404,10 +9185,7 @@ function createServer() {
 					return form;
 				};
 				assertFormSummary(META_WINTER_FORM_ID, META_WINTER_FORM_NAME);
-				assertFormSummary(
-					META_SIMPLIFIED_SPRING_FORM_ID,
-					META_SIMPLIFIED_SPRING_FORM_NAME,
-				);
+				assertFormSummary(META_SIMPLIFIED_SPRING_FORM_ID, META_SIMPLIFIED_SPRING_FORM_NAME);
 				if (
 					ownedForms.some(
 						(item: any) => String(item.name) === META_CORRECTED_SPRING_FORM_NAME,
@@ -8425,8 +9203,7 @@ function createServer() {
 					metaFetch(
 						META_SIMPLIFIED_SPRING_FORM_ID,
 						{
-							fields:
-								"id,name,status,privacy_policy_url,follow_up_action_url",
+							fields: "id,name,status,privacy_policy_url,follow_up_action_url",
 						},
 						pageAccessToken,
 					),
@@ -8462,8 +9239,7 @@ function createServer() {
 				const verified = await metaFetch(
 					String(created.id),
 					{
-						fields:
-							"id,name,status,locale,created_time,questions,privacy_policy_url,follow_up_action_url,question_page_custom_headline",
+						fields: "id,name,status,locale,created_time,questions,privacy_policy_url,follow_up_action_url,question_page_custom_headline",
 					},
 					pageAccessToken,
 				);
@@ -10108,7 +10884,10 @@ function createServer() {
 			field_type: productPmaxImageFieldSchema,
 			name: z.string().trim().min(1).max(82),
 			source_url: z.string().url().optional(),
-			existing_asset_id: z.string().regex(/^[1-9][0-9]*$/).optional(),
+			existing_asset_id: z
+				.string()
+				.regex(/^[1-9][0-9]*$/)
+				.optional(),
 		})
 		.superRefine((value, context) => {
 			if (Boolean(value.source_url) === Boolean(value.existing_asset_id)) {
@@ -10268,8 +11047,7 @@ function createServer() {
 					identity,
 					daily_budget_aud,
 					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
-					bootstrap_confirmation_required:
-						GOOGLE_ADS_PRODUCT_PMAX_BOOTSTRAP_CONFIRMATION,
+					bootstrap_confirmation_required: GOOGLE_ADS_PRODUCT_PMAX_BOOTSTRAP_CONFIRMATION,
 				});
 			} catch (error) {
 				return toolError(error);
@@ -10368,8 +11146,7 @@ function createServer() {
 				);
 				const requestedCounts: Record<string, number> = {};
 				for (const item of textAdditions) {
-					requestedCounts[item.fieldType] =
-						(requestedCounts[item.fieldType] ?? 0) + 1;
+					requestedCounts[item.fieldType] = (requestedCounts[item.fieldType] ?? 0) + 1;
 				}
 				for (const image of images) {
 					requestedCounts[image.field_type] =
@@ -10394,8 +11171,7 @@ function createServer() {
 					"LOGO",
 				] as const) {
 					if (
-						(before.counts[fieldType] ?? 0) +
-							(requestedCounts[fieldType] ?? 0) <
+						(before.counts[fieldType] ?? 0) + (requestedCounts[fieldType] ?? 0) <
 						ZIPGRIP_ASSET_REQUIREMENTS[fieldType].min
 					) {
 						throw new Error(`${fieldType} would remain below Google's minimum.`);
@@ -10469,11 +11245,7 @@ function createServer() {
 								`Existing asset ${image.existing_asset_id} is not a unique image.`,
 							);
 						}
-						if (
-							existingImageLinks.has(
-								`${image.field_type}\u0000${assetResource}`,
-							)
-						) {
+						if (existingImageLinks.has(`${image.field_type}\u0000${assetResource}`)) {
 							throw new Error("An image is already linked with that field type.");
 						}
 						imageInfo = validatePmaxExistingImage(
@@ -10516,11 +11288,7 @@ function createServer() {
 						image: imageInfo,
 					});
 				}
-				const operations = [
-					...assetOperations,
-					...assetGroupLinks,
-					...campaignLinks,
-				];
+				const operations = [...assetOperations, ...assetGroupLinks, ...campaignLinks];
 				await googleAdsMutate(operations, true);
 				const mutation = await googleAdsMutate(operations, false);
 				const after = await getProductPmaxAssetState(stateArgs);
@@ -10580,23 +11348,15 @@ function createServer() {
 					assetGroupId: asset_group_id,
 				};
 				const before = await getProductPmaxAssetState(stateArgs);
-				if (
-					new Set(videos.map((video) => video.youtube_video_id)).size !==
-					videos.length
-				) {
+				if (new Set(videos.map((video) => video.youtube_video_id)).size !== videos.length) {
 					throw new Error("Duplicate YouTube video IDs are not allowed.");
 				}
 				const linked = new Set(
 					before.asset_group_assets
-						.filter(
-							(row: any) =>
-								row.assetGroupAsset?.fieldType === "YOUTUBE_VIDEO",
-						)
+						.filter((row: any) => row.assetGroupAsset?.fieldType === "YOUTUBE_VIDEO")
 						.map((row: any) => row.asset?.youtubeVideoAsset?.youtubeVideoId),
 				);
-				const additions = videos.filter(
-					(video) => !linked.has(video.youtube_video_id),
-				);
+				const additions = videos.filter((video) => !linked.has(video.youtube_video_id));
 				if (additions.length === 0) {
 					return toolResult({
 						created_or_linked: false,
@@ -10887,8 +11647,7 @@ function createServer() {
 					dedicated_gla_1301_included: dedicatedIncluded.length === 1,
 					source_pmax_gla_1301_excluded: pmaxExcluded.length === 1,
 					source_shopping_gla_1301_excluded:
-						shoppingExcluded.length ===
-						GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length,
+						shoppingExcluded.length === GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length,
 					dedicated_tree: dedicatedTree,
 					source_pmax_item_nodes: sourcePmaxItems,
 					source_shopping_item_nodes: sourceShoppingItems,
@@ -10899,8 +11658,7 @@ function createServer() {
 						policyProblems.length === 0 &&
 						dedicatedIncluded.length === 1 &&
 						pmaxExcluded.length === 1 &&
-						shoppingExcluded.length ===
-							GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length,
+						shoppingExcluded.length === GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length,
 					repair_confirmation_required:
 						state.campaign?.status === "ENABLED" &&
 						state.asset_group?.status === "PAUSED"
@@ -10919,9 +11677,7 @@ function createServer() {
 			description:
 				"Enable only the locked ZipGrip asset group after launch when its campaign is already ENABLED but the asset group remains PAUSED. Requires approved complete assets, correct dedicated gla_1301 targeting, verified exclusions in all three source campaigns, exact confirmation and validateOnly. Cannot change campaign status, budget, bidding, targeting or product trees.",
 			inputSchema: z.object({
-				confirmation: z.literal(
-					GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_REPAIR_CONFIRMATION,
-				),
+				confirmation: z.literal(GOOGLE_ADS_ZIPGRIP_ASSET_GROUP_REPAIR_CONFIRMATION),
 			}),
 		},
 		async () => {
@@ -10983,14 +11739,13 @@ function createServer() {
 				const dedicatedOk =
 					dedicated.filter(
 						(row) =>
-							row.assetGroupListingGroupFilter?.caseValue?.productItemId
-								?.value === GOOGLE_ADS_ZIPGRIP_ITEM_ID &&
+							row.assetGroupListingGroupFilter?.caseValue?.productItemId?.value ===
+								GOOGLE_ADS_ZIPGRIP_ITEM_ID &&
 							row.assetGroupListingGroupFilter?.type === "UNIT_INCLUDED",
 					).length === 1;
 				const pmaxOk =
 					pmaxSource.filter(
-						(row) =>
-							row.assetGroupListingGroupFilter?.type === "UNIT_EXCLUDED",
+						(row) => row.assetGroupListingGroupFilter?.type === "UNIT_EXCLUDED",
 					).length === 1;
 				const shoppingCampaigns = new Set(
 					shoppingSource
@@ -11004,8 +11759,7 @@ function createServer() {
 				if (
 					!dedicatedOk ||
 					!pmaxOk ||
-					shoppingCampaigns.size !==
-						GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length
+					shoppingCampaigns.size !== GOOGLE_ADS_ZIPGRIP_SOURCE_SHOPPING_IDS.length
 				) {
 					throw new Error(
 						"Refusing repair: ZipGrip targeting or source exclusions are not in the expected post-launch state.",
@@ -11034,9 +11788,7 @@ function createServer() {
 					verified[0]?.campaign?.status !== "ENABLED" ||
 					verified[0]?.assetGroup?.status !== "ENABLED"
 				) {
-					throw new Error(
-						"Asset-group repair returned but did not verify as ENABLED.",
-					);
+					throw new Error("Asset-group repair returned but did not verify as ENABLED.");
 				}
 				return toolResult({
 					repaired: true,
@@ -11046,8 +11798,7 @@ function createServer() {
 					daily_budget_changed: false,
 					campaign_status_changed: false,
 					product_trees_changed: false,
-					mutation_response_count:
-						mutation.mutateOperationResponses?.length ?? 0,
+					mutation_response_count: mutation.mutateOperationResponses?.length ?? 0,
 				});
 			} catch (error) {
 				return toolError(error);
@@ -11082,25 +11833,24 @@ function createServer() {
 					shopping_ad_groups_to_change: new Set(
 						plan.sourceShoppingCriteria.map((row) => String(row.adGroup?.id)),
 					).size,
-					source_pmax_listing_tree: summarizeZipGripPmaxTree(
-						plan.sourcePmaxFilters,
-					),
+					source_pmax_listing_tree: summarizeZipGripPmaxTree(plan.sourcePmaxFilters),
 					source_shopping_listing_trees: summarizeZipGripShoppingTree(
 						plan.sourceShoppingCriteria,
 					),
 					confirmation_required: GOOGLE_ADS_ZIPGRIP_LAUNCH_CONFIRMATION,
 				});
 			} catch (error) {
-				const diagnostics = (error as {
-					zipGripLaunchDiagnostics?: Record<string, unknown>;
-				})?.zipGripLaunchDiagnostics;
+				const diagnostics = (
+					error as {
+						zipGripLaunchDiagnostics?: Record<string, unknown>;
+					}
+				)?.zipGripLaunchDiagnostics;
 				if (diagnostics) {
 					return toolResult({
 						valid_for_launch: false,
 						api_validation_passed: false,
 						created_or_modified: false,
-						blocker:
-							error instanceof Error ? error.message : "Unknown launch blocker",
+						blocker: error instanceof Error ? error.message : "Unknown launch blocker",
 						...diagnostics,
 					});
 				}
@@ -11843,7 +12593,10 @@ function createServer() {
 			try {
 				const { siteUrl, serviceAccount } = getSearchConsoleConfig();
 				const property = await searchConsoleFetch();
-				if (!property.permissionLevel || property.permissionLevel === "siteUnverifiedUser") {
+				if (
+					!property.permissionLevel ||
+					property.permissionLevel === "siteUnverifiedUser"
+				) {
 					throw new Error(
 						"The configured service account is not a verified user of the Blindmotion Search Console property.",
 					);

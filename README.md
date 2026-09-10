@@ -50,6 +50,28 @@ live campaign eligibility.
 The original ZipGrip-specific tools remain temporarily available for backwards
 compatibility and post-launch inspection of the existing ZipGrip campaign.
 
+## Reusable guarded Fabric Sample setup
+
+The Fabric Sample workflow uses the existing `clone_product_as_draft_guarded`
+tool to make a draft, hidden copy of any exactly identified sample product. The
+live sample product is never used as the write target.
+
+- `preview_product_fabric_sample_setup` accepts source and destination product
+  IDs/names plus the exact source fabric selector, destination product selector
+  and destination multi-select colour template field IDs. It validates a
+  one-to-one fabric-range/colour-field structure and returns source,
+  destination and deterministic plan SHA-256 hashes without writing.
+- `apply_product_fabric_sample_setup_guarded` requires those exact hashes and
+  `CONFIRM APPLY FABRIC SAMPLE SETUP`. It appends one product choice, a
+  remapped fabric selector and multi-select colour swatches only to the named
+  draft/hidden destination. IDs and choice slugs are deterministically
+  remapped, all copied pricing is disabled, unrelated product data is verified,
+  and a failed write is rolled back to the exact original WAPF value.
+
+No product IDs, product names, WAPF field IDs or fabric names are hardcoded in
+the reusable setup tools. Publishing the completed sample product remains a
+separate manual review decision.
+
 ## Guarded ZipGrip Performance Max builder
 
 The server includes two narrowly scoped Google Ads tools for customer `6610097637`:
