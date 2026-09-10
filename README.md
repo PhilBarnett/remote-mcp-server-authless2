@@ -66,6 +66,9 @@ further restricted to repository ID `1359135665`
 
 - `get_blindmotion_github_app_status` verifies the installation without exposing a
   credential or token.
+- `get_blindmotion_mcp_source_file` reads only `src/index.ts` or `README.md` from
+  the exact current `main` commit and returns the blob SHA needed for review-safe
+  draft PR creation.
 - `create_blindmotion_mcp_draft_pr_guarded` atomically creates a branch, commit and
   draft PR from an exact reviewed `main` SHA. It can replace only `src/index.ts`
   and/or `README.md`, checks each expected blob SHA, and cannot touch workflows,
@@ -75,6 +78,14 @@ further restricted to repository ID `1359135665`
 
 No MCP tool can merge a PR or push directly to `main`. Production deployment remains
 limited to the existing GitHub Actions workflow after an externally reviewed merge.
+
+## Guarded TotalBlock featured image
+
+`replace_totalblock_featured_image_guarded` is locked to draft product `9413`, verifies
+the product identity and reviewed current featured attachment `6704`, uploads or reuses
+one JPEG/PNG/WebP attachment, preserves the complete gallery and all other product
+configuration, and records the prior featured attachment for rollback. It requires the
+exact phrase `CONFIRM REPLACE TOTALBLOCK FEATURED IMAGE` and never deletes media.
 
 ## Connect to Cloudflare AI Playground
 
