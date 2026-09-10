@@ -3624,7 +3624,6 @@ function createServer() {
 		},
 	);
 
-
 	server.registerTool(
 		"get_blindmotion_mcp_source_file",
 		{
@@ -5713,7 +5712,6 @@ function createServer() {
 		},
 	);
 
-
 	server.registerTool(
 		"replace_totalblock_featured_image_guarded",
 		{
@@ -5834,7 +5832,6 @@ function createServer() {
 				if (Number(replacement.id) === expected_current_attachment_id) {
 					throw new Error("The replacement attachment is already the current featured image.");
 				}
-
 
 				const backupMeta = (product.meta_data ?? []).find(
 					(item: any) => item.key === TOTALBLOCK_FEATURED_IMAGE_BACKUP_KEY,
