@@ -9958,7 +9958,7 @@ function createServer() {
 			.trim()
 			.min(2)
 			.max(60)
-			.regex(/^[A-Za-z0-9][A-Za-z0-9 &'()\-]+$/),
+			.regex(/^[A-Za-z0-9][A-Za-z0-9 &'()-]+$/),
 	});
 	const productPmaxResourceSchema = productPmaxIdentitySchema.extend({
 		campaign_id: z.string().regex(/^[1-9][0-9]*$/),
