@@ -271,13 +271,39 @@ function wapfFabricCandidates(group: Record<string, any>) {
 						id: choice?.id ?? choice?.key ?? null,
 						label: choice?.label ?? choice?.name ?? null,
 						value: choice?.value ?? null,
+						slug: choice?.slug ?? null,
 						price: choice?.price ?? choice?.pricing ?? null,
+						pricing_type: choice?.pricing_type ?? null,
+						pricing_amount: choice?.pricing_amount ?? null,
 						image: choice?.image ?? null,
+						attachment: choice?.attachment ?? null,
 						keys: Object.keys(choice ?? {}).sort(),
 					}))
 				: [],
 			condition_data: field?.conditionals ?? field?.conditions ?? field?.rules ?? null,
 		}));
+}
+
+function wapfFieldSummary(field: any, index: number) {
+	return {
+		index,
+		id: field?.id ?? field?.key ?? null,
+		label: wapfFieldLabel(field),
+		type: field?.type ?? null,
+		required: field?.required ?? field?.options?.required ?? null,
+		choices: Array.isArray(field?.options?.choices)
+			? field.options.choices.map((choice: any, choiceIndex: number) => ({
+					index: choiceIndex,
+					label: choice?.label ?? choice?.name ?? null,
+					slug: choice?.slug ?? null,
+					pricing_type: choice?.pricing_type ?? null,
+					pricing_amount: choice?.pricing_amount ?? null,
+					image: choice?.image ?? null,
+					attachment: choice?.attachment ?? null,
+				}))
+			: [],
+		condition_data: field?.conditionals ?? field?.conditions ?? field?.rules ?? null,
+	};
 }
 
 const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
@@ -4208,7 +4234,7 @@ function createServer() {
 					throw new Error("Locked Premium Roller Blinds source identity changed.");
 				}
 
-				async function inspect(product: any) {
+				async function inspect(product: any, lockedSlice: readonly [number, number]) {
 					const matches = (product.meta_data ?? []).filter(
 						(meta: any) => String(meta.key) === "_wapf_fieldgroup",
 					);
@@ -4228,13 +4254,18 @@ function createServer() {
 						field_group_sha256: await sha256Hex(new TextEncoder().encode(serialized)),
 						field_count: group.fields.length,
 						fabric_candidates: wapfFabricCandidates(group),
+						locked_fabric_slice: group.fields
+							.slice(lockedSlice[0], lockedSlice[1] + 1)
+							.map((field: any, offset: number) =>
+								wapfFieldSummary(field, lockedSlice[0] + offset),
+							),
 					};
 				}
 
 				return toolResult({
 					read_only: true,
-					target: await inspect(target),
-					source: await inspect(source),
+					target: await inspect(target, [7, 12]),
+					source: await inspect(source, [126, 130]),
 					write_performed: false,
 				});
 			} catch (error) {
