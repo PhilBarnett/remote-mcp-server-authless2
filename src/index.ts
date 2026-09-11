@@ -12992,6 +12992,224 @@ function createServer() {
 		},
 	);
 
+	/* Generic, parameter-driven WAPF option inspection and guarded copy. */
+	const genericWapfId = z.number().int().positive();
+	const genericWapfIndex = z.number().int().min(0);
+	const genericWapfHash = z.string().regex(/^[a-f0-9]{64}$/);
+	const genericWapfConfirmation = "CONFIRM COPY PRODUCT OPTION FIELDS";
+
+	function genericWapf(product: any) {
+		const matches = (product?.meta_data ?? []).filter(
+			(meta: any) => String(meta?.key) === "_wapf_fieldgroup",
+		);
+		if (matches.length !== 1) {
+			throw new Error("Expected exactly one WAPF field group on product " + product?.id + "; found " + matches.length + ".");
+		}
+		const group = parseWapfFieldGroup(matches[0].value);
+		if (!group || !Array.isArray(group.fields)) {
+			throw new Error("Product " + product?.id + " WAPF field group is not readable.");
+		}
+		return { meta: matches[0], group };
+	}
+	async function genericWapfHashOf(value: unknown) {
+		return sha256Hex(new TextEncoder().encode(JSON.stringify(value)));
+	}
+	function genericWapfFieldId(field: any) {
+		return String(field?.id ?? field?.key ?? "").trim();
+	}
+	function genericWapfLabel(field: any) {
+		return wapfFieldLabel(field).toLocaleLowerCase().replace(/\s+/g, " ").trim();
+	}
+	function genericWapfReplace(value: unknown, replacements: Map<string, string>): unknown {
+		if (typeof value === "string") {
+			let output = value;
+			for (const [from, to] of [...replacements.entries()].sort((a, b) => b[0].length - a[0].length)) {
+				if (from && from !== to) output = output.split(from).join(to);
+			}
+			return output;
+		}
+		if (Array.isArray(value)) return value.map((item) => genericWapfReplace(item, replacements));
+		if (value && typeof value === "object") {
+			return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(
+				([key, child]) => [key, genericWapfReplace(child, replacements)],
+			));
+		}
+		return value;
+	}
+	function genericWapfIndexes(indexes: number[], count: number, role: string) {
+		const unique = [...new Set(indexes)].sort((a, b) => a - b);
+		for (const index of unique) {
+			if (index >= count) throw new Error(role + " field index " + index + " exceeds " + (count - 1) + ".");
+		}
+		return unique;
+	}
+
+	server.registerTool(
+		"inspect_wapf_product_option_fields",
+		{
+			description:
+				"Inspect caller-selected WooCommerce products for WAPF option fields. All product IDs and search terms are runtime parameters. Returns matching field summaries, indexes, pricing, choices, conditions and stable group hashes; performs no writes.",
+			inputSchema: z.object({
+				product_ids: z.array(genericWapfId).min(1).max(10),
+				search_terms: z.array(z.string().trim().min(1).max(200)).min(1).max(20),
+			}),
+		},
+		async ({ product_ids, search_terms }) => {
+			try {
+				const ids = [...new Set(product_ids)];
+				const responses = await Promise.all(ids.map((id) => wcFetch("products/" + id)));
+				const products = await Promise.all(responses.map((response) => response.json<any>()));
+				const terms = search_terms.map((term) => term.toLocaleLowerCase());
+				return toolResult({
+					read_only: true,
+					search_terms,
+					products: await Promise.all(products.map(async (product) => {
+						const wapf = genericWapf(product);
+						return {
+							product: { id: product.id, name: product.name, status: product.status, catalog_visibility: product.catalog_visibility },
+							meta_data_id: wapf.meta.id,
+							field_group_sha256: await genericWapfHashOf(wapf.meta.value),
+							field_count: wapf.group.fields.length,
+							matching_fields: wapf.group.fields.map((field: any, index: number) => ({ field, index }))
+								.filter(({ field }: any) => {
+									const searchable = JSON.stringify(field).toLocaleLowerCase();
+									return terms.some((term) => searchable.includes(term));
+								})
+								.map(({ field, index }: any) => wapfFieldSummary(field, index)),
+						};
+					})),
+					write_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"copy_wapf_product_option_fields_guarded",
+		{
+			description:
+				"Copy explicitly selected WAPF fields between caller-supplied WooCommerce products, preserving choices, pricing and conditions. Product identities, state hashes, source indexes, target replacement indexes and insertion point are runtime parameters. Maps external field references to unique same-label/type target fields, refuses ambiguity or collisions, changes only _wapf_fieldgroup, verifies and rolls back on failure.",
+			inputSchema: z.object({
+				source_product_id: genericWapfId,
+				source_product_name: z.string().trim().min(1).max(500),
+				target_product_id: genericWapfId,
+				target_product_name: z.string().trim().min(1).max(500),
+				expected_source_field_group_sha256: genericWapfHash,
+				expected_target_field_group_sha256: genericWapfHash,
+				source_field_indices: z.array(genericWapfIndex).min(1).max(100),
+				target_field_indices_to_replace: z.array(genericWapfIndex).max(100),
+				insert_at_index: genericWapfIndex,
+				confirmation: z.literal(genericWapfConfirmation),
+			}),
+		},
+		async (args) => {
+			try {
+				if (args.source_product_id === args.target_product_id) throw new Error("Source and target products must differ.");
+				const responses = await Promise.all([
+					wcFetch("products/" + args.source_product_id),
+					wcFetch("products/" + args.target_product_id),
+				]);
+				const [source, target] = await Promise.all(responses.map((response) => response.json<any>()));
+				if (source.id !== args.source_product_id || source.name !== args.source_product_name ||
+					target.id !== args.target_product_id || target.name !== args.target_product_name) {
+					throw new Error("A caller-supplied product identity no longer matches WooCommerce.");
+				}
+				const sourceWapf = genericWapf(source);
+				const targetWapf = genericWapf(target);
+				const [sourceHash, targetHash] = await Promise.all([
+					genericWapfHashOf(sourceWapf.meta.value),
+					genericWapfHashOf(targetWapf.meta.value),
+				]);
+				if (sourceHash !== args.expected_source_field_group_sha256 ||
+					targetHash !== args.expected_target_field_group_sha256) {
+					throw new Error("A WAPF field group changed after inspection; refusing write.");
+				}
+				const sourceIndexes = genericWapfIndexes(args.source_field_indices, sourceWapf.group.fields.length, "Source");
+				const targetIndexes = genericWapfIndexes(args.target_field_indices_to_replace, targetWapf.group.fields.length, "Target");
+				const removals = new Set(targetIndexes);
+				const remaining = targetWapf.group.fields.filter((_field: any, index: number) => !removals.has(index));
+				if (args.insert_at_index > remaining.length) throw new Error("Insertion index exceeds post-removal field count.");
+				const selected = sourceIndexes.map((index) => sourceWapf.group.fields[index]);
+				const selectedIds = new Set(selected.map(genericWapfFieldId).filter(Boolean));
+				const remainingIds = new Set(remaining.map(genericWapfFieldId).filter(Boolean));
+				for (const id of selectedIds) {
+					if (remainingIds.has(id)) throw new Error("Source field ID " + id + " collides with an unremoved target field.");
+				}
+				const replacements = new Map<string, string>();
+				for (const sourceField of sourceWapf.group.fields) {
+					const sourceId = genericWapfFieldId(sourceField);
+					if (!sourceId || selectedIds.has(sourceId)) continue;
+					const label = genericWapfLabel(sourceField);
+					const type = String(sourceField?.type ?? "");
+					const candidates = remaining.filter((targetField: any) =>
+						label && genericWapfLabel(targetField) === label && String(targetField?.type ?? "") === type,
+					);
+					if (candidates.length === 1) {
+						const targetId = genericWapfFieldId(candidates[0]);
+						if (targetId) replacements.set(sourceId, targetId);
+					}
+				}
+				const selectedJson = JSON.stringify(selected);
+				const unresolved = sourceWapf.group.fields.map(genericWapfFieldId).filter(
+					(id) => id && !selectedIds.has(id) && selectedJson.includes(id) && !replacements.has(id),
+				);
+				if (unresolved.length) {
+					throw new Error("Unmapped external source-field references: " + [...new Set(unresolved)].join(", ") + ".");
+				}
+				const copied = genericWapfReplace(structuredClone(selected), replacements) as any[];
+				const updatedGroup = {
+					...structuredClone(targetWapf.group),
+					fields: [...remaining.slice(0, args.insert_at_index), ...copied, ...remaining.slice(args.insert_at_index)],
+				};
+				const updatedValue = typeof targetWapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+				const expectedUpdatedHash = await genericWapfHashOf(updatedValue);
+				const originalValue = targetWapf.meta.value;
+				try {
+					await wcWrite("products/" + args.target_product_id, {
+						meta_data: [{ id: targetWapf.meta.id, key: "_wapf_fieldgroup", value: updatedValue }],
+					});
+					const response = await wcFetch("products/" + args.target_product_id);
+					const verified = await response.json<any>();
+					const verifiedHash = await genericWapfHashOf(genericWapf(verified).meta.value);
+					if (verified.id !== args.target_product_id || verified.name !== args.target_product_name ||
+						verifiedHash !== expectedUpdatedHash) throw new Error("Post-write verification failed.");
+					return toolResult({
+						updated: true,
+						source_product: { id: source.id, name: source.name },
+						target_product: { id: verified.id, name: verified.name },
+						source_field_indices: sourceIndexes,
+						removed_target_field_indices: targetIndexes,
+						insert_at_index: args.insert_at_index,
+						copied_field_count: copied.length,
+						external_field_id_mappings: Object.fromEntries(replacements),
+						before_field_group_sha256: targetHash,
+						after_field_group_sha256: verifiedHash,
+						untouched: ["product status", "catalog visibility", "non-WAPF metadata", "images", "descriptions", "categories"],
+					});
+				} catch (writeError) {
+					await wcWrite("products/" + args.target_product_id, {
+						meta_data: [{ id: targetWapf.meta.id, key: "_wapf_fieldgroup", value: originalValue }],
+					});
+					const response = await wcFetch("products/" + args.target_product_id);
+					const rolledBack = await response.json<any>();
+					if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== targetHash) {
+						const rollbackError = new Error("WAPF copy and rollback verification both failed.");
+						(rollbackError as any).cause = writeError;
+						throw rollbackError;
+					}
+					const rolledBackError = new Error("WAPF copy failed; exact rollback succeeded: " +
+						(writeError instanceof Error ? writeError.message : String(writeError)));
+					(rolledBackError as any).cause = writeError;
+					throw rolledBackError;
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	return server;
 }
 
