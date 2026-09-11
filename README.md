@@ -147,6 +147,28 @@ legacy outdoor gallery attachments with four distinct approved JPEG/PNG/WebP ima
 records rollback data, verifies the complete product image order, and requires
 `CONFIRM REPLACE TOTALBLOCK GALLERY IMAGES`.
 
+## Reusable fabric collection media importer
+
+The importer separates source-page extraction from WordPress writes and contains no
+supplier, collection, colour or product IDs. Both tools accept all commercial
+identities and the collection URL at runtime:
+
+- `preview_fabric_collection_import` supports `linked_product_pages` for collection
+  indexes whose full-size images live on individual fabric pages, and
+  `sectioned_attribute_swatches` for a single page containing swatches grouped by
+  headings such as opacity. It returns a deterministic manifest and SHA-256 without
+  writing.
+- `import_fabric_collection_media_guarded` rebuilds the live manifest and requires
+  its exact reviewed hash plus `CONFIRM IMPORT FABRIC COLLECTION`. It creates a
+  hierarchy in the site's existing attachment `media_folder` taxonomy, downloads
+  only validated public HTTPS JPEG/PNG/WebP images, and assigns searchable title,
+  alt text, caption and source information.
+
+Attachment filenames include supplier, collection, optional variant and colour, so
+same-named swatches in multiple opacities remain distinct. Existing attachment slugs
+are skipped, reruns are idempotent, private/local URLs and unsafe redirects are
+rejected, and the importer has no media deletion or overwrite path.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
