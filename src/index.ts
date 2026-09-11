@@ -1902,6 +1902,64 @@ async function buildFabricCollectionManifest(input: {
 	return { ...manifestCore, manifest_hash: manifestHash };
 }
 
+function fabricSwatchItemKey(item: FabricSwatch) {
+	const variant = safeSlug(item.variant ?? "collection");
+	const colour = safeSlug(item.colour);
+	if (!variant || !colour) throw new Error("Fabric swatch identity cannot produce a stable item key.");
+	return `${variant}--${colour}`;
+}
+
+function selectFabricSwatches(
+	items: FabricSwatch[],
+	includeItemKeys: string[] = [],
+	excludeItemKeys: string[] = [],
+) {
+	const keyed = items.map((item) => ({ item, item_key: fabricSwatchItemKey(item) }));
+	const available = new Map<string, FabricSwatch>();
+	for (const entry of keyed) {
+		if (available.has(entry.item_key)) {
+			throw new Error(`Multiple fabric swatches produce item key ${entry.item_key}.`);
+		}
+		available.set(entry.item_key, entry.item);
+	}
+	const includes = new Set(includeItemKeys);
+	const excludes = new Set(excludeItemKeys);
+	for (const key of includes) {
+		if (!available.has(key)) throw new Error(`Included item key is not in the reviewed manifest: ${key}`);
+		if (excludes.has(key)) throw new Error(`Item key cannot be both included and excluded: ${key}`);
+	}
+	for (const key of excludes) {
+		if (!available.has(key)) throw new Error(`Excluded item key is not in the reviewed manifest: ${key}`);
+	}
+	const selected = keyed.filter(
+		(entry) => (!includes.size || includes.has(entry.item_key)) && !excludes.has(entry.item_key),
+	);
+	if (!selected.length) throw new Error("Item selection removed every fabric swatch.");
+	return selected;
+}
+
+async function inspectFabricAttachments(items: Array<{ item: FabricSwatch; item_key: string }>) {
+	const results: any[] = [];
+	for (const { item, item_key } of items) {
+		const attachmentSlug = safeSlug(item.filename.replace(/\.[^.]+$/, ""));
+		const response = await wpAuthenticatedFetch(
+			`media?slug=${encodeURIComponent(attachmentSlug)}&per_page=100&context=edit`,
+		);
+		const existing = await response.json<any[]>();
+		if (existing.length > 1) {
+			throw new Error(`Multiple existing attachments have slug ${attachmentSlug}; stopped safely.`);
+		}
+		results.push({
+			item_key,
+			colour: item.colour,
+			variant: item.variant ?? null,
+			status: existing.length === 1 ? "present" : "missing",
+			attachment: existing.length === 1 ? mediaMetadata(existing[0]) : null,
+		});
+	}
+	return results;
+}
+
 async function findOrCreateMediaFolder(name: string, parent: number) {
 	const slug = safeSlug(name);
 	const existingResponse = await wpAuthenticatedFetch(
@@ -8613,6 +8671,73 @@ function createServer() {
 					write_performed: false,
 					item_count: manifest.items.length,
 					...manifest,
+					items: manifest.items.map((item) => ({
+						item_key: fabricSwatchItemKey(item),
+						...item,
+					})),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_fabric_collection_media_import",
+		{
+			description:
+				"Rebuild an exact reviewed fabric manifest and report which selected swatch attachments are present or missing in WordPress. Supports the same runtime include/exclude keys as the guarded importer and performs no writes.",
+			inputSchema: z.object({
+				source_url: z.string().url(),
+				supplier: z.string().trim().min(1).max(120),
+				collection: z.string().trim().min(1).max(120),
+				extraction_strategy: z.enum([
+					"linked_product_pages",
+					"sectioned_attribute_swatches",
+				]),
+				max_items: z.number().int().min(1).max(100).default(50),
+				expected_manifest_hash: z.string().regex(/^[a-f0-9]{64}$/),
+				include_item_keys: z.array(z.string().trim().min(1).max(250)).max(100).default([]),
+				exclude_item_keys: z.array(z.string().trim().min(1).max(250)).max(100).default([]),
+			}),
+		},
+		async ({
+			source_url,
+			supplier,
+			collection,
+			extraction_strategy,
+			max_items,
+			expected_manifest_hash,
+			include_item_keys,
+			exclude_item_keys,
+		}) => {
+			try {
+				const manifest = await buildFabricCollectionManifest({
+					sourceUrl: source_url,
+					supplier,
+					collection,
+					extractionStrategy: extraction_strategy,
+					maxItems: max_items,
+				});
+				if (manifest.manifest_hash !== expected_manifest_hash) {
+					throw new Error(
+						`Supplier manifest changed since preview. Expected ${expected_manifest_hash}, current ${manifest.manifest_hash}. Preview again.`,
+					);
+				}
+				const selected = selectFabricSwatches(
+					manifest.items,
+					include_item_keys,
+					exclude_item_keys,
+				);
+				const results = await inspectFabricAttachments(selected);
+				return toolResult({
+					write_performed: false,
+					manifest_hash: manifest.manifest_hash,
+					manifest_item_count: manifest.items.length,
+					selected_item_count: selected.length,
+					present_count: results.filter((item) => item.status === "present").length,
+					missing_count: results.filter((item) => item.status === "missing").length,
+					results,
 				});
 			} catch (error) {
 				return toolError(error);
@@ -8623,7 +8748,7 @@ function createServer() {
 	server.registerTool(
 		"import_fabric_collection_media_guarded",
 		{
-			description: `Rebuild a previously previewed fabric manifest, require its exact hash, create a hierarchical WordPress media_folder taxonomy path, and idempotently upload the discovered images with searchable titles, alt text, captions and source records. Never deletes or overwrites media. Requires exact confirmation: ${FABRIC_COLLECTION_IMPORT_CONFIRMATION}`,
+			description: `Rebuild a previously previewed fabric manifest, require its exact hash, apply explicit runtime item selection/exclusion, and upload one resumable batch into a hierarchical WordPress media_folder path. Idempotent; never deletes or overwrites media. Batch size is capped at four to remain within Worker limits. Requires exact confirmation: ${FABRIC_COLLECTION_IMPORT_CONFIRMATION}`,
 			inputSchema: z.object({
 				source_url: z.string().url(),
 				supplier: z.string().trim().min(1).max(120),
@@ -8635,6 +8760,10 @@ function createServer() {
 				media_taxonomy_root: z.string().trim().min(1).max(120).default("Fabric Collections"),
 				max_items: z.number().int().min(1).max(100).default(50),
 				expected_manifest_hash: z.string().regex(/^[a-f0-9]{64}$/),
+				include_item_keys: z.array(z.string().trim().min(1).max(250)).max(100).default([]),
+				exclude_item_keys: z.array(z.string().trim().min(1).max(250)).max(100).default([]),
+				batch_offset: z.number().int().min(0).max(99).default(0),
+				batch_size: z.number().int().min(1).max(4).default(3),
 				confirmation: z.literal(FABRIC_COLLECTION_IMPORT_CONFIRMATION),
 			}),
 		},
@@ -8646,6 +8775,10 @@ function createServer() {
 			media_taxonomy_root,
 			max_items,
 			expected_manifest_hash,
+			include_item_keys,
+			exclude_item_keys,
+			batch_offset,
+			batch_size,
 		}) => {
 			try {
 				const manifest = await buildFabricCollectionManifest({
@@ -8660,6 +8793,32 @@ function createServer() {
 						`Supplier manifest changed since preview. Expected ${expected_manifest_hash}, current ${manifest.manifest_hash}. Preview again; no write performed.`,
 					);
 				}
+				const selected = selectFabricSwatches(
+					manifest.items,
+					include_item_keys,
+					exclude_item_keys,
+				);
+				if (batch_offset > selected.length) {
+					throw new Error(
+						`batch_offset ${batch_offset} exceeds selected item count ${selected.length}.`,
+					);
+				}
+				const batch = selected.slice(batch_offset, batch_offset + batch_size);
+				if (!batch.length) {
+					return toolResult({
+						completed: true,
+						write_performed: false,
+						manifest_hash: manifest.manifest_hash,
+						manifest_item_count: manifest.items.length,
+						selected_item_count: selected.length,
+						batch_offset,
+						batch_size,
+						batch_item_count: 0,
+						next_batch_offset: null,
+						remaining_count: 0,
+						results: [],
+					});
+				}
 
 				const root = await findOrCreateMediaFolder(media_taxonomy_root, 0);
 				const supplierFolder = await findOrCreateMediaFolder(supplier, Number(root.term.id));
@@ -8670,7 +8829,7 @@ function createServer() {
 				const variantFolders = new Map<string, { term: any; created: boolean }>();
 				const results: any[] = [];
 
-				for (const item of manifest.items) {
+				for (const { item, item_key } of batch) {
 					let targetFolder = collectionFolder;
 					if (item.variant) {
 						if (!variantFolders.has(item.variant)) {
@@ -8693,6 +8852,7 @@ function createServer() {
 					if (existing.length === 1) {
 						results.push({
 							status: "skipped_existing",
+							item_key,
 							colour: item.colour,
 							variant: item.variant ?? null,
 							attachment: mediaMetadata(existing[0]),
@@ -8743,15 +8903,25 @@ function createServer() {
 					}
 					results.push({
 						status: "imported",
+						item_key,
 						colour: item.colour,
 						variant: item.variant ?? null,
 						attachment: mediaMetadata(verified),
 					});
 				}
 
+				const processedThrough = batch_offset + batch.length;
+				const completed = processedThrough >= selected.length;
 				return toolResult({
-					completed: true,
+					completed,
 					manifest_hash: manifest.manifest_hash,
+					manifest_item_count: manifest.items.length,
+					selected_item_count: selected.length,
+					batch_offset,
+					batch_size,
+					batch_item_count: batch.length,
+					next_batch_offset: completed ? null : processedThrough,
+					remaining_count: Math.max(0, selected.length - processedThrough),
 					media_taxonomy: "media_folder",
 					folder_path: [media_taxonomy_root, supplier, collection],
 					folders_created: [

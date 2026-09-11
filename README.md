@@ -165,9 +165,16 @@ identities and the collection URL at runtime:
   alt text, caption and source information.
 
 Attachment filenames include supplier, collection, optional variant and colour, so
-same-named swatches in multiple opacities remain distinct. Existing attachment slugs
-are skipped, reruns are idempotent, private/local URLs and unsafe redirects are
-rejected, and the importer has no media deletion or overwrite path.
+same-named swatches in multiple opacities remain distinct. Preview results also expose
+stable item keys derived at runtime. The guarded importer accepts optional include and
+exclude key lists plus a batch offset and batch size; batches are capped at four items
+so large collections can resume safely within Cloudflare Worker subrequest limits.
+
+`inspect_fabric_collection_media_import` rebuilds the exact reviewed manifest and
+reports selected swatches as present or missing without creating folders or media.
+Existing attachment slugs are skipped, reruns are idempotent, private/local URLs and
+unsafe redirects are rejected, and the importer has no media deletion or overwrite
+path.
 
 ## Connect to Cloudflare AI Playground
 
