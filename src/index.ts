@@ -1637,6 +1637,283 @@ async function wpUploadMedia(filename: string, mimeType: string, bytes: Uint8Arr
 	return response.json<any>();
 }
 
+const FABRIC_COLLECTION_IMPORT_CONFIRMATION = "CONFIRM IMPORT FABRIC COLLECTION";
+
+type FabricSwatch = {
+	colour: string;
+	variant?: string;
+	image_url: string;
+	source_page_url: string;
+	filename: string;
+	title: string;
+	alt_text: string;
+	warnings?: string[];
+};
+
+function decodeHtmlText(value: string) {
+	return value
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&amp;/gi, "&")
+		.replace(/&quot;/gi, '"')
+		.replace(/&#39;|&apos;/gi, "'")
+		.replace(/&nbsp;/gi, " ")
+		.replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function htmlAttribute(fragment: string, name: string) {
+	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const match = fragment.match(new RegExp(`\\b${escaped}\\s*=\\s*(["'])(.*?)\\1`, "is"));
+	return match ? decodeHtmlText(match[2]) : "";
+}
+
+function safeSlug(value: string) {
+	return value
+		.normalize("NFKD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.toLowerCase()
+		.replace(/&/g, " and ")
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "")
+		.slice(0, 120);
+}
+
+function assertPublicHttpsUrl(value: string) {
+	const url = new URL(value);
+	if (url.protocol !== "https:" || url.username || url.password) {
+		throw new Error("Fabric source URLs must be credential-free HTTPS URLs.");
+	}
+	const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+	if (
+		hostname === "localhost" ||
+		hostname.endsWith(".localhost") ||
+		hostname.endsWith(".local") ||
+		hostname.startsWith("127.") ||
+		hostname.startsWith("10.") ||
+		hostname.startsWith("192.168.") ||
+		hostname.startsWith("169.254.") ||
+		/^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+		hostname === "::1" ||
+		hostname === "[::1]" ||
+		/^\[?(?:fc|fd|fe[89ab])[0-9a-f]{2}:/i.test(hostname) ||
+		/^\[?::ffff:(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.)/i.test(
+			hostname,
+		) ||
+		hostname === "0.0.0.0"
+	) {
+		throw new Error("Private or local fabric source URLs are not permitted.");
+	}
+	return url;
+}
+
+async function fetchPublicResource(value: string, accept: string) {
+	let url = assertPublicHttpsUrl(value);
+	for (let redirects = 0; redirects <= 4; redirects++) {
+		const response = await fetch(url.toString(), {
+			headers: { Accept: accept, "User-Agent": "Blindmotion-Fabric-Importer/1.0" },
+			redirect: "manual",
+		});
+		if (response.status >= 300 && response.status < 400) {
+			const location = response.headers.get("location");
+			if (!location) throw new Error(`Redirect without a location from ${url.hostname}.`);
+			url = assertPublicHttpsUrl(new URL(location, url).toString());
+			continue;
+		}
+		if (!response.ok) {
+			throw new Error(`Fabric source request failed: ${response.status} ${url.hostname}`);
+		}
+		return { response, finalUrl: url };
+	}
+	throw new Error("Fabric source exceeded the redirect limit.");
+}
+
+function absoluteSourceUrl(value: string, base: string) {
+	return assertPublicHttpsUrl(new URL(value.replace(/^\/\//, "https://"), base).toString()).toString();
+}
+
+function fabricSwatchRecord(
+	supplier: string,
+	collection: string,
+	colour: string,
+	variant: string | undefined,
+	imageUrl: string,
+	sourcePageUrl: string,
+): FabricSwatch {
+	const identity = [supplier, collection, variant, colour].filter(
+		(value): value is string => Boolean(value),
+	);
+	const extensionMatch = new URL(imageUrl).pathname.match(/\.(jpe?g|png|webp)$/i);
+	const extension = extensionMatch?.[1]?.toLowerCase().replace("jpeg", "jpg") ?? "jpg";
+	const filename = `${identity.map(safeSlug).filter(Boolean).join("-")}.${extension}`;
+	return {
+		colour,
+		...(variant ? { variant } : {}),
+		image_url: imageUrl,
+		source_page_url: sourcePageUrl,
+		filename,
+		title: [collection, variant, colour].filter(Boolean).join(" – "),
+		alt_text: [collection, variant, colour, "fabric swatch"].filter(Boolean).join(" "),
+	};
+}
+
+async function extractLinkedPageSwatches(
+	html: string,
+	collectionUrl: string,
+	supplier: string,
+	collection: string,
+	maxItems: number,
+) {
+	const links = new Map<string, string>();
+	for (const match of html.matchAll(/<h2\b[^>]*class=["'][^"']*product-name[^"']*["'][^>]*>[\s\S]*?<a\b([^>]*)>([\s\S]*?)<\/a>[\s\S]*?<\/h2>/gi)) {
+		const href = htmlAttribute(match[1], "href");
+		const label = decodeHtmlText(match[2]);
+		if (href && label) links.set(absoluteSourceUrl(href, collectionUrl), label);
+	}
+	if (!links.size) {
+		for (const match of html.matchAll(/<a\b([^>]*)class=["'][^"']*product-image[^"']*["'][^>]*>/gi)) {
+			const href = htmlAttribute(match[1], "href");
+			const label = htmlAttribute(match[1], "title");
+			if (href && label) links.set(absoluteSourceUrl(href, collectionUrl), label);
+		}
+	}
+	if (!links.size) throw new Error("No linked fabric product pages were discovered.");
+	if (links.size > maxItems) throw new Error(`Discovered ${links.size} items, above max_items ${maxItems}.`);
+
+	const records = await Promise.all(
+		[...links.entries()].map(async ([pageUrl, listingLabel]) => {
+			const { response, finalUrl } = await fetchPublicResource(pageUrl, "text/html");
+			const pageHtml = await response.text();
+			const heading = decodeHtmlText(pageHtml.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? listingLabel);
+			const zoom = pageHtml.match(/<a\b([^>]*)>\s*(?:<[^>]+>\s*)*Zoom(?:\s*<[^>]+>)*\s*<\/a>/i);
+			let image = zoom ? htmlAttribute(zoom[1], "href") : "";
+			if (!image) {
+				const og = pageHtml.match(/<meta\b([^>]*(?:property|name)=["']og:image["'][^>]*)>/i);
+				image = og ? htmlAttribute(og[1], "content") : "";
+			}
+			if (!image) throw new Error(`No full-size image found for ${heading}.`);
+			const colour = heading
+				.replace(new RegExp(`^${collection.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`, "i"), "")
+				.replace(/\s+(?:sheer|privacy|blockout|light\s*filter(?:ing)?)\b.*$/i, "")
+				.trim();
+			return fabricSwatchRecord(
+				supplier,
+				collection,
+				colour || heading,
+				undefined,
+				absoluteSourceUrl(image, finalUrl.toString()),
+				finalUrl.toString(),
+			);
+		}),
+	);
+	return records;
+}
+
+function extractSectionedAttributeSwatches(
+	html: string,
+	collectionUrl: string,
+	supplier: string,
+	collection: string,
+	maxItems: number,
+) {
+	const records: FabricSwatch[] = [];
+	const sectionPattern = /<h3\b[^>]*>([\s\S]*?)<\/h3>([\s\S]*?)(?=<h3\b|<section\b[^>]*id=["']specifications|<div\b[^>]*id=["']specifications|$)/gi;
+	for (const section of html.matchAll(sectionPattern)) {
+		const variant = decodeHtmlText(section[1]);
+		for (const card of section[2].matchAll(/<article\b([^>]*)>/gi)) {
+			if (!/(?:^|\s)swatch(?:\s|$)/i.test(htmlAttribute(card[1], "class"))) continue;
+			const colour = htmlAttribute(card[1], "data-swatch-title");
+			const image = htmlAttribute(card[1], "data-swatch-image") || htmlAttribute(card[1], "data-swatch-thumbnail");
+			if (!colour || !image) continue;
+			const record = fabricSwatchRecord(
+					supplier,
+					collection,
+					colour,
+					variant,
+					absoluteSourceUrl(image, collectionUrl),
+					collectionUrl,
+				);
+			const variantToken = safeSlug(variant);
+			if (variantToken && !safeSlug(new URL(record.image_url).pathname).includes(variantToken)) {
+				record.warnings = [
+					`Source image filename does not contain the section variant ${variant}; review before import.`,
+				];
+			}
+			records.push(record);
+		}
+	}
+	if (!records.length) throw new Error("No sectioned attribute swatches were discovered.");
+	if (records.length > maxItems) throw new Error(`Discovered ${records.length} items, above max_items ${maxItems}.`);
+	return records;
+}
+
+async function buildFabricCollectionManifest(input: {
+	sourceUrl: string;
+	supplier: string;
+	collection: string;
+	extractionStrategy: "linked_product_pages" | "sectioned_attribute_swatches";
+	maxItems: number;
+}) {
+	const { response, finalUrl } = await fetchPublicResource(input.sourceUrl, "text/html");
+	const html = await response.text();
+	if (html.length > 4_000_000) throw new Error("Fabric collection HTML exceeds 4 MB.");
+	const items =
+		input.extractionStrategy === "linked_product_pages"
+			? await extractLinkedPageSwatches(
+					html,
+					finalUrl.toString(),
+					input.supplier,
+					input.collection,
+					input.maxItems,
+				)
+			: extractSectionedAttributeSwatches(
+					html,
+					finalUrl.toString(),
+					input.supplier,
+					input.collection,
+					input.maxItems,
+				);
+	const identities = new Set<string>();
+	const warnings: string[] = [];
+	const imageUses = new Map<string, string[]>();
+	for (const item of items) {
+		const identity = `${item.variant ?? ""}|${item.colour}`.toLowerCase();
+		if (identities.has(identity)) throw new Error(`Duplicate swatch identity discovered: ${identity}`);
+		identities.add(identity);
+		for (const warning of item.warnings ?? []) warnings.push(`${item.title}: ${warning}`);
+		const uses = imageUses.get(item.image_url) ?? [];
+		uses.push(item.title);
+		imageUses.set(item.image_url, uses);
+	}
+	for (const [imageUrl, uses] of imageUses) {
+		if (uses.length > 1) {
+			warnings.push(`One source image is reused by multiple swatches (${uses.join(", ")}): ${imageUrl}`);
+		}
+	}
+	const manifestCore = {
+		source_url: finalUrl.toString(),
+		supplier: input.supplier,
+		collection: input.collection,
+		extraction_strategy: input.extractionStrategy,
+		warnings,
+		items,
+	};
+	const manifestHash = await sha256Hex(new TextEncoder().encode(JSON.stringify(manifestCore)));
+	return { ...manifestCore, manifest_hash: manifestHash };
+}
+
+async function findOrCreateMediaFolder(name: string, parent: number) {
+	const slug = safeSlug(name);
+	const existingResponse = await wpAuthenticatedFetch(
+		`media_folder?slug=${encodeURIComponent(slug)}&parent=${parent}&per_page=100&context=edit`,
+	);
+	const existing = await existingResponse.json<any[]>();
+	const exact = existing.find((term) => term.slug === slug && Number(term.parent ?? 0) === parent);
+	if (exact) return { term: exact, created: false };
+	const createdResponse = await wpAuthenticatedWrite("media_folder", { name, slug, parent });
+	return { term: await createdResponse.json<any>(), created: true };
+}
+
 function decodeBase64(value: string) {
 	const binary = atob(value);
 	const bytes = new Uint8Array(binary.length);
@@ -8300,6 +8577,194 @@ function createServer() {
 					paired_attachment_updated: hasPairedAttachment,
 					backup,
 					original_attachment_deleted: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"preview_fabric_collection_import",
+		{
+			description:
+				"Read a supplier collection URL and return a deterministic, non-writing WordPress media import manifest. Supports linked product-page collections and single-page swatches grouped under headings; supplier, collection and all source URLs are runtime parameters.",
+			inputSchema: z.object({
+				source_url: z.string().url(),
+				supplier: z.string().trim().min(1).max(120),
+				collection: z.string().trim().min(1).max(120),
+				extraction_strategy: z.enum([
+					"linked_product_pages",
+					"sectioned_attribute_swatches",
+				]),
+				max_items: z.number().int().min(1).max(100).default(50),
+			}),
+		},
+		async ({ source_url, supplier, collection, extraction_strategy, max_items }) => {
+			try {
+				const manifest = await buildFabricCollectionManifest({
+					sourceUrl: source_url,
+					supplier,
+					collection,
+					extractionStrategy: extraction_strategy,
+					maxItems: max_items,
+				});
+				return toolResult({
+					write_performed: false,
+					item_count: manifest.items.length,
+					...manifest,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"import_fabric_collection_media_guarded",
+		{
+			description: `Rebuild a previously previewed fabric manifest, require its exact hash, create a hierarchical WordPress media_folder taxonomy path, and idempotently upload the discovered images with searchable titles, alt text, captions and source records. Never deletes or overwrites media. Requires exact confirmation: ${FABRIC_COLLECTION_IMPORT_CONFIRMATION}`,
+			inputSchema: z.object({
+				source_url: z.string().url(),
+				supplier: z.string().trim().min(1).max(120),
+				collection: z.string().trim().min(1).max(120),
+				extraction_strategy: z.enum([
+					"linked_product_pages",
+					"sectioned_attribute_swatches",
+				]),
+				media_taxonomy_root: z.string().trim().min(1).max(120).default("Fabric Collections"),
+				max_items: z.number().int().min(1).max(100).default(50),
+				expected_manifest_hash: z.string().regex(/^[a-f0-9]{64}$/),
+				confirmation: z.literal(FABRIC_COLLECTION_IMPORT_CONFIRMATION),
+			}),
+		},
+		async ({
+			source_url,
+			supplier,
+			collection,
+			extraction_strategy,
+			media_taxonomy_root,
+			max_items,
+			expected_manifest_hash,
+		}) => {
+			try {
+				const manifest = await buildFabricCollectionManifest({
+					sourceUrl: source_url,
+					supplier,
+					collection,
+					extractionStrategy: extraction_strategy,
+					maxItems: max_items,
+				});
+				if (manifest.manifest_hash !== expected_manifest_hash) {
+					throw new Error(
+						`Supplier manifest changed since preview. Expected ${expected_manifest_hash}, current ${manifest.manifest_hash}. Preview again; no write performed.`,
+					);
+				}
+
+				const root = await findOrCreateMediaFolder(media_taxonomy_root, 0);
+				const supplierFolder = await findOrCreateMediaFolder(supplier, Number(root.term.id));
+				const collectionFolder = await findOrCreateMediaFolder(
+					collection,
+					Number(supplierFolder.term.id),
+				);
+				const variantFolders = new Map<string, { term: any; created: boolean }>();
+				const results: any[] = [];
+
+				for (const item of manifest.items) {
+					let targetFolder = collectionFolder;
+					if (item.variant) {
+						if (!variantFolders.has(item.variant)) {
+							variantFolders.set(
+								item.variant,
+								await findOrCreateMediaFolder(item.variant, Number(collectionFolder.term.id)),
+							);
+						}
+						targetFolder = variantFolders.get(item.variant)!;
+					}
+
+					const attachmentSlug = safeSlug(item.filename.replace(/\.[^.]+$/, ""));
+					const existingResponse = await wpAuthenticatedFetch(
+						`media?slug=${encodeURIComponent(attachmentSlug)}&per_page=100&context=edit`,
+					);
+					const existing = await existingResponse.json<any[]>();
+					if (existing.length > 1) {
+						throw new Error(`Multiple existing attachments have slug ${attachmentSlug}; stopped safely.`);
+					}
+					if (existing.length === 1) {
+						results.push({
+							status: "skipped_existing",
+							colour: item.colour,
+							variant: item.variant ?? null,
+							attachment: mediaMetadata(existing[0]),
+						});
+						continue;
+					}
+
+					const { response: imageResponse, finalUrl } = await fetchPublicResource(
+						item.image_url,
+						"image/jpeg,image/png,image/webp",
+					);
+					const declaredLength = Number(imageResponse.headers.get("content-length") ?? 0);
+					if (declaredLength > 6_000_000) throw new Error(`${item.title} exceeds the 6 MB image limit.`);
+					const mimeType = (imageResponse.headers.get("content-type") ?? "")
+						.split(";")[0]
+						.trim()
+						.toLowerCase();
+					if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType)) {
+						throw new Error(`${item.title} returned unsupported MIME type ${mimeType || "unknown"}.`);
+					}
+					const bytes = new Uint8Array(await imageResponse.arrayBuffer());
+					if (!bytes.length || bytes.length > 6_000_000 || !hasExpectedImageSignature(bytes, mimeType)) {
+						throw new Error(`${item.title} returned invalid or oversized image bytes.`);
+					}
+					const uploaded = await wpUploadMedia(item.filename, mimeType, bytes);
+					const description = [
+						`Supplier: ${supplier}`,
+						`Collection: ${collection}`,
+						...(item.variant ? [`Variant: ${item.variant}`] : []),
+						`Colour: ${item.colour}`,
+						`Source page: ${item.source_page_url}`,
+						`Source image: ${finalUrl.toString()}`,
+					].join("\n");
+					const updateResponse = await wpAuthenticatedWrite(`media/${uploaded.id}`, {
+						title: item.title,
+						alt_text: item.alt_text,
+						caption: item.title,
+						description,
+						media_folder: [Number(targetFolder.term.id)],
+					});
+					const verified = await updateResponse.json<any>();
+					if (
+						verified.id !== uploaded.id ||
+						!Array.isArray(verified.media_folder) ||
+						!verified.media_folder.includes(Number(targetFolder.term.id))
+					) {
+						throw new Error(`WordPress did not verify metadata/taxonomy assignment for ${item.title}.`);
+					}
+					results.push({
+						status: "imported",
+						colour: item.colour,
+						variant: item.variant ?? null,
+						attachment: mediaMetadata(verified),
+					});
+				}
+
+				return toolResult({
+					completed: true,
+					manifest_hash: manifest.manifest_hash,
+					media_taxonomy: "media_folder",
+					folder_path: [media_taxonomy_root, supplier, collection],
+					folders_created: [
+						root,
+						supplierFolder,
+						collectionFolder,
+						...variantFolders.values(),
+					].filter((folder) => folder.created).length,
+					imported_count: results.filter((item) => item.status === "imported").length,
+					skipped_existing_count: results.filter((item) => item.status === "skipped_existing").length,
+					results,
+					deleted_count: 0,
+					overwritten_count: 0,
 				});
 			} catch (error) {
 				return toolError(error);
