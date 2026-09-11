@@ -176,6 +176,29 @@ Existing attachment slugs are skipped, reruns are idempotent, private/local URLs
 unsafe redirects are rejected, and the importer has no media deletion or overwrite
 path.
 
+## Reusable guarded curtain configurator
+
+`preview_curtain_product_configuration` builds a deterministic, non-writing plan for
+replacing one draft product's placeholder WAPF fields with a motorised-curtain
+configuration. Product identity, new name, dimensional limits, configurations,
+fabric roles, collection names, swatch attachment IDs and filenames, headings, stack
+directions, mounting, motor brand, power, motor position and controls are supplied at
+runtime. Every WordPress swatch attachment is revalidated before the plan is
+returned.
+
+`apply_curtain_product_configuration_guarded` rebuilds the same plan and requires the
+exact original WAPF hash, plan hash and
+`CONFIRM APPLY CURTAIN PRODUCT CONFIGURATION`. It replaces only the product name and
+WAPF field group while forcing the product to remain draft and hidden. The slug,
+descriptions, categories, images, unrelated metadata and base price are preserved.
+The write is verified and the exact prior state is restored if verification fails;
+the tool cannot publish a product.
+
+The first configuration pass intentionally supports only explicit caller-supplied
+fixed option adjustments. Dimension-based curtain, fabric, track, motor, freight and
+installation formulas can be added after the customer-facing option logic is
+reviewed without embedding supplier pricing or product IDs in the Worker.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:

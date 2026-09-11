@@ -13845,6 +13845,359 @@ function createServer() {
 		},
 	);
 
+	/* Parameter-driven curtain configurator foundation. */
+	const curtainConfigKey = z.string().trim().regex(/^[a-z][a-z0-9_]{1,49}$/);
+	const curtainChoiceSchema = z.object({
+		key: curtainConfigKey,
+		label: z.string().trim().min(1).max(200),
+		price_adjustment_aud: z.number().min(0).max(100000).default(0),
+	});
+	const curtainSwatchSchema = z.object({
+		label: z.string().trim().min(1).max(200),
+		attachment_id: z.number().int().positive(),
+		expected_filename: z.string().trim().min(1).max(300),
+	});
+	const curtainCollectionSchema = z.object({
+		key: curtainConfigKey,
+		label: z.string().trim().min(1).max(200),
+		role: z.enum(["sheer", "blockout"]),
+		price_adjustment_aud: z.number().min(0).max(100000).default(0),
+		swatches: z.array(curtainSwatchSchema).min(1).max(50),
+	});
+	const curtainConfigurationSchema = z.object({
+		key: curtainConfigKey,
+		label: z.string().trim().min(1).max(200),
+		layers: z.array(z.enum(["sheer", "blockout"])).min(1).max(2),
+		price_adjustment_aud: z.number().min(0).max(100000).default(0),
+	});
+	const curtainBuilderBaseSchema = z.object({
+		product_id: z.number().int().positive(),
+		expected_product_name: z.string().trim().min(1).max(500),
+		new_product_name: z.string().trim().min(1).max(500),
+		minimum_width_mm: z.number().int().min(100).max(10000),
+		maximum_width_mm: z.number().int().min(100).max(10000),
+		minimum_drop_mm: z.number().int().min(100).max(10000),
+		maximum_drop_mm: z.number().int().min(100).max(10000),
+		motor_brand: z.string().trim().min(1).max(100),
+		configurations: z.array(curtainConfigurationSchema).min(1).max(10),
+		fabric_collections: z.array(curtainCollectionSchema).min(2).max(20),
+		heading_options: z.array(curtainChoiceSchema).min(1).max(10),
+		stack_direction_options: z.array(curtainChoiceSchema).min(1).max(10),
+		mounting_options: z.array(curtainChoiceSchema).min(1).max(10),
+		motor_power_options: z.array(curtainChoiceSchema).min(1).max(10),
+		motor_position_options: z.array(curtainChoiceSchema).min(1).max(10),
+		control_options: z.array(curtainChoiceSchema).min(1).max(20),
+	});
+	const validateCurtainBuilder = (value: z.infer<typeof curtainBuilderBaseSchema>, context: z.RefinementCtx) => {
+		if (value.minimum_width_mm >= value.maximum_width_mm) {
+			context.addIssue({ code: z.ZodIssueCode.custom, path: ["maximum_width_mm"], message: "Maximum width must exceed minimum width." });
+		}
+		if (value.minimum_drop_mm >= value.maximum_drop_mm) {
+			context.addIssue({ code: z.ZodIssueCode.custom, path: ["maximum_drop_mm"], message: "Maximum drop must exceed minimum drop." });
+		}
+		const uniqueKeys = (items: Array<{ key: string }>, path: string) => {
+			const keys = items.map((item) => item.key);
+			if (new Set(keys).size !== keys.length) {
+				context.addIssue({ code: z.ZodIssueCode.custom, path: [path], message: "Keys must be unique." });
+			}
+		};
+		uniqueKeys(value.configurations, "configurations");
+		uniqueKeys(value.fabric_collections, "fabric_collections");
+		uniqueKeys(value.heading_options, "heading_options");
+		uniqueKeys(value.stack_direction_options, "stack_direction_options");
+		uniqueKeys(value.mounting_options, "mounting_options");
+		uniqueKeys(value.motor_power_options, "motor_power_options");
+		uniqueKeys(value.motor_position_options, "motor_position_options");
+		uniqueKeys(value.control_options, "control_options");
+		for (const role of ["sheer", "blockout"] as const) {
+			if (!value.fabric_collections.some((collection) => collection.role === role)) {
+				context.addIssue({ code: z.ZodIssueCode.custom, path: ["fabric_collections"], message: `At least one ${role} collection is required.` });
+			}
+			if (!value.configurations.some((configuration) => configuration.layers.includes(role))) {
+				context.addIssue({ code: z.ZodIssueCode.custom, path: ["configurations"], message: `At least one configuration must use the ${role} role.` });
+			}
+		}
+		for (const configuration of value.configurations) {
+			if (new Set(configuration.layers).size !== configuration.layers.length) {
+				context.addIssue({ code: z.ZodIssueCode.custom, path: ["configurations"], message: "A configuration cannot repeat a fabric role." });
+			}
+		}
+		const attachmentIds = value.fabric_collections.flatMap((collection) => collection.swatches.map((swatch) => swatch.attachment_id));
+		if (new Set(attachmentIds).size !== attachmentIds.length) {
+			context.addIssue({ code: z.ZodIssueCode.custom, path: ["fabric_collections"], message: "Each swatch attachment may appear only once." });
+		}
+	};
+	const curtainBuilderSchema = curtainBuilderBaseSchema.superRefine(validateCurtainBuilder);
+	const curtainApplySchema = curtainBuilderBaseSchema.extend({
+		expected_field_group_sha256: genericWapfHash,
+		expected_plan_sha256: genericWapfHash,
+		confirmation: z.literal("CONFIRM APPLY CURTAIN PRODUCT CONFIGURATION"),
+	}).superRefine(validateCurtainBuilder);
+
+	type CurtainBuilderInput = z.infer<typeof curtainBuilderSchema>;
+	type CurtainChoiceInput = z.infer<typeof curtainChoiceSchema>;
+
+	async function curtainStableToken(seed: string, length: number) {
+		return (await sha256Hex(new TextEncoder().encode(seed))).slice(0, length);
+	}
+
+	function curtainCondition(field: string, values: string[]) {
+		return values.map((value) => ({
+			rules: [{ condition: "==", value, field, generated: false }],
+		}));
+	}
+
+	function curtainAndCondition(rules: Array<{ field: string; value: string }>) {
+		return [{ rules: rules.map((rule) => ({ condition: "==", ...rule, generated: false })) }];
+	}
+
+	async function buildCurtainConfigurationPlan(args: CurtainBuilderInput, suppliedProduct?: any) {
+		const product = suppliedProduct ?? await (await wcFetch("products/" + args.product_id)).json<any>();
+		if (product.id !== args.product_id || product.name !== args.expected_product_name) {
+			throw new Error("The caller-supplied curtain product identity no longer matches WooCommerce.");
+		}
+		if (product.status !== "draft") throw new Error("Curtain configuration can be built only on a draft product.");
+		const wapf = genericWapf(product);
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		const templates = new Map<string, any>();
+		for (const field of wapf.group.fields) {
+			if (!templates.has(String(field?.type ?? ""))) templates.set(String(field?.type ?? ""), field);
+		}
+		for (const requiredType of ["text", "number", "radio", "image-swatch"]) {
+			if (!templates.has(requiredType)) throw new Error("Existing WAPF group lacks a reusable " + requiredType + " field template.");
+		}
+
+		const requestedSwatches = args.fabric_collections.flatMap((collection) => collection.swatches);
+		const mediaById = new Map<number, any>();
+		for (let index = 0; index < requestedSwatches.length; index += 100) {
+			const ids = requestedSwatches.slice(index, index + 100).map((swatch) => swatch.attachment_id);
+			const response = await wpFetch(`media?include=${ids.join(",")}&per_page=100`);
+			for (const media of await response.json<any[]>()) mediaById.set(Number(media.id), media);
+		}
+		for (const swatch of requestedSwatches) {
+			const media = mediaById.get(swatch.attachment_id);
+			if (!media) throw new Error("WordPress attachment " + swatch.attachment_id + " is unavailable.");
+			const filename = String(media.media_details?.file ?? media.source_url ?? "").split("/").pop()?.toLocaleLowerCase();
+			if (filename !== swatch.expected_filename.toLocaleLowerCase()) {
+				throw new Error(`Attachment ${swatch.attachment_id} filename changed; expected ${swatch.expected_filename}, found ${filename ?? "unknown"}.`);
+			}
+			if (!String(media.mime_type ?? "").startsWith("image/")) throw new Error("A selected swatch attachment is not an image.");
+		}
+
+		const fieldId = async (key: string) => curtainStableToken(`curtain-field-v1:${args.product_id}:${key}`, 13);
+		const choiceSlug = async (fieldKey: string, key: string) => curtainStableToken(`curtain-choice-v1:${args.product_id}:${fieldKey}:${key}`, 5);
+		const templateChoice = (type: string) => {
+			const choice = templates.get(type)?.options?.choices?.[0];
+			return choice ? structuredClone(choice) : {};
+		};
+		const makeChoices = async (fieldKey: string, choices: CurtainChoiceInput[], type = "radio") => Promise.all(choices.map(async (choice) => ({
+			...templateChoice(type),
+			label: choice.label,
+			slug: await choiceSlug(fieldKey, choice.key),
+			pricing_type: choice.price_adjustment_aud > 0 ? "fixed" : "none",
+			pricing_amount: choice.price_adjustment_aud,
+			image: null,
+			attachment: null,
+		})));
+		const makeField = async (type: string, key: string, label: string, choices: any[] = [], conditionals: any[] = [], numberLimits?: { min: number; max: number }) => {
+			const field = structuredClone(templates.get(type));
+			field.id = await fieldId(key);
+			field.type = type;
+			field.label = label;
+			field.required = true;
+			field.pricing = { type: "fixed", amount: 0, enabled: false };
+			field.conditionals = conditionals;
+			delete field.conditions;
+			delete field.rules;
+			field.options = { ...(field.options ?? {}), choices };
+			if (numberLimits) field.options = { ...field.options, min: numberLimits.min, max: numberLimits.max, step: 1 };
+			return field;
+		};
+
+		const configurationFieldKey = "configuration";
+		const configurationFieldId = await fieldId(configurationFieldKey);
+		const configurationChoices = await makeChoices(configurationFieldKey, args.configurations);
+		const configurationSlugs = new Map(args.configurations.map((configuration, index) => [configuration.key, configurationChoices[index].slug]));
+		const configurationValuesForRole = (role: "sheer" | "blockout") => args.configurations
+			.filter((configuration) => configuration.layers.includes(role))
+			.map((configuration) => configurationSlugs.get(configuration.key)!);
+		const singleConfigurationValues = args.configurations
+			.filter((configuration) => configuration.layers.length === 1)
+			.map((configuration) => configurationSlugs.get(configuration.key)!);
+		const doubleConfigurationValues = args.configurations
+			.filter((configuration) => configuration.layers.length > 1)
+			.map((configuration) => configurationSlugs.get(configuration.key)!);
+		const fields: any[] = [];
+		fields.push(await makeField("text", "location", "Room / Location"));
+		fields.push(await makeField("radio", configurationFieldKey, "Curtain Configuration", configurationChoices));
+		fields.push(await makeField("number", "width", "Finished Track Width (mm)", [], [], { min: args.minimum_width_mm, max: args.maximum_width_mm }));
+		fields.push(await makeField("number", "drop", "Curtain Drop (mm)", [], [], { min: args.minimum_drop_mm, max: args.maximum_drop_mm }));
+		fields.push(await makeField("radio", "heading", "Heading Style", await makeChoices("heading", args.heading_options)));
+		fields.push(await makeField("radio", "mounting", "Track Mounting", await makeChoices("mounting", args.mounting_options)));
+		fields.push(await makeField("radio", "stack_direction", "Stack Direction", await makeChoices("stack_direction", args.stack_direction_options)));
+		fields.push(await makeField("radio", "motor_power", `${args.motor_brand} Motor Power`, await makeChoices("motor_power", args.motor_power_options)));
+		if (singleConfigurationValues.length) fields.push(await makeField("radio", "single_motor_position", "Motor Position (viewed from room)", await makeChoices("single_motor_position", args.motor_position_options), curtainCondition(configurationFieldId, singleConfigurationValues)));
+		if (doubleConfigurationValues.length) {
+			fields.push(await makeField("radio", "sheer_motor_position", "Sheer Track Motor Position (viewed from room)", await makeChoices("sheer_motor_position", args.motor_position_options), curtainCondition(configurationFieldId, doubleConfigurationValues)));
+			fields.push(await makeField("radio", "blockout_motor_position", "Blockout Track Motor Position (viewed from room)", await makeChoices("blockout_motor_position", args.motor_position_options), curtainCondition(configurationFieldId, doubleConfigurationValues)));
+		}
+		fields.push(await makeField("radio", "control", "Curtain Control", await makeChoices("control", args.control_options)));
+
+		for (const role of ["sheer", "blockout"] as const) {
+			const collections = args.fabric_collections.filter((collection) => collection.role === role);
+			const collectionFieldKey = role + "_collection";
+			const collectionFieldId = await fieldId(collectionFieldKey);
+			const collectionChoices = await makeChoices(collectionFieldKey, collections.map((collection) => ({
+				key: collection.key,
+				label: collection.label,
+				price_adjustment_aud: collection.price_adjustment_aud,
+			})));
+			const collectionSlugs = new Map(collections.map((collection, index) => [collection.key, collectionChoices[index].slug]));
+			fields.push(await makeField("radio", collectionFieldKey, role === "sheer" ? "Sheer Fabric Collection" : "Blockout Fabric Collection", collectionChoices, curtainCondition(configurationFieldId, configurationValuesForRole(role))));
+			for (const collection of collections) {
+				const colourFieldKey = `${role}_${collection.key}_colour`;
+				const colourChoices = await Promise.all(collection.swatches.map(async (swatch) => {
+					const media = mediaById.get(swatch.attachment_id);
+					return {
+						...templateChoice("image-swatch"),
+						label: swatch.label,
+						slug: await choiceSlug(colourFieldKey, String(swatch.attachment_id)),
+						pricing_type: "none",
+						pricing_amount: 0,
+						image: media.source_url,
+						attachment: swatch.attachment_id,
+					};
+				}));
+				const conditions = configurationValuesForRole(role).map((configurationValue) => curtainAndCondition([
+					{ field: configurationFieldId, value: configurationValue },
+					{ field: collectionFieldId, value: collectionSlugs.get(collection.key)! },
+				])[0]);
+				fields.push(await makeField("image-swatch", colourFieldKey, `${collection.label} Colours`, colourChoices, conditions));
+			}
+		}
+
+		const updatedGroup = { ...structuredClone(wapf.group), fields };
+		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+		const afterHash = await genericWapfHashOf(updatedValue);
+		const planHash = await genericWapfHashOf({
+			product_id: args.product_id,
+			expected_product_name: args.expected_product_name,
+			new_product_name: args.new_product_name,
+			before_field_group_sha256: beforeHash,
+			after_field_group_sha256: afterHash,
+		});
+		return {
+			product,
+			wapf,
+			updatedValue,
+			beforeHash,
+			afterHash,
+			planHash,
+			fields,
+			mediaById,
+		};
+	}
+
+	server.registerTool(
+		"preview_curtain_product_configuration",
+		{
+			description:
+				"Build a deterministic, non-writing plan to replace one draft product's placeholder WAPF options with a parameter-driven motorised-curtain configurator. Validates product identity, dimensions, configurations, every fabric attachment and all runtime option lists. Pricing is limited to explicit caller-supplied option adjustments; the product remains untouched.",
+			inputSchema: curtainBuilderSchema,
+		},
+		async (args) => {
+			try {
+				const plan = await buildCurtainConfigurationPlan(args);
+				return toolResult({
+					write_performed: false,
+					product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
+					planned_product: { name: args.new_product_name, status: "draft", catalog_visibility: "hidden" },
+					before_field_group_sha256: plan.beforeHash,
+					after_field_group_sha256: plan.afterHash,
+					plan_sha256: plan.planHash,
+					field_count: plan.fields.length,
+					fields: plan.fields.map((field) => ({
+						id: field.id,
+						label: field.label,
+						type: field.type,
+						choice_count: field.options?.choices?.length ?? 0,
+						conditional_group_count: field.conditionals?.length ?? 0,
+						pricing_enabled: field.pricing?.enabled === true,
+					})),
+					collections: args.fabric_collections.map((collection) => ({ key: collection.key, label: collection.label, role: collection.role, swatch_count: collection.swatches.length })),
+					swatch_count: args.fabric_collections.reduce((sum, collection) => sum + collection.swatches.length, 0),
+					pricing_foundation_only: true,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_curtain_product_configuration_guarded",
+		{
+			description:
+				"Apply one exact previewed motorised-curtain WAPF plan to an explicitly identified draft product. Revalidates every runtime parameter, product state, WAPF hash and fabric attachment; replaces only the WAPF field group, product name, draft status and hidden visibility; verifies and rolls back on failure. Cannot publish the product.",
+			inputSchema: curtainApplySchema,
+		},
+		async (args) => {
+			try {
+				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
+				const plan = await buildCurtainConfigurationPlan(args, product);
+				if (plan.beforeHash !== args.expected_field_group_sha256 || plan.planHash !== args.expected_plan_sha256) {
+					throw new Error("The curtain product or deterministic plan changed after preview; refusing write.");
+				}
+				const original = {
+					name: product.name,
+					status: product.status,
+					catalog_visibility: product.catalog_visibility,
+					wapf_value: plan.wapf.meta.value,
+				};
+				try {
+					await wcWrite("products/" + args.product_id, {
+						name: args.new_product_name,
+						status: "draft",
+						catalog_visibility: "hidden",
+						meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
+					});
+					const verified = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const verifiedWapf = genericWapf(verified);
+					const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+					if (verified.id !== args.product_id || verified.name !== args.new_product_name || verified.status !== "draft" || verified.catalog_visibility !== "hidden" || verifiedHash !== plan.afterHash) {
+						throw new Error("Post-write curtain configuration verification failed.");
+					}
+					return toolResult({
+						updated: true,
+						product: { id: verified.id, name: verified.name, status: verified.status, catalog_visibility: verified.catalog_visibility },
+						before_field_group_sha256: plan.beforeHash,
+						after_field_group_sha256: verifiedHash,
+						field_count: plan.fields.length,
+						swatch_count: args.fabric_collections.reduce((sum, collection) => sum + collection.swatches.length, 0),
+						collection_count: args.fabric_collections.length,
+						pricing_foundation_only: true,
+						untouched: ["slug", "descriptions", "categories", "featured image", "gallery", "non-WAPF metadata", "base price"],
+					});
+				} catch (writeError) {
+					await wcWrite("products/" + args.product_id, {
+						name: original.name,
+						status: original.status,
+						catalog_visibility: original.catalog_visibility,
+						meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: original.wapf_value }],
+					});
+					const rolledBack = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const rollbackHash = await genericWapfHashOf(genericWapf(rolledBack).meta.value);
+					if (rolledBack.name !== original.name || rolledBack.status !== original.status || rolledBack.catalog_visibility !== original.catalog_visibility || rollbackHash !== plan.beforeHash) {
+						throw new Error("Curtain configuration write and exact rollback verification both failed.");
+					}
+					throw new Error("Curtain configuration write failed; exact rollback succeeded: " + (writeError instanceof Error ? writeError.message : String(writeError)));
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	return server;
 }
 
