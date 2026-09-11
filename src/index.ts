@@ -13847,11 +13847,14 @@ function createServer() {
 
 	/* Parameter-driven curtain configurator foundation. */
 	const curtainConfigKey = z.string().trim().regex(/^[a-z][a-z0-9_]{1,49}$/);
-	const curtainChoiceSchema = z.object({
+	const curtainChoiceShape = {
 		key: curtainConfigKey,
 		label: z.string().trim().min(1).max(200),
 		price_adjustment_aud: z.number().min(0).max(100000).default(0),
-	});
+		attachment_id: z.number().int().positive().optional(),
+		expected_filename: z.string().trim().min(1).max(300).optional(),
+	};
+	const curtainChoiceSchema = z.object(curtainChoiceShape);
 	const curtainSwatchSchema = z.object({
 		label: z.string().trim().min(1).max(200),
 		attachment_id: z.number().int().positive(),
@@ -13865,10 +13868,12 @@ function createServer() {
 		swatches: z.array(curtainSwatchSchema).min(1).max(50),
 	});
 	const curtainConfigurationSchema = z.object({
-		key: curtainConfigKey,
-		label: z.string().trim().min(1).max(200),
+		...curtainChoiceShape,
 		layers: z.array(z.enum(["sheer", "blockout"])).min(1).max(2),
-		price_adjustment_aud: z.number().min(0).max(100000).default(0),
+	});
+	const curtainOperationSchema = z.object({
+		...curtainChoiceShape,
+		motorised: z.boolean(),
 	});
 	const curtainBuilderBaseSchema = z.object({
 		product_id: z.number().int().positive(),
@@ -13884,6 +13889,7 @@ function createServer() {
 		heading_options: z.array(curtainChoiceSchema).min(1).max(10),
 		stack_direction_options: z.array(curtainChoiceSchema).min(1).max(10),
 		mounting_options: z.array(curtainChoiceSchema).min(1).max(10),
+		operation_options: z.array(curtainOperationSchema).min(2).max(10),
 		motor_power_options: z.array(curtainChoiceSchema).min(1).max(10),
 		motor_position_options: z.array(curtainChoiceSchema).min(1).max(10),
 		control_options: z.array(curtainChoiceSchema).min(1).max(20),
@@ -13906,9 +13912,31 @@ function createServer() {
 		uniqueKeys(value.heading_options, "heading_options");
 		uniqueKeys(value.stack_direction_options, "stack_direction_options");
 		uniqueKeys(value.mounting_options, "mounting_options");
+		uniqueKeys(value.operation_options, "operation_options");
 		uniqueKeys(value.motor_power_options, "motor_power_options");
 		uniqueKeys(value.motor_position_options, "motor_position_options");
 		uniqueKeys(value.control_options, "control_options");
+		if (!value.operation_options.some((option) => option.motorised) || !value.operation_options.some((option) => !option.motorised)) {
+			context.addIssue({ code: z.ZodIssueCode.custom, path: ["operation_options"], message: "Operation choices must include both manual and motorised options." });
+		}
+		const visualSets: Array<[string, Array<{ attachment_id?: number; expected_filename?: string }>]> = [
+			["configurations", value.configurations],
+			["heading_options", value.heading_options],
+			["stack_direction_options", value.stack_direction_options],
+			["mounting_options", value.mounting_options],
+			["operation_options", value.operation_options],
+		];
+		for (const [path, items] of visualSets) {
+			for (const [index, item] of items.entries()) {
+				if ((item.attachment_id == null) !== (item.expected_filename == null)) {
+					context.addIssue({ code: z.ZodIssueCode.custom, path: [path, index], message: "Image attachment ID and expected filename must be supplied together." });
+				}
+			}
+			const withImages = items.filter((item) => item.attachment_id != null);
+			if (withImages.length > 0 && withImages.length !== items.length) {
+				context.addIssue({ code: z.ZodIssueCode.custom, path: [path], message: "A visual option set must provide images for every choice or none." });
+			}
+		}
 		for (const role of ["sheer", "blockout"] as const) {
 			if (!value.fabric_collections.some((collection) => collection.role === role)) {
 				context.addIssue({ code: z.ZodIssueCode.custom, path: ["fabric_collections"], message: `At least one ${role} collection is required.` });
@@ -13924,7 +13952,7 @@ function createServer() {
 		}
 		const attachmentIds = value.fabric_collections.flatMap((collection) => collection.swatches.map((swatch) => swatch.attachment_id));
 		if (new Set(attachmentIds).size !== attachmentIds.length) {
-			context.addIssue({ code: z.ZodIssueCode.custom, path: ["fabric_collections"], message: "Each swatch attachment may appear only once." });
+			context.addIssue({ code: z.ZodIssueCode.custom, path: ["fabric_collections"], message: "Each fabric swatch attachment may appear only once." });
 		}
 	};
 	const curtainBuilderSchema = curtainBuilderBaseSchema.superRefine(validateCurtainBuilder);
@@ -13967,38 +13995,53 @@ function createServer() {
 			if (!templates.has(requiredType)) throw new Error("Existing WAPF group lacks a reusable " + requiredType + " field template.");
 		}
 
-		const requestedSwatches = args.fabric_collections.flatMap((collection) => collection.swatches);
+		const visualChoices = [
+			...args.configurations,
+			...args.heading_options,
+			...args.stack_direction_options,
+			...args.mounting_options,
+			...args.operation_options,
+		].filter((choice) => choice.attachment_id != null) as Array<CurtainChoiceInput & { attachment_id: number; expected_filename: string }>;
+		const requestedMedia = [
+			...args.fabric_collections.flatMap((collection) => collection.swatches),
+			...visualChoices,
+		];
+		const uniqueRequestedMedia = Array.from(new Map(requestedMedia.map((item) => [item.attachment_id, item])).values());
 		const mediaById = new Map<number, any>();
-		for (let index = 0; index < requestedSwatches.length; index += 100) {
-			const ids = requestedSwatches.slice(index, index + 100).map((swatch) => swatch.attachment_id);
+		for (let index = 0; index < uniqueRequestedMedia.length; index += 100) {
+			const ids = uniqueRequestedMedia.slice(index, index + 100).map((item) => item.attachment_id);
 			const response = await wpFetch(`media?include=${ids.join(",")}&per_page=100`);
 			for (const media of await response.json<any[]>()) mediaById.set(Number(media.id), media);
 		}
-		for (const swatch of requestedSwatches) {
-			const media = mediaById.get(swatch.attachment_id);
-			if (!media) throw new Error("WordPress attachment " + swatch.attachment_id + " is unavailable.");
+		for (const requested of uniqueRequestedMedia) {
+			const media = mediaById.get(requested.attachment_id);
+			if (!media) throw new Error("WordPress attachment " + requested.attachment_id + " is unavailable.");
 			const filename = String(media.media_details?.file ?? media.source_url ?? "").split("/").pop()?.toLocaleLowerCase();
-			if (filename !== swatch.expected_filename.toLocaleLowerCase()) {
-				throw new Error(`Attachment ${swatch.attachment_id} filename changed; expected ${swatch.expected_filename}, found ${filename ?? "unknown"}.`);
+			if (filename !== requested.expected_filename.toLocaleLowerCase()) {
+				throw new Error(`Attachment ${requested.attachment_id} filename changed; expected ${requested.expected_filename}, found ${filename ?? "unknown"}.`);
 			}
-			if (!String(media.mime_type ?? "").startsWith("image/")) throw new Error("A selected swatch attachment is not an image.");
+			if (!String(media.mime_type ?? "").startsWith("image/")) throw new Error("A selected curtain attachment is not an image.");
 		}
 
-		const fieldId = async (key: string) => curtainStableToken(`curtain-field-v1:${args.product_id}:${key}`, 13);
-		const choiceSlug = async (fieldKey: string, key: string) => curtainStableToken(`curtain-choice-v1:${args.product_id}:${fieldKey}:${key}`, 5);
+		const fieldId = async (key: string) => curtainStableToken(`curtain-field-v2:${args.product_id}:${key}`, 13);
+		const choiceSlug = async (fieldKey: string, key: string) => curtainStableToken(`curtain-choice-v2:${args.product_id}:${fieldKey}:${key}`, 5);
 		const templateChoice = (type: string) => {
 			const choice = templates.get(type)?.options?.choices?.[0];
 			return choice ? structuredClone(choice) : {};
 		};
-		const makeChoices = async (fieldKey: string, choices: CurtainChoiceInput[], type = "radio") => Promise.all(choices.map(async (choice) => ({
-			...templateChoice(type),
-			label: choice.label,
-			slug: await choiceSlug(fieldKey, choice.key),
-			pricing_type: choice.price_adjustment_aud > 0 ? "fixed" : "none",
-			pricing_amount: choice.price_adjustment_aud,
-			image: null,
-			attachment: null,
-		})));
+		const visualType = (choices: CurtainChoiceInput[]) => choices.every((choice) => choice.attachment_id != null) ? "image-swatch" : "radio";
+		const makeChoices = async (fieldKey: string, choices: CurtainChoiceInput[], type = "radio") => Promise.all(choices.map(async (choice) => {
+			const media = choice.attachment_id == null ? null : mediaById.get(choice.attachment_id);
+			return {
+				...templateChoice(type),
+				label: choice.label,
+				slug: await choiceSlug(fieldKey, choice.key),
+				pricing_type: choice.price_adjustment_aud > 0 ? "fixed" : "none",
+				pricing_amount: choice.price_adjustment_aud,
+				image: media?.source_url ?? null,
+				attachment: choice.attachment_id ?? null,
+			};
+		}));
 		const makeField = async (type: string, key: string, label: string, choices: any[] = [], conditionals: any[] = [], numberLimits?: { min: number; max: number }) => {
 			const field = structuredClone(templates.get(type));
 			field.id = await fieldId(key);
@@ -14016,7 +14059,8 @@ function createServer() {
 
 		const configurationFieldKey = "configuration";
 		const configurationFieldId = await fieldId(configurationFieldKey);
-		const configurationChoices = await makeChoices(configurationFieldKey, args.configurations);
+		const configurationType = visualType(args.configurations);
+		const configurationChoices = await makeChoices(configurationFieldKey, args.configurations, configurationType);
 		const configurationSlugs = new Map(args.configurations.map((configuration, index) => [configuration.key, configurationChoices[index].slug]));
 		const configurationValuesForRole = (role: "sheer" | "blockout") => args.configurations
 			.filter((configuration) => configuration.layers.includes(role))
@@ -14027,21 +14071,19 @@ function createServer() {
 		const doubleConfigurationValues = args.configurations
 			.filter((configuration) => configuration.layers.length > 1)
 			.map((configuration) => configurationSlugs.get(configuration.key)!);
+
+		const operationFieldKey = "operation";
+		const operationFieldId = await fieldId(operationFieldKey);
+		const operationType = visualType(args.operation_options);
+		const operationChoices = await makeChoices(operationFieldKey, args.operation_options, operationType);
+		const motorisedOperationValues = args.operation_options
+			.map((option, index) => ({ option, slug: operationChoices[index].slug }))
+			.filter(({ option }) => option.motorised)
+			.map(({ slug }) => slug);
+
 		const fields: any[] = [];
 		fields.push(await makeField("text", "location", "Room / Location"));
-		fields.push(await makeField("radio", configurationFieldKey, "Curtain Configuration", configurationChoices));
-		fields.push(await makeField("number", "width", "Finished Track Width (mm)", [], [], { min: args.minimum_width_mm, max: args.maximum_width_mm }));
-		fields.push(await makeField("number", "drop", "Curtain Drop (mm)", [], [], { min: args.minimum_drop_mm, max: args.maximum_drop_mm }));
-		fields.push(await makeField("radio", "heading", "Heading Style", await makeChoices("heading", args.heading_options)));
-		fields.push(await makeField("radio", "mounting", "Track Mounting", await makeChoices("mounting", args.mounting_options)));
-		fields.push(await makeField("radio", "stack_direction", "Stack Direction", await makeChoices("stack_direction", args.stack_direction_options)));
-		fields.push(await makeField("radio", "motor_power", `${args.motor_brand} Motor Power`, await makeChoices("motor_power", args.motor_power_options)));
-		if (singleConfigurationValues.length) fields.push(await makeField("radio", "single_motor_position", "Motor Position (viewed from room)", await makeChoices("single_motor_position", args.motor_position_options), curtainCondition(configurationFieldId, singleConfigurationValues)));
-		if (doubleConfigurationValues.length) {
-			fields.push(await makeField("radio", "sheer_motor_position", "Sheer Track Motor Position (viewed from room)", await makeChoices("sheer_motor_position", args.motor_position_options), curtainCondition(configurationFieldId, doubleConfigurationValues)));
-			fields.push(await makeField("radio", "blockout_motor_position", "Blockout Track Motor Position (viewed from room)", await makeChoices("blockout_motor_position", args.motor_position_options), curtainCondition(configurationFieldId, doubleConfigurationValues)));
-		}
-		fields.push(await makeField("radio", "control", "Curtain Control", await makeChoices("control", args.control_options)));
+		fields.push(await makeField(configurationType, configurationFieldKey, "Curtain Configuration", configurationChoices));
 
 		for (const role of ["sheer", "blockout"] as const) {
 			const collections = args.fabric_collections.filter((collection) => collection.role === role);
@@ -14075,6 +14117,33 @@ function createServer() {
 				fields.push(await makeField("image-swatch", colourFieldKey, `${collection.label} Colours`, colourChoices, conditions));
 			}
 		}
+
+		fields.push(await makeField("number", "width", "Finished Track Width (mm)", [], [], { min: args.minimum_width_mm, max: args.maximum_width_mm }));
+		fields.push(await makeField("number", "drop", "Curtain Drop (mm)", [], [], { min: args.minimum_drop_mm, max: args.maximum_drop_mm }));
+		const headingType = visualType(args.heading_options);
+		fields.push(await makeField(headingType, "heading", "Heading Style", await makeChoices("heading", args.heading_options, headingType)));
+		const mountingType = visualType(args.mounting_options);
+		fields.push(await makeField(mountingType, "mounting", "Track Mounting", await makeChoices("mounting", args.mounting_options, mountingType)));
+		const stackType = visualType(args.stack_direction_options);
+		fields.push(await makeField(stackType, "stack_direction", "Stack Direction", await makeChoices("stack_direction", args.stack_direction_options, stackType)));
+		fields.push(await makeField(operationType, operationFieldKey, "Curtain Operation", operationChoices));
+		fields.push(await makeField("radio", "motor_power", `${args.motor_brand} Motor Power`, await makeChoices("motor_power", args.motor_power_options), curtainCondition(operationFieldId, motorisedOperationValues)));
+		if (singleConfigurationValues.length) {
+			const conditions = singleConfigurationValues.flatMap((configurationValue) => motorisedOperationValues.map((operationValue) => curtainAndCondition([
+				{ field: configurationFieldId, value: configurationValue },
+				{ field: operationFieldId, value: operationValue },
+			])[0]));
+			fields.push(await makeField("radio", "single_motor_position", "Motor Position (viewed from room)", await makeChoices("single_motor_position", args.motor_position_options), conditions));
+		}
+		if (doubleConfigurationValues.length) {
+			const conditions = doubleConfigurationValues.flatMap((configurationValue) => motorisedOperationValues.map((operationValue) => curtainAndCondition([
+				{ field: configurationFieldId, value: configurationValue },
+				{ field: operationFieldId, value: operationValue },
+			])[0]));
+			fields.push(await makeField("radio", "sheer_motor_position", "Sheer Track Motor Position (viewed from room)", await makeChoices("sheer_motor_position", args.motor_position_options), conditions));
+			fields.push(await makeField("radio", "blockout_motor_position", "Blockout Track Motor Position (viewed from room)", await makeChoices("blockout_motor_position", args.motor_position_options), conditions));
+		}
+		fields.push(await makeField("radio", "control", "Curtain Control", await makeChoices("control", args.control_options), curtainCondition(operationFieldId, motorisedOperationValues)));
 
 		const updatedGroup = { ...structuredClone(wapf.group), fields };
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
