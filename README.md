@@ -179,12 +179,20 @@ path.
 ## Reusable guarded curtain configurator
 
 `preview_curtain_product_configuration` builds a deterministic, non-writing plan for
-replacing one draft product's placeholder WAPF fields with a motorised-curtain
-configuration. Product identity, new name, dimensional limits, configurations,
-fabric roles, collection names, swatch attachment IDs and filenames, headings, stack
-directions, mounting, motor brand, power, motor position and controls are supplied at
-runtime. Every WordPress swatch attachment is revalidated before the plan is
-returned.
+replacing one draft product's placeholder WAPF fields with a manual-or-motorised
+curtain configuration. Product identity, new name, dimensional limits,
+configurations, fabric roles, collection names, swatch attachment IDs and filenames,
+headings, stack directions, mounting, operation choices, motor brand, power, motor
+position and controls are supplied at runtime. Curtain configuration and fabric
+selection are placed first, followed by dimensions and hardware choices. Alpha or
+other motor-specific fields appear only for caller-designated motorised operation
+choices.
+
+Curtain configuration, heading, mounting, stack direction and operation choices may
+each supply verified WordPress attachment IDs and filenames. A complete imaged choice
+set renders as WAPF image swatches; a set with no image inputs remains a text radio
+group. Partial image sets are rejected. Every fabric and visual-choice attachment is
+revalidated before the plan is returned.
 
 `apply_curtain_product_configuration_guarded` rebuilds the same plan and requires the
 exact original WAPF hash, plan hash and
