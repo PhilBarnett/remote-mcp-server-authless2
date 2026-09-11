@@ -13153,7 +13153,7 @@ function createServer() {
 				}
 				const selectedJson = JSON.stringify(selected);
 				const unresolved = sourceWapf.group.fields.map(genericWapfFieldId).filter(
-					(id) => id && !selectedIds.has(id) && selectedJson.includes(id) && !replacements.has(id),
+					(id: string) => id && !selectedIds.has(id) && selectedJson.includes(id) && !replacements.has(id),
 				);
 				if (unresolved.length) {
 					throw new Error("Unmapped external source-field references: " + [...new Set(unresolved)].join(", ") + ".");
