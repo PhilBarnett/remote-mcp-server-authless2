@@ -13870,6 +13870,10 @@ function createServer() {
 	const curtainConfigurationSchema = z.object({
 		...curtainChoiceShape,
 		layers: z.array(z.enum(["sheer", "blockout"])).min(1).max(2),
+		fixed_layer_headings: z.object({
+			front: z.object({ role: z.enum(["sheer", "blockout"]), heading_key: curtainConfigKey }),
+			rear: z.object({ role: z.enum(["sheer", "blockout"]), heading_key: curtainConfigKey }),
+		}).optional(),
 	});
 	const curtainOperationSchema = z.object({
 		...curtainChoiceShape,
@@ -13945,9 +13949,20 @@ function createServer() {
 				context.addIssue({ code: z.ZodIssueCode.custom, path: ["configurations"], message: `At least one configuration must use the ${role} role.` });
 			}
 		}
-		for (const configuration of value.configurations) {
+		for (const [index, configuration] of value.configurations.entries()) {
 			if (new Set(configuration.layers).size !== configuration.layers.length) {
-				context.addIssue({ code: z.ZodIssueCode.custom, path: ["configurations"], message: "A configuration cannot repeat a fabric role." });
+				context.addIssue({ code: z.ZodIssueCode.custom, path: ["configurations", index], message: "A configuration cannot repeat a fabric role." });
+			}
+			const fixed = configuration.fixed_layer_headings;
+			if (!fixed) continue;
+			if (configuration.layers.length !== 2 || fixed.front.role === fixed.rear.role ||
+				!configuration.layers.includes(fixed.front.role) || !configuration.layers.includes(fixed.rear.role)) {
+				context.addIssue({ code: z.ZodIssueCode.custom, path: ["configurations", index, "fixed_layer_headings"], message: "Fixed front and rear headings require a two-layer configuration with both fabric roles represented once." });
+			}
+			for (const position of ["front", "rear"] as const) {
+				if (!value.heading_options.some((heading) => heading.key === fixed[position].heading_key)) {
+					context.addIssue({ code: z.ZodIssueCode.custom, path: ["configurations", index, "fixed_layer_headings", position, "heading_key"], message: "Fixed layer heading must reference a supplied heading option key." });
+				}
 			}
 		}
 		const attachmentIds = value.fabric_collections.flatMap((collection) => collection.swatches.map((swatch) => swatch.attachment_id));
@@ -14121,7 +14136,22 @@ function createServer() {
 		fields.push(await makeField("number", "width", "Finished Track Width (mm)", [], [], { min: args.minimum_width_mm, max: args.maximum_width_mm }));
 		fields.push(await makeField("number", "drop", "Curtain Drop (mm)", [], [], { min: args.minimum_drop_mm, max: args.maximum_drop_mm }));
 		const headingType = visualType(args.heading_options);
-		fields.push(await makeField(headingType, "heading", "Heading Style", await makeChoices("heading", args.heading_options, headingType)));
+		const selectableHeadingConfigurations = args.configurations.filter((configuration) => !configuration.fixed_layer_headings);
+		if (selectableHeadingConfigurations.length) {
+			const conditions = selectableHeadingConfigurations.length === args.configurations.length ? [] :
+				curtainCondition(configurationFieldId, selectableHeadingConfigurations.map((configuration) => configurationSlugs.get(configuration.key)!));
+			fields.push(await makeField(headingType, "heading", "Heading Style", await makeChoices("heading", args.heading_options, headingType), conditions));
+		}
+		for (const configuration of args.configurations) {
+			const fixed = configuration.fixed_layer_headings;
+			if (!fixed) continue;
+			const headingLabel = (key: string) => args.heading_options.find((heading) => heading.key === key)!.label;
+			const pairedLabel = `Front ${fixed.front.role === "sheer" ? "Sheer" : "Blockout"}: ${headingLabel(fixed.front.heading_key)} / Rear ${fixed.rear.role === "sheer" ? "Sheer" : "Blockout"}: ${headingLabel(fixed.rear.heading_key)}`;
+			const key = `fixed_heading_${configuration.key}`;
+			fields.push(await makeField("radio", key, "Heading Arrangement", await makeChoices(key, [{
+				key: "confirmed_pair", label: pairedLabel, price_adjustment_aud: 0,
+			}]), curtainCondition(configurationFieldId, [configurationSlugs.get(configuration.key)!])));
+		}
 		const mountingType = visualType(args.mounting_options);
 		fields.push(await makeField(mountingType, "mounting", "Track Mounting", await makeChoices("mounting", args.mounting_options, mountingType)));
 		const stackType = visualType(args.stack_direction_options);
@@ -14195,6 +14225,11 @@ function createServer() {
 					})),
 					collections: args.fabric_collections.map((collection) => ({ key: collection.key, label: collection.label, role: collection.role, swatch_count: collection.swatches.length })),
 					swatch_count: args.fabric_collections.reduce((sum, collection) => sum + collection.swatches.length, 0),
+					fixed_heading_arrangements: args.configurations.filter((configuration) => configuration.fixed_layer_headings).map((configuration) => ({
+						configuration_key: configuration.key,
+						front: configuration.fixed_layer_headings!.front,
+						rear: configuration.fixed_layer_headings!.rear,
+					})),
 					pricing_foundation_only: true,
 				});
 			} catch (error) {

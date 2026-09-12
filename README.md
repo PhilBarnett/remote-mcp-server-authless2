@@ -194,6 +194,18 @@ set renders as WAPF image swatches; a set with no image inputs remains a text ra
 group. Partial image sets are rejected. Every fabric and visual-choice attachment is
 revalidated before the plan is returned.
 
+A two-layer configuration may optionally specify `fixed_layer_headings` with
+`front` and `rear` objects, each containing a fabric `role` and a
+`heading_key` referencing a supplied heading option. The plan validates that
+both roles occur exactly once in that configuration and each heading exists. For
+such a configuration, the general Heading Style selector is hidden; a required,
+single-choice Heading Arrangement records the explicit front/rear pair in the
+order. Configurations without fixed headings keep the ordinary selectable
+Heading Style. For example, a double curtain can specify a front sheer S-Fold
+and rear blockout Knife Pleat without exposing an incompatible shared heading
+choice. This is parameter-driven and does not hard-code a fabric, heading or
+product ID.
+
 `apply_curtain_product_configuration_guarded` rebuilds the same plan and requires the
 exact original WAPF hash, plan hash and
 `CONFIRM APPLY CURTAIN PRODUCT CONFIGURATION`. It replaces only the product name and
