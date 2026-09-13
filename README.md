@@ -225,6 +225,26 @@ The generic `upload_wapf_choice_visual_guarded` tool uploads one reviewed JPEG, 
 
 The generic `apply_wapf_image_swatches_guarded` tool converts selected radio fields to image swatches using those existing attachments. It checks the exact product identity, WAPF metadata ID and prior hash, field and choice labels/slugs, attachment IDs and filenames. The only WAPF changes are the selected field types and their choices' image URLs/attachment IDs. Field IDs, choice slugs, labels, pricing expressions, conditional logic and unrelated product data remain unchanged. The product must stay draft/hidden. The write is verified and the previous WAPF field group is restored on verification failure. Both tools require `CONFIRM APPLY WAPF IMAGE SWATCHES` and cannot publish a product.
 
+## Parameter-driven WAPF field reconfiguration
+
+`preview_wapf_field_reconfiguration` validates a caller-supplied plan to remove
+explicitly identified WAPF fields and replace the complete choices and conditional
+logic of other explicitly identified fields. Product identity, metadata ID, current
+field-group hash, field IDs and labels, choice labels/slugs/prices, condition groups
+and every image are runtime inputs. Images may reference an existing WordPress
+attachment with its expected filename or a public HTTPS JPEG/PNG/WebP locked to an
+exact SHA-256 digest. The preview detects duplicate IDs/slugs, changed field types,
+invalid pricing and any conditional reference orphaned by the plan. It performs no
+writes.
+
+`apply_wapf_field_reconfiguration_guarded` rebuilds the exact previewed plan and
+requires its plan hash plus `CONFIRM APPLY WAPF FIELD RECONFIGURATION`. Hash-locked
+remote images are imported idempotently, then only the selected product's WAPF field
+group is updated. The product must be draft and hidden and cannot be published. The
+result is verified against an exact post-write hash; if the write or verification
+fails, the original WAPF field group is restored and verified. Product identity,
+visibility, descriptions, images and all non-WAPF data remain untouched.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
