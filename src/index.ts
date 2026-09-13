@@ -14595,12 +14595,12 @@ function createServer() {
 					}
 					attachment = Number(candidate.id);
 					sourceUrl = existingUrl;
-					filename = String(candidate.media_details?.file ?? existingUrl).split("/").pop();
+					filename = String(candidate.media_details?.file ?? existingUrl).split("/").pop() ?? "";
 				} else {
 					const uploaded = await wpUploadMedia(image.filename, mimeType, bytes);
 					attachment = Number(uploaded.id);
 					sourceUrl = String(uploaded.source_url ?? "");
-					filename = String(uploaded.media_details?.file ?? sourceUrl).split("/").pop();
+					filename = String(uploaded.media_details?.file ?? sourceUrl).split("/").pop() ?? "";
 				}
 				if (!Number.isInteger(attachment) || attachment! < 1 || !sourceUrl.startsWith("https://")) {
 					throw new Error("WordPress did not return a valid imported image attachment.");
@@ -14671,7 +14671,7 @@ function createServer() {
 		for (const removedId of removeIds) {
 			if (serialized.includes(removedId)) throw new Error("A remaining field still references removed field " + removedId + ".");
 		}
-		const fieldsById = new Map(updatedFields.map((field: any) => [genericWapfFieldId(field), field]));
+		const fieldsById = new Map<string, any>(updatedFields.map((field: any) => [genericWapfFieldId(field), field]));
 		for (const field of updatedFields) {
 			for (const group of field?.conditionals ?? []) {
 				for (const rule of group?.rules ?? []) {
