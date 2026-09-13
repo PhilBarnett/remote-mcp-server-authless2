@@ -14302,6 +14302,191 @@ function createServer() {
 		},
 	);
 
+	/* Generic guarded WAPF radio-to-image-swatch conversion. Media upload is separate
+	 * so a failed product write never has to re-upload the approved images. */
+	const wapfVisualConfirmation = "CONFIRM APPLY WAPF IMAGE SWATCHES";
+	const wapfVisualFilename = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/);
+	const wapfVisualMime = z.enum(["image/jpeg", "image/png", "image/webp"]);
+	const wapfVisualFieldId = z.string().trim().min(1).max(100);
+	const wapfVisualChoiceSlug = z.string().trim().min(1).max(100);
+
+	server.registerTool(
+		"upload_wapf_choice_visual_guarded",
+		{
+			description:
+				"Upload one approved image for an exact choice of an explicitly identified draft/hidden WooCommerce product. Verifies the unchanged WAPF hash and image digest. Uploads media only; never changes product options or deletes attachments.",
+			inputSchema: z.object({
+				product_id: genericWapfId,
+				expected_product_name: z.string().trim().min(1).max(500),
+				expected_field_group_sha256: genericWapfHash,
+				field_id: wapfVisualFieldId,
+				choice_slug: wapfVisualChoiceSlug,
+				filename: wapfVisualFilename,
+				mime_type: wapfVisualMime,
+				image_base64: z.string().min(4).max(5_000_000),
+				expected_image_sha256: genericWapfHash,
+				confirmation: z.literal(wapfVisualConfirmation),
+			}),
+		},
+		async (args) => {
+			try {
+				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
+				if (product.id !== args.product_id || product.name !== args.expected_product_name ||
+					product.status !== "draft" || product.catalog_visibility !== "hidden") {
+					throw new Error("Product identity or draft/hidden state changed; no media uploaded.");
+				}
+				const wapf = genericWapf(product);
+				if (await genericWapfHashOf(wapf.meta.value) !== args.expected_field_group_sha256) {
+					throw new Error("The WAPF field group changed after inspection; no media uploaded.");
+				}
+				const fields = wapf.group.fields.filter((field: any) => genericWapfFieldId(field) === args.field_id);
+				if (fields.length !== 1 || fields[0].type !== "radio") throw new Error("Expected exactly one radio field with this ID.");
+				const choices = fields[0].options?.choices;
+				const matching = Array.isArray(choices) ? choices.filter((choice: any) => String(choice?.slug) === args.choice_slug) : [];
+				if (matching.length !== 1 || matching[0]?.image || matching[0]?.attachment) {
+					throw new Error("The target choice is missing, ambiguous or already has an image.");
+				}
+				const extensions: Record<string, string[]> = {
+					"image/jpeg": ["jpg", "jpeg"], "image/png": ["png"], "image/webp": ["webp"],
+				};
+				const extension = args.filename.split(".").pop()?.toLowerCase() ?? "";
+				if (!extensions[args.mime_type].includes(extension)) throw new Error("Filename extension and MIME type disagree.");
+				const bytes = decodeBase64(args.image_base64);
+				if (!bytes.length || bytes.length > 3_500_000 || !hasExpectedImageSignature(bytes, args.mime_type) ||
+					await sha256Hex(bytes) !== args.expected_image_sha256) {
+					throw new Error("Image bytes, type, size or reviewed SHA-256 do not match; no media uploaded.");
+				}
+				const media = await wpUploadMedia(args.filename, args.mime_type, bytes);
+				if (!Number.isInteger(media.id) || media.id < 1 || media.mime_type !== args.mime_type ||
+					typeof media.source_url !== "string" || !media.source_url.startsWith("https://")) {
+					throw new Error("Upload returned an invalid media attachment; inspect WordPress before retrying.");
+				}
+				return toolResult({ uploaded: true, product_id: args.product_id, field_id: args.field_id,
+					choice_slug: args.choice_slug, attachment_id: media.id,
+					filename: String(media.media_details?.file ?? media.source_url).split("/").pop(),
+					source_url: media.source_url, image_sha256: args.expected_image_sha256,
+					product_modified: false });
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_wapf_image_swatches_guarded",
+		{
+			description:
+				"Convert caller-selected radio fields to image-swatch using verified existing WordPress attachments. Preserves exact field/choice IDs, labels, slugs, conditions, pricing and every unrelated WAPF field. Requires a group hash and confirmation, verifies the write and rolls back on failure; draft/hidden only.",
+			inputSchema: z.object({
+				product_id: genericWapfId,
+				expected_product_name: z.string().trim().min(1).max(500),
+				expected_meta_data_id: genericWapfId,
+				expected_field_group_sha256: genericWapfHash,
+				fields: z.array(z.object({
+					field_id: wapfVisualFieldId,
+					expected_field_label: z.string().min(1).max(300),
+					choices: z.array(z.object({
+						choice_slug: wapfVisualChoiceSlug,
+						expected_choice_label: z.string().min(1).max(300),
+						attachment_id: genericWapfId,
+						expected_filename: wapfVisualFilename,
+					})).min(1).max(30),
+				})).min(1).max(10),
+				confirmation: z.literal(wapfVisualConfirmation),
+			}),
+		},
+		async (args) => {
+			try {
+				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
+				if (product.id !== args.product_id || product.name !== args.expected_product_name ||
+					product.status !== "draft" || product.catalog_visibility !== "hidden") {
+					throw new Error("Product identity or draft/hidden state changed; no write performed.");
+				}
+				const wapf = genericWapf(product);
+				const beforeHash = await genericWapfHashOf(wapf.meta.value);
+				if (wapf.meta.id !== args.expected_meta_data_id || beforeHash !== args.expected_field_group_sha256) {
+					throw new Error("The WAPF field group changed after inspection; no write performed.");
+				}
+				const requestedIds = args.fields.map((field) => field.field_id);
+				if (new Set(requestedIds).size !== requestedIds.length) throw new Error("Duplicate field IDs in conversion request.");
+				const mediaRequests = args.fields.flatMap((field) => field.choices);
+				if (new Set(mediaRequests.map((choice) => choice.attachment_id)).size !== mediaRequests.length) {
+					throw new Error("Every choice needs its own distinct attachment.");
+				}
+				const updatedGroup = structuredClone(wapf.group);
+				const originalFields = wapf.group.fields;
+				for (const requested of args.fields) {
+					const indexes = originalFields.map((field: any, index: number) => genericWapfFieldId(field) === requested.field_id ? index : -1).filter((index: number) => index >= 0);
+					if (indexes.length !== 1) throw new Error("Target field ID is missing or ambiguous: " + requested.field_id);
+					const original = originalFields[indexes[0]];
+					if (original.type !== "radio" || wapfFieldLabel(original) !== requested.expected_field_label ||
+						!Array.isArray(original.options?.choices) || original.options.choices.length !== requested.choices.length) {
+						throw new Error("Target field type, label or choice count changed: " + requested.field_id);
+					}
+					const expectedSlugs = requested.choices.map((choice) => choice.choice_slug);
+					if (new Set(expectedSlugs).size !== expectedSlugs.length) throw new Error("Duplicate choice slug in field " + requested.field_id);
+					for (const originalChoice of original.options.choices) {
+						const match = requested.choices.find((choice) => choice.choice_slug === String(originalChoice.slug));
+						if (!match || originalChoice.label !== match.expected_choice_label || originalChoice.image || originalChoice.attachment) {
+							throw new Error("Choice slug/label/image changed in field " + requested.field_id);
+						}
+					}
+				}
+				const ids = mediaRequests.map((choice) => choice.attachment_id);
+				const mediaResponse = await wpFetch("media?include=" + ids.join(",") + "&per_page=" + ids.length);
+				const mediaById = new Map<number, any>((await mediaResponse.json<any[]>()).map((media: any) => [Number(media.id), media]));
+				for (const requested of mediaRequests) {
+					const media = mediaById.get(requested.attachment_id);
+					const filename = String(media?.media_details?.file ?? media?.source_url ?? "").split("/").pop();
+					if (!media || !String(media.mime_type ?? "").startsWith("image/") ||
+						filename?.toLowerCase() !== requested.expected_filename.toLowerCase() ||
+						!String(media.source_url ?? "").startsWith("https://")) {
+						throw new Error("Media attachment or filename no longer matches: " + requested.attachment_id);
+					}
+				}
+				for (const requested of args.fields) {
+					const index = originalFields.findIndex((field: any) => genericWapfFieldId(field) === requested.field_id);
+					const updated = updatedGroup.fields[index];
+					updated.type = "image-swatch";
+					for (const choice of updated.options.choices) {
+						const selected = requested.choices.find((item) => item.choice_slug === String(choice.slug))!;
+						choice.image = mediaById.get(selected.attachment_id).source_url;
+						choice.attachment = selected.attachment_id;
+					}
+				}
+				const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+				const expectedAfterHash = await genericWapfHashOf(updatedValue);
+				try {
+					await wcWrite("products/" + args.product_id, {
+						meta_data: [{ id: wapf.meta.id, key: "_wapf_fieldgroup", value: updatedValue }],
+					});
+					const verified = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const verifiedHash = await genericWapfHashOf(genericWapf(verified).meta.value);
+					if (verified.id !== args.product_id || verified.name !== args.expected_product_name ||
+						verified.status !== "draft" || verified.catalog_visibility !== "hidden" || verifiedHash !== expectedAfterHash) {
+						throw new Error("Post-write WAPF image-swatch verification failed.");
+					}
+					return toolResult({ updated: true, product_id: args.product_id, converted_field_ids: requestedIds,
+						converted_choice_count: mediaRequests.length, before_field_group_sha256: beforeHash,
+						after_field_group_sha256: verifiedHash,
+						untouched: ["choice slugs", "choice labels", "pricing", "conditions", "unselected WAPF fields", "non-WAPF product data"] });
+				} catch (writeError) {
+					await wcWrite("products/" + args.product_id, {
+						meta_data: [{ id: wapf.meta.id, key: "_wapf_fieldgroup", value: wapf.meta.value }],
+					});
+					const rolledBack = await (await wcFetch("products/" + args.product_id)).json<any>();
+					if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== beforeHash) {
+						throw new Error("WAPF image-swatch write and exact rollback verification both failed.");
+					}
+					throw new Error("WAPF image-swatch write failed; exact rollback succeeded: " +
+						(writeError instanceof Error ? writeError.message : String(writeError)));
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	return server;
 }
 

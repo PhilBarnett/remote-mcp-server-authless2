@@ -219,6 +219,12 @@ fixed option adjustments. Dimension-based curtain, fabric, track, motor, freight
 installation formulas can be added after the customer-facing option logic is
 reviewed without embedding supplier pricing or product IDs in the Worker.
 
+## Product-option image swatches
+
+The generic `upload_wapf_choice_visual_guarded` tool uploads one reviewed JPEG, PNG or WebP for an exact choice on a caller-supplied draft/hidden product. It checks the product name, WAPF hash, field ID, choice slug and supplied image SHA-256 before uploading; it does not change product options or delete media. Call it once per image and keep the returned WordPress attachment IDs and filenames.
+
+The generic `apply_wapf_image_swatches_guarded` tool converts selected radio fields to image swatches using those existing attachments. It checks the exact product identity, WAPF metadata ID and prior hash, field and choice labels/slugs, attachment IDs and filenames. The only WAPF changes are the selected field types and their choices' image URLs/attachment IDs. Field IDs, choice slugs, labels, pricing expressions, conditional logic and unrelated product data remain unchanged. The product must stay draft/hidden. The write is verified and the previous WAPF field group is restored on verification failure. Both tools require `CONFIRM APPLY WAPF IMAGE SWATCHES` and cannot publish a product.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
