@@ -14487,6 +14487,276 @@ function createServer() {
 		},
 	);
 
+	/* Generic, deterministic WAPF field removal/replacement. This is intentionally
+	 * parameter-driven: product, fields, choices, prices, conditions and media are
+	 * all supplied at runtime. Remote media is content-hash locked and any product
+	 * write is verified with an exact rollback. */
+	const wapfPatchConfirmation = "CONFIRM APPLY WAPF FIELD RECONFIGURATION";
+	const wapfPatchPricingAmount = z.union([
+		z.number().finite().min(-1000000).max(1000000),
+		z.string().trim().min(1).max(500),
+	]);
+	const wapfPatchExistingImage = z.object({
+		kind: z.literal("existing_attachment"),
+		attachment_id: genericWapfId,
+		expected_filename: z.string().trim().min(1).max(300),
+	});
+	const wapfPatchRemoteImage = z.object({
+		kind: z.literal("remote_image"),
+		source_url: z.string().url(),
+		expected_sha256: genericWapfHash,
+		filename: wapfVisualFilename,
+	});
+	const wapfPatchImage = z.discriminatedUnion("kind", [wapfPatchExistingImage, wapfPatchRemoteImage]);
+	const wapfPatchChoice = z.object({
+		label: z.string().trim().min(1).max(300),
+		slug: wapfVisualChoiceSlug,
+		pricing_type: z.enum(["none", "fixed", "fx"]),
+		pricing_amount: wapfPatchPricingAmount,
+		image: wapfPatchImage,
+	});
+	const wapfPatchConditionRule = z.object({
+		field_id: wapfVisualFieldId,
+		choice_slug: wapfVisualChoiceSlug,
+	});
+	const wapfPatchReplacement = z.object({
+		field_id: wapfVisualFieldId,
+		expected_label: z.string().trim().min(1).max(300),
+		expected_type: z.string().trim().min(1).max(100),
+		new_label: z.string().trim().min(1).max(300),
+		new_type: z.enum(["radio", "image-swatch"]),
+		choices: z.array(wapfPatchChoice).min(1).max(30),
+		condition_groups: z.array(z.array(wapfPatchConditionRule).min(1).max(10)).max(30),
+	});
+	const wapfPatchRemoval = z.object({
+		field_id: wapfVisualFieldId,
+		expected_label: z.string().trim().min(1).max(300),
+	});
+	const wapfPatchBase = z.object({
+		product_id: genericWapfId,
+		expected_product_name: z.string().trim().min(1).max(500),
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		remove_fields: z.array(wapfPatchRemoval).max(50),
+		replace_fields: z.array(wapfPatchReplacement).min(1).max(30),
+	});
+	type WapfPatchInput = z.infer<typeof wapfPatchBase>;
+	type WapfPatchImage = z.infer<typeof wapfPatchImage>;
+
+	function wapfPatchImageKey(image: WapfPatchImage) {
+		return image.kind === "existing_attachment"
+			? `attachment:${image.attachment_id}:${image.expected_filename.toLocaleLowerCase()}`
+			: `remote:${image.expected_sha256}:${image.filename.toLocaleLowerCase()}:${image.source_url}`;
+	}
+
+	async function loadWapfPatchMedia(images: WapfPatchImage[], uploadRemote: boolean) {
+		const unique = Array.from(new Map(images.map((image) => [wapfPatchImageKey(image), image])).values());
+		const resolved = new Map<string, { attachment: number | null; source_url: string; filename: string; mime_type: string }>();
+		for (const image of unique) {
+			if (image.kind === "existing_attachment") {
+				const media = await (await wpFetch(`media/${image.attachment_id}`)).json<any>();
+				const filename = String(media?.media_details?.file ?? media?.source_url ?? "").split("/").pop();
+				if (media?.id !== image.attachment_id || !String(media?.mime_type ?? "").startsWith("image/") ||
+					filename?.toLocaleLowerCase() !== image.expected_filename.toLocaleLowerCase() ||
+					!String(media?.source_url ?? "").startsWith("https://")) {
+					throw new Error("Existing image attachment no longer matches: " + image.attachment_id + ".");
+				}
+				resolved.set(wapfPatchImageKey(image), { attachment: image.attachment_id, source_url: media.source_url,
+					filename: filename!, mime_type: media.mime_type });
+				continue;
+			}
+			const { response, finalUrl } = await fetchPublicResource(image.source_url, "image/jpeg,image/png,image/webp");
+			const mimeType = String(response.headers.get("content-type") ?? "").split(";")[0].trim().toLocaleLowerCase();
+			const bytes = new Uint8Array(await response.arrayBuffer());
+			if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType) || !bytes.length ||
+				bytes.length > 6_000_000 || !hasExpectedImageSignature(bytes, mimeType) ||
+				await sha256Hex(bytes) !== image.expected_sha256) {
+				throw new Error("Remote image bytes, type, size or SHA-256 changed: " + image.source_url + ".");
+			}
+			const extension = image.filename.split(".").pop()?.toLocaleLowerCase() ?? "";
+			const allowedExtensions: Record<string, string[]> = {
+				"image/jpeg": ["jpg", "jpeg"], "image/png": ["png"], "image/webp": ["webp"],
+			};
+			if (!allowedExtensions[mimeType]?.includes(extension)) throw new Error("Remote image filename and MIME type disagree.");
+			let attachment: number | null = null;
+			let sourceUrl = finalUrl.toString();
+			let filename = image.filename;
+			if (uploadRemote) {
+				const slug = safeSlug(image.filename.replace(/\.[^.]+$/, ""));
+				const candidates = await (await wpAuthenticatedFetch(`media?slug=${encodeURIComponent(slug)}&per_page=100&context=edit`)).json<any[]>();
+				if (candidates.length > 1) throw new Error("Multiple WordPress attachments use slug " + slug + ".");
+				if (candidates.length === 1) {
+					const candidate = candidates[0];
+					const existingUrl = String(candidate.source_url ?? "");
+					const loaded = await fetchPublicResource(existingUrl, "image/jpeg,image/png,image/webp");
+					const existingBytes = new Uint8Array(await loaded.response.arrayBuffer());
+					if (await sha256Hex(existingBytes) !== image.expected_sha256) {
+						throw new Error("Existing WordPress attachment slug has different bytes: " + slug + ".");
+					}
+					attachment = Number(candidate.id);
+					sourceUrl = existingUrl;
+					filename = String(candidate.media_details?.file ?? existingUrl).split("/").pop();
+				} else {
+					const uploaded = await wpUploadMedia(image.filename, mimeType, bytes);
+					attachment = Number(uploaded.id);
+					sourceUrl = String(uploaded.source_url ?? "");
+					filename = String(uploaded.media_details?.file ?? sourceUrl).split("/").pop();
+				}
+				if (!Number.isInteger(attachment) || attachment! < 1 || !sourceUrl.startsWith("https://")) {
+					throw new Error("WordPress did not return a valid imported image attachment.");
+				}
+			}
+			resolved.set(wapfPatchImageKey(image), { attachment, source_url: sourceUrl, filename, mime_type: mimeType });
+		}
+		return resolved;
+	}
+
+	async function buildWapfPatchPlan(args: WapfPatchInput, uploadRemote = false, suppliedProduct?: any) {
+		const product = suppliedProduct ?? await (await wcFetch("products/" + args.product_id)).json<any>();
+		if (product.id !== args.product_id || product.name !== args.expected_product_name ||
+			product.status !== "draft" || product.catalog_visibility !== "hidden") {
+			throw new Error("Product identity or draft/hidden state changed; refusing WAPF patch.");
+		}
+		const wapf = genericWapf(product);
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		if (wapf.meta.id !== args.expected_meta_data_id || beforeHash !== args.expected_field_group_sha256) {
+			throw new Error("The WAPF field group changed after inspection; refusing WAPF patch.");
+		}
+		const removeIds = args.remove_fields.map((field) => field.field_id);
+		const replaceIds = args.replace_fields.map((field) => field.field_id);
+		if (new Set([...removeIds, ...replaceIds]).size !== removeIds.length + replaceIds.length) {
+			throw new Error("Removed and replaced field IDs must be unique and disjoint.");
+		}
+		for (const requested of [...args.remove_fields, ...args.replace_fields]) {
+			const matches = wapf.group.fields.filter((field: any) => genericWapfFieldId(field) === requested.field_id);
+			if (matches.length !== 1 || wapfFieldLabel(matches[0]) !== requested.expected_label) {
+				throw new Error("Field identity changed or is ambiguous: " + requested.field_id + ".");
+			}
+			if ("expected_type" in requested && String(matches[0]?.type ?? "") !== requested.expected_type) {
+				throw new Error("Field type changed: " + requested.field_id + ".");
+			}
+		}
+		for (const replacement of args.replace_fields) {
+			const slugs = replacement.choices.map((choice) => choice.slug);
+			if (new Set(slugs).size !== slugs.length) throw new Error("Replacement choice slugs must be unique in " + replacement.field_id + ".");
+			for (const choice of replacement.choices) {
+				if (choice.pricing_type === "none" && String(choice.pricing_amount) !== "0") {
+					throw new Error("A non-priced choice must have pricing_amount 0.");
+				}
+			}
+		}
+		const media = await loadWapfPatchMedia(args.replace_fields.flatMap((field) => field.choices.map((choice) => choice.image)), uploadRemote);
+		const replacements = new Map(args.replace_fields.map((field) => [field.field_id, field]));
+		const updatedFields = wapf.group.fields.filter((field: any) => !removeIds.includes(genericWapfFieldId(field))).map((field: any) => {
+			const replacement = replacements.get(genericWapfFieldId(field));
+			if (!replacement) return structuredClone(field);
+			const updated = structuredClone(field);
+			const template = structuredClone(field?.options?.choices?.[0] ?? {});
+			updated.label = replacement.new_label;
+			updated.type = replacement.new_type;
+			updated.options = { ...(updated.options ?? {}), choices: replacement.choices.map((choice) => {
+				const selected = media.get(wapfPatchImageKey(choice.image))!;
+				return { ...structuredClone(template), label: choice.label, slug: choice.slug,
+					pricing_type: choice.pricing_type, pricing_amount: choice.pricing_amount,
+					image: selected.source_url, attachment: selected.attachment };
+			}) };
+			updated.conditionals = replacement.condition_groups.map((group) => ({ rules: group.map((rule) => ({
+				condition: "==", value: rule.choice_slug, field: rule.field_id, generated: false,
+			})) }));
+			delete updated.conditions;
+			delete updated.rules;
+			return updated;
+		});
+		const serialized = JSON.stringify(updatedFields);
+		for (const removedId of removeIds) {
+			if (serialized.includes(removedId)) throw new Error("A remaining field still references removed field " + removedId + ".");
+		}
+		const fieldsById = new Map(updatedFields.map((field: any) => [genericWapfFieldId(field), field]));
+		for (const field of updatedFields) {
+			for (const group of field?.conditionals ?? []) {
+				for (const rule of group?.rules ?? []) {
+					const source = fieldsById.get(String(rule?.field ?? ""));
+					const sourceSlugs = new Set((source?.options?.choices ?? []).map((choice: any) => String(choice?.slug ?? "")));
+					if (!source || !sourceSlugs.has(String(rule?.value ?? ""))) {
+						throw new Error("A remaining conditional rule has an orphaned field or choice reference.");
+					}
+				}
+			}
+		}
+		const updatedGroup = { ...structuredClone(wapf.group), fields: updatedFields };
+		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+		const afterHash = uploadRemote ? await genericWapfHashOf(updatedValue) : null;
+		const planHash = await genericWapfHashOf({ product_id: args.product_id, product_name: args.expected_product_name,
+			before_field_group_sha256: beforeHash, remove_fields: args.remove_fields, replace_fields: args.replace_fields });
+		return { product, wapf, beforeHash, afterHash, planHash, updatedFields, updatedValue };
+	}
+
+	server.registerTool(
+		"preview_wapf_field_reconfiguration",
+		{
+			description: "Preview a parameter-driven WAPF field reconfiguration on one exact draft/hidden product. Validates field identities, complete replacement choices, prices, conditions, existing media and hash-locked remote images; detects orphaned references and performs no writes.",
+			inputSchema: wapfPatchBase,
+		},
+		async (args) => {
+			try {
+				const plan = await buildWapfPatchPlan(args);
+				return toolResult({ write_performed: false,
+					product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
+					before_field_group_sha256: plan.beforeHash, plan_sha256: plan.planHash,
+					removed_fields: args.remove_fields, replaced_fields: args.replace_fields.map((field) => ({
+						field_id: field.field_id, old_label: field.expected_label, new_label: field.new_label,
+						new_type: field.new_type, choice_count: field.choices.length, condition_group_count: field.condition_groups.length,
+						choices: field.choices.map((choice) => ({ label: choice.label, slug: choice.slug,
+							pricing_type: choice.pricing_type, pricing_amount: choice.pricing_amount, image: choice.image })),
+					})),
+					resulting_field_count: plan.updatedFields.length,
+				});
+			} catch (error) { return toolError(error); }
+		},
+	);
+
+	server.registerTool(
+		"apply_wapf_field_reconfiguration_guarded",
+		{
+			description: "Apply one exact previewed, parameter-driven WAPF field reconfiguration to a draft/hidden product. Revalidates the product hash, fields, prices, conditions and hash-locked media; uploads missing remote images, changes only the WAPF field group, verifies the exact result and rolls back on failure. Cannot publish.",
+			inputSchema: wapfPatchBase.extend({ expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal(wapfPatchConfirmation) }),
+		},
+		async (args) => {
+			try {
+				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
+				const preview = await buildWapfPatchPlan(args, false, product);
+				if (preview.planHash !== args.expected_plan_sha256) throw new Error("The deterministic WAPF plan changed after preview; refusing write.");
+				const plan = await buildWapfPatchPlan(args, true, product);
+				if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) throw new Error("The applied WAPF plan changed while resolving media; refusing write.");
+				try {
+					await wcWrite("products/" + args.product_id, { meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }] });
+					const verified = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const verifiedHash = await genericWapfHashOf(genericWapf(verified).meta.value);
+					if (verified.id !== args.product_id || verified.name !== args.expected_product_name || verified.status !== "draft" ||
+						verified.catalog_visibility !== "hidden" || verifiedHash !== plan.afterHash) {
+						throw new Error("Post-write WAPF field reconfiguration verification failed.");
+					}
+					return toolResult({ updated: true, product_id: verified.id,
+						removed_field_ids: args.remove_fields.map((field) => field.field_id),
+						replaced_field_ids: args.replace_fields.map((field) => field.field_id),
+						before_field_group_sha256: plan.beforeHash, after_field_group_sha256: verifiedHash,
+						field_count: plan.updatedFields.length,
+						untouched: ["product identity", "draft/hidden state", "unselected WAPF fields", "non-WAPF product data"],
+					});
+				} catch (writeError) {
+					await wcWrite("products/" + args.product_id, { meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }] });
+					const rolledBack = await (await wcFetch("products/" + args.product_id)).json<any>();
+					if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
+						throw new Error("WAPF field reconfiguration and exact rollback verification both failed.");
+					}
+					throw new Error("WAPF field reconfiguration failed; exact rollback succeeded: " +
+						(writeError instanceof Error ? writeError.message : String(writeError)));
+				}
+			} catch (error) { return toolError(error); }
+		},
+	);
+
 	return server;
 }
 
