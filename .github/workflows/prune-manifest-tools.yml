@@ -1,0 +1,117 @@
+name: Prune MCP manifest tools
+
+on:
+  push:
+    branches:
+      - codex/manifest-cap-cleanup-7d388c7
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Remove redundant tool registrations
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = 'src/index.ts';
+          let source = fs.readFileSync(path, 'utf8');
+          const names = [
+            'get_meta_ad_account',
+            'get_google_ads_account',
+            'get_search_console_property',
+            'get_ga4_property',
+          ];
+
+          function removeRegisterTool(text, name) {
+            const needle = `\"${name}\"`;
+            const namePos = text.indexOf(needle);
+            if (namePos < 0) throw new Error(`Tool ${name} not found`);
+            const start = text.lastIndexOf('server.registerTool(', namePos);
+            if (start < 0) throw new Error(`Registration start for ${name} not found`);
+            const open = text.indexOf('(', start);
+            let depth = 0;
+            let state = 'code';
+            let escaped = false;
+            for (let i = open; i < text.length; i++) {
+              const c = text[i];
+              const n = text[i + 1];
+              if (state === 'line') {
+                if (c === '\n') state = 'code';
+                continue;
+              }
+              if (state === 'block') {
+                if (c === '*' && n === '/') { state = 'code'; i++; }
+                continue;
+              }
+              if (state === 'single' || state === 'double' || state === 'template') {
+                if (escaped) { escaped = false; continue; }
+                if (c === '\\') { escaped = true; continue; }
+                if ((state === 'single' && c === "'") || (state === 'double' && c === '"') || (state === 'template' && c === '`')) state = 'code';
+                continue;
+              }
+              if (c === '/' && n === '/') { state = 'line'; i++; continue; }
+              if (c === '/' && n === '*') { state = 'block'; i++; continue; }
+              if (c === "'") { state = 'single'; continue; }
+              if (c === '"') { state = 'double'; continue; }
+              if (c === '`') { state = 'template'; continue; }
+              if (c === '(') depth++;
+              if (c === ')') {
+                depth--;
+                if (depth === 0) {
+                  let end = i + 1;
+                  while (/[ \t]/.test(text[end] || '')) end++;
+                  if (text[end] === ';') end++;
+                  if (text[end] === '\r') end++;
+                  if (text[end] === '\n') end++;
+                  return text.slice(0, start) + text.slice(end);
+                }
+              }
+            }
+            throw new Error(`Registration end for ${name} not found`);
+          }
+
+          const before = (source.match(/server\.registerTool\(/g) || []).length;
+          for (const name of names) source = removeRegisterTool(source, name);
+          const after = (source.match(/server\.registerTool\(/g) || []).length;
+          if (before - after !== names.length) throw new Error(`Expected to remove ${names.length} tools, removed ${before - after}`);
+          for (const name of names) if (source.includes(`\"${name}\"`)) throw new Error(`Tool ${name} still present`);
+          for (const required of ['preview_wapf_pricing_storage_migration','apply_wapf_pricing_storage_migration_guarded']) {
+            if (!source.includes(`\"${required}\"`)) throw new Error(`Required pricing tool ${required} missing`);
+          }
+          fs.writeFileSync(path, source);
+          fs.unlinkSync('.github/workflows/prune-manifest-tools.yml');
+          console.log(`registerTool count ${before} -> ${after}`);
+          NODE
+
+      - name: Install dependencies
+        run: |
+          npm install
+          npm install --no-save "@oxlint/binding-linux-x64-gnu@$(node -p "require('./node_modules/oxlint/package.json').version")"
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Lint
+        run: npx oxlint src/index.ts
+
+      - name: Commit cleanup
+        run: |
+          git config user.name "blindmotion-mcp-repo-agent[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Prune redundant MCP manifest tools"
+          git push origin HEAD
