@@ -13074,7 +13074,7 @@ function createServer() {
 		},
 	);
 
-	const wapfStorageKeyPattern = /(?:wapf|advanced_product_fields|acf.*option|lookup.*table|global.*price)/i;
+	const wapfStorageKeyPattern = /(?:blindmotion-mcp|wapf|advanced_product_fields|acf.*option|lookup.*table|global.*price)/i;
 
 	async function authenticatedWpRest(path: string) {
 		const workerEnv = env as unknown as Record<string, string>;
@@ -13090,7 +13090,7 @@ function createServer() {
 	server.registerTool(
 		"inspect_wapf_pricing_storage",
 		{
-			description: "Read-only discovery of WAPF lookup-table and ACF Global Price storage exposed through authenticated WordPress REST. Returns only route, type and setting entries whose names identify WAPF, lookup tables, ACF options or global prices; never writes and never returns unrelated settings.",
+			description: "Read-only discovery of WAPF lookup-table, ACF Global Price and installed Blindmotion bridge routes exposed through authenticated WordPress REST. Returns only matching route, type and setting entries; never writes and never returns unrelated settings.",
 			inputSchema: z.object({
 				include_matching_setting_values: z.boolean().default(true),
 			}),
