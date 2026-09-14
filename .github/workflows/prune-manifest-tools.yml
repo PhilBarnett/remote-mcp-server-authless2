@@ -36,13 +36,7 @@ jobs:
             'get_ga4_property',
           ];
 
-          function removeRegisterTool(text, name) {
-            const needle = `\"${name}\"`;
-            const namePos = text.indexOf(needle);
-            if (namePos < 0) throw new Error(`Tool ${name} not found`);
-            const start = text.lastIndexOf('server.registerTool(', namePos);
-            if (start < 0) throw new Error(`Registration start for ${name} not found`);
-            const open = text.indexOf('(', start);
+          function scanBalanced(text, open, openChar, closeChar) {
             let depth = 0;
             let state = 'code';
             let escaped = false;
@@ -68,27 +62,56 @@ jobs:
               if (c === "'") { state = 'single'; continue; }
               if (c === '"') { state = 'double'; continue; }
               if (c === '`') { state = 'template'; continue; }
-              if (c === '(') depth++;
-              if (c === ')') {
+              if (c === openChar) depth++;
+              if (c === closeChar) {
                 depth--;
-                if (depth === 0) {
-                  let end = i + 1;
-                  while (/[ \t]/.test(text[end] || '')) end++;
-                  if (text[end] === ';') end++;
-                  if (text[end] === '\r') end++;
-                  if (text[end] === '\n') end++;
-                  return text.slice(0, start) + text.slice(end);
-                }
+                if (depth === 0) return i;
               }
             }
-            throw new Error(`Registration end for ${name} not found`);
+            throw new Error(`Unbalanced ${openChar}${closeChar} block`);
+          }
+
+          function removeRegisterTool(text, name) {
+            const needle = `\"${name}\"`;
+            const namePos = text.indexOf(needle);
+            if (namePos < 0) throw new Error(`Tool ${name} not found`);
+            const start = text.lastIndexOf('server.registerTool(', namePos);
+            if (start < 0) throw new Error(`Registration start for ${name} not found`);
+            const open = text.indexOf('(', start);
+            const close = scanBalanced(text, open, '(', ')');
+            let end = close + 1;
+            while (/[ \t]/.test(text[end] || '')) end++;
+            if (text[end] === ';') end++;
+            if (text[end] === '\r') end++;
+            if (text[end] === '\n') end++;
+            return text.slice(0, start) + text.slice(end);
+          }
+
+          function removeNamedFunction(text, name) {
+            const signatures = [`function ${name}(`, `async function ${name}(`];
+            let start = -1;
+            for (const signature of signatures) {
+              const pos = text.indexOf(signature);
+              if (pos >= 0) { start = pos; break; }
+            }
+            if (start < 0) throw new Error(`Function ${name} not found`);
+            const open = text.indexOf('{', start);
+            if (open < 0) throw new Error(`Function body for ${name} not found`);
+            const close = scanBalanced(text, open, '{', '}');
+            let end = close + 1;
+            if (text[end] === ';') end++;
+            if (text[end] === '\r') end++;
+            if (text[end] === '\n') end++;
+            return text.slice(0, start) + text.slice(end);
           }
 
           const before = (source.match(/server\.registerTool\(/g) || []).length;
           for (const name of names) source = removeRegisterTool(source, name);
+          source = removeNamedFunction(source, 'utcDateDaysAgo');
           const after = (source.match(/server\.registerTool\(/g) || []).length;
           if (before - after !== names.length) throw new Error(`Expected to remove ${names.length} tools, removed ${before - after}`);
           for (const name of names) if (source.includes(`\"${name}\"`)) throw new Error(`Tool ${name} still present`);
+          if (source.includes('function utcDateDaysAgo(')) throw new Error('utcDateDaysAgo still present');
           for (const required of ['preview_wapf_pricing_storage_migration','apply_wapf_pricing_storage_migration_guarded']) {
             if (!source.includes(`\"${required}\"`)) throw new Error(`Required pricing tool ${required} missing`);
           }
