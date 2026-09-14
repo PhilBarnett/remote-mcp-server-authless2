@@ -13090,19 +13090,30 @@ function createServer() {
 	server.registerTool(
 		"inspect_wapf_pricing_storage",
 		{
-			description: "Read-only discovery of WAPF lookup-table, ACF Global Price, installed Blindmotion bridge routes and Blindmotion plugin identities exposed through authenticated WordPress REST. Returns only matching route, type, setting and plugin entries; never writes and never returns unrelated settings or plugin data.",
+			description: "Read-only discovery of WAPF lookup-table and ACF Global Price storage through the dedicated authenticated Blindmotion bridge, plus matching routes, types, settings and plugin identities. Fails closed unless the bridge confirms that no raw values or writes are involved.",
 			inputSchema: z.object({
 				include_matching_setting_values: z.boolean().default(true),
 			}),
 		},
 		async ({ include_matching_setting_values }) => {
 			try {
-				const [root, types, settings, plugins] = await Promise.all([
+				const [root, types, settings, plugins, pricingStorage] = await Promise.all([
 					authenticatedWpRest(""),
 					authenticatedWpRest("wp/v2/types?context=edit"),
 					authenticatedWpRest("wp/v2/settings?context=edit"),
 					authenticatedWpRest("wp/v2/plugins?context=edit&search=blindmotion"),
+					authenticatedWpRest(
+						"blindmotion-mcp/v1/wapf-pricing-storage?include_value_shapes=" +
+							(include_matching_setting_values ? "true" : "false"),
+					),
 				]);
+				if (
+					pricingStorage?.read_only !== true ||
+					pricingStorage?.raw_values_returned !== false ||
+					pricingStorage?.write_performed !== false
+				) {
+					throw new Error("WAPF pricing bridge did not prove its read-only, no-raw-values contract.");
+				}
 				const routes = Object.keys(root?.routes ?? {}).filter((key) => wapfStorageKeyPattern.test(key));
 				const namespaces = (root?.namespaces ?? []).filter((key: unknown) => wapfStorageKeyPattern.test(String(key)));
 				const matchingTypes = Object.fromEntries(
@@ -13120,6 +13131,7 @@ function createServer() {
 					routes,
 					post_types: matchingTypes,
 					settings: matchingSettings,
+					pricing_storage: pricingStorage,
 					plugins: (Array.isArray(plugins) ? plugins : [])
 						.filter((plugin: any) =>
 							/blindmotion/i.test(String(plugin?.plugin ?? "") + " " + String(plugin?.name ?? "")),
