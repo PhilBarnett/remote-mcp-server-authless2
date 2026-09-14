@@ -14757,6 +14757,258 @@ function createServer() {
 		},
 	);
 
+	const wapfPricingGridConfirmation = "CONFIRM APPLY WAPF PRICING GRID";
+	const pricingAxis = z.array(z.number().int().positive()).min(2).max(50);
+	const pricingMatrix = z.array(z.array(z.number().nonnegative()).min(2).max(50)).min(2).max(50);
+	const wapfPricingGridBase = z.object({
+		product_id: z.number().int().positive(),
+		expected_product_name: z.string().min(1),
+		expected_meta_data_id: z.number().int().positive(),
+		expected_field_group_sha256: genericWapfHash,
+		expected_regular_price: z.number().nonnegative(),
+		new_regular_price: z.number().nonnegative(),
+		width_field_id: z.string().min(1),
+		expected_width_field_label: z.string().min(1),
+		drop_field_id: z.string().min(1),
+		expected_drop_field_label: z.string().min(1),
+		width_breakpoints: pricingAxis,
+		drop_breakpoints: pricingAxis,
+		base_price_grid: pricingMatrix,
+		fabric_selector_field_id: z.string().min(1),
+		expected_fabric_selector_label: z.string().min(1),
+		fabric_groups: z.array(z.object({
+			choice_slug: z.string().min(1),
+			expected_choice_label: z.string().min(1),
+			surcharge_grid: pricingMatrix,
+		})).min(1).max(50),
+		option_surcharges: z.array(z.object({
+			field_id: z.string().min(1),
+			expected_field_label: z.string().min(1),
+			choice_slug: z.string().min(1),
+			expected_choice_label: z.string().min(1),
+			drop_breakpoints: pricingAxis,
+			values: z.array(z.number().nonnegative()).min(2).max(50),
+		})).max(20).default([]),
+	});
+
+	function pricingNumber(value: number) {
+		if (!Number.isFinite(value) || value < 0) throw new Error("Pricing values must be finite and non-negative.");
+		return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
+	}
+
+	function validatePricingAxis(values: number[], label: string) {
+		for (let index = 1; index < values.length; index += 1) {
+			if (values[index] <= values[index - 1]) throw new Error(label + " must be strictly ascending.");
+		}
+	}
+
+	function oneDimensionalPricingFormula(fieldId: string, breakpoints: number[], values: number[]) {
+		if (breakpoints.length !== values.length) throw new Error("One-dimensional surcharge values do not match their breakpoints.");
+		let formula = pricingNumber(values[values.length - 1]);
+		for (let index = values.length - 2; index >= 0; index -= 1) {
+			formula = "if([field." + fieldId + "] <= " + breakpoints[index] + ";" +
+				pricingNumber(values[index]) + ";" + formula + ")";
+		}
+		return formula;
+	}
+
+	function twoDimensionalPricingFormula(
+		widthFieldId: string,
+		dropFieldId: string,
+		widths: number[],
+		drops: number[],
+		grid: number[][],
+	) {
+		if (grid.length !== widths.length || grid.some((row) => row.length !== drops.length)) {
+			throw new Error("Pricing matrix dimensions do not match the width and drop axes.");
+		}
+		const widthFormulas = grid.map((row) => oneDimensionalPricingFormula(dropFieldId, drops, row));
+		let formula = widthFormulas[widthFormulas.length - 1];
+		for (let index = widthFormulas.length - 2; index >= 0; index -= 1) {
+			formula = "if([field." + widthFieldId + "] <= " + widths[index] + ";" +
+				widthFormulas[index] + ";" + formula + ")";
+		}
+		return formula;
+	}
+
+	async function buildWapfPricingGridPlan(args: z.infer<typeof wapfPricingGridBase>, productOverride?: any) {
+		validatePricingAxis(args.width_breakpoints, "Width breakpoints");
+		validatePricingAxis(args.drop_breakpoints, "Drop breakpoints");
+		const product = productOverride ?? await (await wcFetch("products/" + args.product_id)).json<any>();
+		if (product.id !== args.product_id || product.name !== args.expected_product_name) {
+			throw new Error("WooCommerce product identity does not match the requested pricing target.");
+		}
+		if (product.status !== "draft" || product.catalog_visibility !== "hidden") {
+			throw new Error("Pricing-grid writes are restricted to draft/hidden products.");
+		}
+		if (Number(product.regular_price) !== args.expected_regular_price) {
+			throw new Error("The current regular price changed after review.");
+		}
+		const wapf = genericWapf(product);
+		if (wapf.meta.id !== args.expected_meta_data_id) throw new Error("WAPF metadata identity changed.");
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		if (beforeHash !== args.expected_field_group_sha256) throw new Error("WAPF field group changed after review.");
+		const updatedGroup = structuredClone(wapf.group);
+		const fields = updatedGroup.fields as any[];
+		const exactField = (id: string, label: string) => {
+			const matches = fields.filter((field) => String(field.id) === id);
+			if (matches.length !== 1 || String(matches[0].label) !== label) {
+				throw new Error("Expected WAPF field identity not found: " + label + ".");
+			}
+			return matches[0];
+		};
+		const widthField = exactField(args.width_field_id, args.expected_width_field_label);
+		const dropField = exactField(args.drop_field_id, args.expected_drop_field_label);
+		if (widthField.type !== "number" || dropField.type !== "number") {
+			throw new Error("Width and drop pricing fields must both be number fields.");
+		}
+		const baseFormula = twoDimensionalPricingFormula(
+			args.width_field_id, args.drop_field_id, args.width_breakpoints, args.drop_breakpoints, args.base_price_grid,
+		) + "-[price]";
+		dropField.pricing = { enabled: true, type: "fx", amount: baseFormula };
+		const fabricField = exactField(args.fabric_selector_field_id, args.expected_fabric_selector_label);
+		const fabricChoices = fabricField.options?.choices;
+		if (!Array.isArray(fabricChoices)) throw new Error("Fabric selector choices are missing.");
+		const seenFabricSlugs = new Set<string>();
+		for (const mapping of args.fabric_groups) {
+			if (seenFabricSlugs.has(mapping.choice_slug)) throw new Error("Duplicate fabric choice slug in pricing plan.");
+			seenFabricSlugs.add(mapping.choice_slug);
+			const matches = fabricChoices.filter((choice: any) => String(choice.slug) === mapping.choice_slug);
+			if (matches.length !== 1 || String(matches[0].label) !== mapping.expected_choice_label) {
+				throw new Error("Expected fabric choice identity not found: " + mapping.expected_choice_label + ".");
+			}
+			const formula = twoDimensionalPricingFormula(
+				args.width_field_id, args.drop_field_id, args.width_breakpoints, args.drop_breakpoints, mapping.surcharge_grid,
+			);
+			matches[0].pricing_type = "fx";
+			matches[0].pricing_amount = formula + "*[qty]";
+		}
+		if (seenFabricSlugs.size !== fabricChoices.length) {
+			throw new Error("The pricing plan must explicitly cover every fabric selector choice.");
+		}
+		for (const surcharge of args.option_surcharges) {
+			validatePricingAxis(surcharge.drop_breakpoints, surcharge.expected_field_label + " drop breakpoints");
+			const field = exactField(surcharge.field_id, surcharge.expected_field_label);
+			const choices = field.options?.choices;
+			if (!Array.isArray(choices)) throw new Error("Option surcharge field choices are missing.");
+			const matches = choices.filter((choice: any) => String(choice.slug) === surcharge.choice_slug);
+			if (matches.length !== 1 || String(matches[0].label) !== surcharge.expected_choice_label) {
+				throw new Error("Expected surcharge choice identity not found: " + surcharge.expected_choice_label + ".");
+			}
+			matches[0].pricing_type = "fx";
+			matches[0].pricing_amount = oneDimensionalPricingFormula(
+				args.drop_field_id, surcharge.drop_breakpoints, surcharge.values,
+			);
+		}
+		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+		const afterHash = await genericWapfHashOf(updatedValue);
+		const planHash = await genericWapfHashOf({
+			product_id: args.product_id,
+			product_name: args.expected_product_name,
+			before_field_group_sha256: beforeHash,
+			expected_regular_price: args.expected_regular_price,
+			new_regular_price: args.new_regular_price,
+			width_field_id: args.width_field_id,
+			drop_field_id: args.drop_field_id,
+			width_breakpoints: args.width_breakpoints,
+			drop_breakpoints: args.drop_breakpoints,
+			base_price_grid: args.base_price_grid,
+			fabric_selector_field_id: args.fabric_selector_field_id,
+			fabric_groups: args.fabric_groups,
+			option_surcharges: args.option_surcharges,
+		});
+		return { product, wapf, beforeHash, afterHash, planHash, updatedValue, baseFormula };
+	}
+
+	server.registerTool(
+		"preview_wapf_pricing_grid",
+		{
+			description: "Preview a complete parameter-driven WAPF size grid, fabric surcharge grids and option surcharges for one exact draft/hidden WooCommerce product. Validates every field, choice, matrix and current hash; performs no writes.",
+			inputSchema: wapfPricingGridBase,
+		},
+		async (args) => {
+			try {
+				const plan = await buildWapfPricingGridPlan(args);
+				return toolResult({
+					write_performed: false,
+					product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
+					before_field_group_sha256: plan.beforeHash,
+					after_field_group_sha256: plan.afterHash,
+					plan_sha256: plan.planHash,
+					regular_price: { before: args.expected_regular_price, after: args.new_regular_price },
+					grid: { width_count: args.width_breakpoints.length, drop_count: args.drop_breakpoints.length },
+					fabric_choices_priced: args.fabric_groups.map((item) => ({ slug: item.choice_slug, label: item.expected_choice_label })),
+					option_surcharges_priced: args.option_surcharges.map((item) => ({ field_id: item.field_id, choice_slug: item.choice_slug, label: item.expected_choice_label })),
+				});
+			} catch (error) { return toolError(error); }
+		},
+	);
+
+	server.registerTool(
+		"apply_wapf_pricing_grid_guarded",
+		{
+			description: "Apply one exact previewed WAPF pricing-grid plan to a draft/hidden product. Atomically updates only regular price and the selected pricing formulas, verifies identities and hashes, and restores both values on failure. Cannot publish.",
+			inputSchema: wapfPricingGridBase.extend({
+				expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal(wapfPricingGridConfirmation),
+			}),
+		},
+		async (args) => {
+			try {
+				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
+				const plan = await buildWapfPricingGridPlan(args, product);
+				if (plan.planHash !== args.expected_plan_sha256) {
+					throw new Error("The deterministic pricing-grid plan changed after preview; refusing write.");
+				}
+				const originalRegularPrice = String(product.regular_price ?? "");
+				const originalSalePrice = String(product.sale_price ?? "");
+				try {
+					await wcWrite("products/" + args.product_id, {
+						regular_price: pricingNumber(args.new_regular_price),
+						meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
+					});
+					const verified = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const verifiedWapf = genericWapf(verified);
+					const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+					if (
+						verified.id !== args.product_id ||
+						verified.name !== args.expected_product_name ||
+						verified.status !== "draft" ||
+						verified.catalog_visibility !== "hidden" ||
+						Number(verified.regular_price) !== args.new_regular_price ||
+						verifiedHash !== plan.afterHash
+					) {
+						throw new Error("Post-write pricing-grid verification failed.");
+					}
+					return toolResult({
+						updated: true,
+						product: { id: verified.id, name: verified.name, status: verified.status, catalog_visibility: verified.catalog_visibility },
+						regular_price: verified.regular_price,
+						before_field_group_sha256: plan.beforeHash,
+						after_field_group_sha256: verifiedHash,
+						grid: { width_count: args.width_breakpoints.length, drop_count: args.drop_breakpoints.length },
+						fabric_choice_count: args.fabric_groups.length,
+						option_surcharge_count: args.option_surcharges.length,
+						untouched: ["product identity", "draft/hidden state", "field and choice identities", "images", "conditions", "non-pricing product data"],
+					});
+				} catch (writeError) {
+					await wcWrite("products/" + args.product_id, {
+						regular_price: originalRegularPrice,
+						sale_price: originalSalePrice,
+						meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }],
+					});
+					const rolledBack = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const rolledBackHash = await genericWapfHashOf(genericWapf(rolledBack).meta.value);
+					if (String(rolledBack.regular_price ?? "") !== originalRegularPrice || rolledBackHash !== plan.beforeHash) {
+						throw new Error("Pricing-grid update and exact rollback verification both failed.");
+					}
+					throw new Error("Pricing-grid update failed; exact rollback succeeded: " +
+						(writeError instanceof Error ? writeError.message : String(writeError)));
+				}
+			} catch (error) { return toolError(error); }
+		},
+	);
+
 	return server;
 }
 
