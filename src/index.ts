@@ -13090,14 +13090,38 @@ function createServer() {
 	server.registerTool(
 		"inspect_wapf_pricing_storage",
 		{
-			description: "Read-only discovery of WAPF lookup-table and ACF Global Price storage through the dedicated authenticated Blindmotion bridge, plus matching routes, types, settings and plugin identities. Fails closed unless the bridge confirms that no raw values or writes are involved.",
+			description: "Read-only discovery of WAPF storage plus exact runtime-selected lookup-table and ACF Global Price details through the dedicated authenticated Blindmotion bridge. Fails closed on mismatched selections, unrelated values or any write indication.",
 			inputSchema: z.object({
 				include_matching_setting_values: z.boolean().default(true),
+				lookup_names: z
+					.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/))
+					.max(10)
+					.default([]),
+				acf_field_group_id: z.number().int().positive().optional(),
+				expected_acf_field_group_title: z.string().trim().min(1).max(200).optional(),
 			}),
 		},
-		async ({ include_matching_setting_values }) => {
+		async ({
+			include_matching_setting_values,
+			lookup_names,
+			acf_field_group_id,
+			expected_acf_field_group_title,
+		}) => {
 			try {
-				const [root, types, settings, plugins, pricingStorage] = await Promise.all([
+				if (new Set(lookup_names).size !== lookup_names.length) {
+					throw new Error("Duplicate WAPF lookup names are not allowed.");
+				}
+				if ((acf_field_group_id === undefined) !== (expected_acf_field_group_title === undefined)) {
+					throw new Error("ACF field-group ID and exact title must be supplied together.");
+				}
+				const detailRequested =
+					lookup_names.length > 0 || acf_field_group_id !== undefined;
+				const detailQuery = new URLSearchParams({
+					lookup_names: lookup_names.join(","),
+					acf_field_group_id: String(acf_field_group_id ?? 0),
+					expected_acf_field_group_title: expected_acf_field_group_title ?? "",
+				});
+				const [root, types, settings, plugins, pricingStorage, pricingDetails] = await Promise.all([
 					authenticatedWpRest(""),
 					authenticatedWpRest("wp/v2/types?context=edit"),
 					authenticatedWpRest("wp/v2/settings?context=edit"),
@@ -13106,6 +13130,11 @@ function createServer() {
 						"blindmotion-mcp/v1/wapf-pricing-storage?include_value_shapes=" +
 							(include_matching_setting_values ? "true" : "false"),
 					),
+					detailRequested
+						? authenticatedWpRest(
+								"blindmotion-mcp/v1/wapf-pricing-details?" + detailQuery.toString(),
+							)
+						: Promise.resolve(null),
 				]);
 				if (
 					pricingStorage?.read_only !== true ||
@@ -13113,6 +13142,22 @@ function createServer() {
 					pricingStorage?.write_performed !== false
 				) {
 					throw new Error("WAPF pricing bridge did not prove its read-only, no-raw-values contract.");
+				}
+				if (detailRequested) {
+					const returnedLookupNames = Object.keys(pricingDetails?.lookups ?? {});
+					if (
+						pricingDetails?.read_only !== true ||
+						pricingDetails?.unrelated_values_returned !== false ||
+						pricingDetails?.write_performed !== false ||
+						JSON.stringify(pricingDetails?.requested_lookup_names) !==
+							JSON.stringify(lookup_names) ||
+						JSON.stringify(returnedLookupNames) !== JSON.stringify(lookup_names) ||
+						(acf_field_group_id !== undefined &&
+							(pricingDetails?.acf_field_group?.id !== acf_field_group_id ||
+								pricingDetails?.acf_field_group?.title !== expected_acf_field_group_title))
+					) {
+						throw new Error("WAPF pricing details failed exact selection or read-only verification.");
+					}
 				}
 				const routes = Object.keys(root?.routes ?? {}).filter((key) => wapfStorageKeyPattern.test(key));
 				const namespaces = (root?.namespaces ?? []).filter((key: unknown) => wapfStorageKeyPattern.test(String(key)));
@@ -13132,6 +13177,7 @@ function createServer() {
 					post_types: matchingTypes,
 					settings: matchingSettings,
 					pricing_storage: pricingStorage,
+					pricing_details: pricingDetails,
 					plugins: (Array.isArray(plugins) ? plugins : [])
 						.filter((plugin: any) =>
 							/blindmotion/i.test(String(plugin?.plugin ?? "") + " " + String(plugin?.name ?? "")),
