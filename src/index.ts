@@ -2785,11 +2785,6 @@ function assertSearchConsoleDateRange(startDate: string, endDate: string) {
 	}
 }
 
-function utcDateDaysAgo(days: number) {
-	const date = new Date();
-	date.setUTCDate(date.getUTCDate() - days);
-	return date.toISOString().slice(0, 10);
-}
 
 type GoogleAdsConfig = {
 	developerToken: string;
@@ -7252,26 +7247,7 @@ function createServer() {
 
 	/* Read-only Meta Ads reporting tools */
 
-	server.registerTool(
-		"get_meta_ad_account",
-		{
-			description:
-				"Confirm the configured Blindmotion Meta ad account and return non-sensitive account metadata.",
-			inputSchema: z.object({}),
-		},
-		async () => {
-			try {
-				const { adAccountId } = getMetaConfig();
-				const account = await metaFetch(adAccountId, {
-					fields: "id,account_id,name,account_status,currency,timezone_name,business_name,amount_spent,balance",
-				});
-				return toolResult(account);
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
+	
 	server.registerTool(
 		"get_meta_ads_summary",
 		{
@@ -9192,35 +9168,7 @@ function createServer() {
 	const googleAdsMetricFields =
 		"metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.ctr, metrics.average_cpc, metrics.conversions, metrics.conversions_value, metrics.all_conversions, metrics.all_conversions_value";
 
-	server.registerTool(
-		"get_google_ads_account",
-		{
-			description:
-				"Confirm read-only access to the configured Blindmotion Google Ads production account and return non-sensitive account metadata.",
-			inputSchema: z.object({}),
-		},
-		async () => {
-			try {
-				const { customerId, loginCustomerId, serviceAccount } = getGoogleAdsConfig();
-				const rows = await googleAdsSearch(`
-					SELECT customer.id, customer.descriptive_name, customer.currency_code,
-						customer.time_zone, customer.manager, customer.test_account,
-						customer.auto_tagging_enabled
-					FROM customer LIMIT 1
-				`);
-				return toolResult({
-					access_confirmed: true,
-					manager_customer_id: loginCustomerId,
-					customer_id: customerId,
-					service_account: serviceAccount.client_email,
-					account: rows[0]?.customer ?? null,
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
+	
 	server.registerTool(
 		"find_google_ads_campaign_across_manager",
 		{
@@ -11282,45 +11230,7 @@ function createServer() {
 	const searchConsoleFilterSchema = z.string().trim().min(1).max(500).optional();
 	const searchConsoleLimitSchema = z.number().int().min(1).max(1000).default(250);
 
-	server.registerTool(
-		"get_search_console_property",
-		{
-			description:
-				"Confirm read-only access to the fixed Blindmotion Search Console domain property and return a small recent organic-search activity check.",
-			inputSchema: z.object({}),
-		},
-		async () => {
-			try {
-				const { siteUrl, serviceAccount } = getSearchConsoleConfig();
-				const property = await searchConsoleFetch();
-				if (
-					!property.permissionLevel ||
-					property.permissionLevel === "siteUnverifiedUser"
-				) {
-					throw new Error(
-						"The configured service account is not a verified user of the Blindmotion Search Console property.",
-					);
-				}
-				const startDate = utcDateDaysAgo(9);
-				const endDate = utcDateDaysAgo(3);
-				const activity = await searchConsoleQuery({
-					startDate,
-					endDate,
-					rowLimit: 1,
-				});
-				return toolResult({
-					site_url: siteUrl,
-					permission_level: property.permissionLevel,
-					service_account: serviceAccount.client_email,
-					access_confirmed: true,
-					activity_check: searchConsoleReportResult(activity, startDate, endDate, []),
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
+	
 	server.registerTool(
 		"get_search_console_queries",
 		{
@@ -11449,32 +11359,7 @@ function createServer() {
 
 	/* Read-only Google Analytics 4 reporting tools */
 
-	server.registerTool(
-		"get_ga4_property",
-		{
-			description:
-				"Confirm access to the configured Blindmotion GA4 property and return a small non-sensitive activity check.",
-			inputSchema: z.object({}),
-		},
-		async () => {
-			try {
-				const { propertyId, serviceAccount } = getGa4Config();
-				const report = await ga4RunReport({
-					dateRanges: [{ startDate: "7daysAgo", endDate: "yesterday" }],
-					metrics: [{ name: "sessions" }, { name: "activeUsers" }],
-				});
-				return toolResult({
-					property_id: propertyId,
-					service_account: serviceAccount.client_email,
-					access_confirmed: true,
-					activity_check: ga4ReportResult(report, "7daysAgo", "yesterday"),
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
+	
 	server.registerTool(
 		"get_ga4_summary",
 		{
