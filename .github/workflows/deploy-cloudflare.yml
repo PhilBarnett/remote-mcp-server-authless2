@@ -29,7 +29,9 @@ jobs:
           node-version: 22
 
       - name: Install dependencies
-        run: npm install
+        run: |
+          npm install
+          npm install --no-save "@oxlint/binding-linux-x64-gnu@$(node -p "require('./node_modules/oxlint/package.json').version")"
 
       - name: Type-check
         run: npm run type-check
