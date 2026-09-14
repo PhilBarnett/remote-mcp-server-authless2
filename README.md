@@ -276,3 +276,10 @@ Update with this configuration:
 ```
 
 Restart Claude and you should see the tools become available.
+
+
+## Parameter-driven WAPF pricing grids
+
+- \`preview_wapf_pricing_grid\` validates a caller-supplied width/drop base-price matrix, complete fabric surcharge matrices and optional drop-based choice surcharges against one exact draft/hidden WooCommerce product.
+- \`apply_wapf_pricing_grid_guarded\` applies only the previewed regular price and WAPF pricing formulas after revalidating product identity, field/choice identities, matrix dimensions, the WAPF hash and deterministic plan hash. It cannot publish and restores both the regular price and field group if verification fails.
+- Product IDs, names, metadata IDs, field IDs, choice slugs, axes and all monetary values are runtime parameters; no product-specific pricing is hard-coded.
