@@ -13194,6 +13194,85 @@ function createServer() {
 		},
 	);
 
+	const wapfPricingStorageHash = z.string().regex(/^[a-f0-9]{64}$/);
+	const wapfPricingStorageAxis = z.array(z.number().positive().finite()).min(1).max(50);
+	const wapfPricingStorageMatrix = z.array(
+		z.array(z.number().min(-100000).max(100000).finite()).min(1).max(50),
+	).min(1).max(50);
+	const wapfPricingStorageMigration = z.object({
+		expected_lookup_option_sha256: wapfPricingStorageHash,
+		lookups: z.array(z.object({
+			name: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
+			expected_existing_sha256: wapfPricingStorageHash.optional(),
+			width_breakpoints: wapfPricingStorageAxis,
+			drop_breakpoints: wapfPricingStorageAxis,
+			values: wapfPricingStorageMatrix,
+		})).min(1).max(10),
+		acf_field_group_id: z.number().int().positive(),
+		expected_acf_field_group_title: z.string().min(1).max(200),
+		expected_acf_field_group_post_name: z.string().min(1).max(200),
+		global_prices: z.array(z.object({
+			name: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
+			label: z.string().min(1).max(200),
+			value: z.number().min(0).max(100000).finite(),
+			expected_existing_field_key: z.string().min(1).max(200).optional(),
+			expected_existing_value_sha256: wapfPricingStorageHash.optional(),
+		})).min(1).max(20),
+	});
+
+	server.registerTool(
+		"preview_wapf_pricing_storage_migration",
+		{
+			description: "Preview a parameter-driven WAPF lookup-table and ACF Global Price migration through the dedicated WordPress bridge. Hash-locks the complete existing lookup option and any selected existing records; performs no writes.",
+			inputSchema: wapfPricingStorageMigration,
+		},
+		async (args) => {
+			try {
+				const response = await wpMcpWrite("wapf-pricing-migration-preview", args);
+				const result = await response.json<any>();
+				if (
+					result?.preview_only !== true ||
+					result?.write_performed !== false ||
+					result?.plugin?.slug !== "blindmotion-wapf-pricing-bridge" ||
+					result?.plugin?.version !== "0.3.0" ||
+					typeof result?.plan_sha256 !== "string"
+				) {
+					throw new Error("WAPF pricing bridge returned an invalid migration preview.");
+				}
+				return toolResult(result);
+			} catch (error) { return toolError(error); }
+		},
+	);
+
+	server.registerTool(
+		"apply_wapf_pricing_storage_migration_guarded",
+		{
+			description: "Apply one exact previewed WAPF lookup-table and ACF Global Price migration through the dedicated WordPress bridge. Revalidates all hashes, verifies every write and restores lookup/global-price state on failure.",
+			inputSchema: wapfPricingStorageMigration.extend({
+				expected_plan_sha256: wapfPricingStorageHash,
+				confirmation: z.literal("CONFIRM APPLY WAPF PRICING STORAGE"),
+			}),
+		},
+		async (args) => {
+			try {
+				const response = await wpMcpWrite("wapf-pricing-migration-apply", args);
+				const result = await response.json<any>();
+				if (
+					result?.applied !== true ||
+					result?.verified !== true ||
+					result?.write_performed !== true ||
+					result?.rollback_performed !== false ||
+					result?.plugin?.slug !== "blindmotion-wapf-pricing-bridge" ||
+					result?.plugin?.version !== "0.3.0" ||
+					result?.plan_sha256 !== args.expected_plan_sha256
+				) {
+					throw new Error("WAPF pricing bridge returned an invalid migration-apply result.");
+				}
+				return toolResult(result);
+			} catch (error) { return toolError(error); }
+		},
+	);
+
 	return server;
 }
 
