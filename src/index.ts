@@ -13074,6 +13074,57 @@ function createServer() {
 		},
 	);
 
+	const wapfStorageKeyPattern = /(?:wapf|advanced_product_fields|acf.*option|lookup.*table|global.*price)/i;
+
+	async function authenticatedWpRest(path: string) {
+		const workerEnv = env as unknown as Record<string, string>;
+		const response = await fetch(workerEnv.WC_SITE + "/wp-json/" + path.replace(/^\/+/, ""), {
+			headers: { Authorization: getWpWriteAuthHeader(), Accept: "application/json" },
+		});
+		if (!response.ok) {
+			throw new Error("Authenticated WordPress REST inspection failed: " + response.status + " " + await response.text());
+		}
+		return response.json<any>();
+	}
+
+	server.registerTool(
+		"inspect_wapf_pricing_storage",
+		{
+			description: "Read-only discovery of WAPF lookup-table and ACF Global Price storage exposed through authenticated WordPress REST. Returns only route, type and setting entries whose names identify WAPF, lookup tables, ACF options or global prices; never writes and never returns unrelated settings.",
+			inputSchema: z.object({
+				include_matching_setting_values: z.boolean().default(true),
+			}),
+		},
+		async ({ include_matching_setting_values }) => {
+			try {
+				const [root, types, settings] = await Promise.all([
+					authenticatedWpRest(""),
+					authenticatedWpRest("wp/v2/types?context=edit"),
+					authenticatedWpRest("wp/v2/settings?context=edit"),
+				]);
+				const routes = Object.keys(root?.routes ?? {}).filter((key) => wapfStorageKeyPattern.test(key));
+				const namespaces = (root?.namespaces ?? []).filter((key: unknown) => wapfStorageKeyPattern.test(String(key)));
+				const matchingTypes = Object.fromEntries(
+					Object.entries(types ?? {}).filter(([key, value]) =>
+						wapfStorageKeyPattern.test(key + " " + JSON.stringify(value))),
+				);
+				const matchingSettings = Object.fromEntries(
+					Object.entries(settings ?? {})
+						.filter(([key]) => wapfStorageKeyPattern.test(key))
+						.map(([key, value]) => [key, include_matching_setting_values ? value : "[redacted]"]),
+				);
+				return toolResult({
+					read_only: true,
+					namespaces,
+					routes,
+					post_types: matchingTypes,
+					settings: matchingSettings,
+					write_performed: false,
+				});
+			} catch (error) { return toolError(error); }
+		},
+	);
+
 	return server;
 }
 
