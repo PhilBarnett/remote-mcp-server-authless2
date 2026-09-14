@@ -199,86 +199,6 @@ async function wpMcpWrite(path: string, body: unknown) {
 
 const CLONE_PRODUCT_CONFIRMATION = "CONFIRM CLONE PRODUCT AS DRAFT";
 const FABRIC_SAMPLE_SETUP_CONFIRMATION = "CONFIRM APPLY FABRIC SAMPLE SETUP";
-const TOTALBLOCK_PRODUCT_ID = 9413;
-const TOTALBLOCK_PRODUCT_NAME = "Blindmotion TotalBlock Cassette Blind";
-const TOTALBLOCK_PRODUCT_SLUG = "totalblock-cassette-blinds";
-const TOTALBLOCK_PRODUCT_CATEGORY_ID = 74;
-const TOTALBLOCK_PRODUCT_CONFIRMATION = "CONFIRM APPLY TOTALBLOCK PRODUCT CONTENT";
-const TOTALBLOCK_FABRIC_SOURCE_ID = 4788;
-const TOTALBLOCK_FABRIC_SOURCE_NAME = "Premium Roller Blinds";
-const TOTALBLOCK_VIBE_PRICING_SOURCE_ID = 3839;
-const TOTALBLOCK_VIBE_PRICING_SOURCE_NAME = "Everyday Roller Blinds";
-const TOTALBLOCK_FABRIC_WRITE_CONFIRMATION = "CONFIRM INSTALL TOTALBLOCK BLOCKOUT FABRICS";
-const TOTALBLOCK_FABRIC_TARGET_META_ID = 191905;
-const TOTALBLOCK_FABRIC_SOURCE_META_ID = 130508;
-const TOTALBLOCK_VIBE_SOURCE_META_ID = 35347;
-const TOTALBLOCK_FABRIC_TARGET_HASH =
-	"5dc1f08038b72c69ef90d678b01656e4cc21991fdcec600440c0e432679af45d";
-const TOTALBLOCK_FABRIC_SOURCE_HASH =
-	"0d98e18fe77f70b180f2d288180bdd3d630b6fe7c1b908d09612fcc5ca8f6912";
-const TOTALBLOCK_VIBE_SOURCE_HASH =
-	"000f7ac1a42c6193be39703cf19177dc0cb1e7c44c5b7af13195833a0ab94175";
-const TOTALBLOCK_DUO_BLOCK_CONFIRMATION = "CONFIRM ADD DUO BLOCK TO TOTALBLOCK";
-const TOTALBLOCK_SANCTUARY_CONFIRMATION = "CONFIRM ADD SANCTUARY TO TOTALBLOCK";
-const TOTALBLOCK_FEATURED_IMAGE_CONFIRMATION = "CONFIRM REPLACE TOTALBLOCK FEATURED IMAGE";
-const TOTALBLOCK_EXPECTED_FEATURED_IMAGE_ID = 6704;
-const TOTALBLOCK_FEATURED_IMAGE_BACKUP_KEY = "_blindmotion_mcp_totalblock_featured_backups";
-const TOTALBLOCK_GALLERY_CONFIRMATION = "CONFIRM REPLACE TOTALBLOCK GALLERY IMAGES";
-const TOTALBLOCK_EXPECTED_CURRENT_IMAGE_IDS = [9417, 6715, 6820, 6821, 7292] as const;
-const TOTALBLOCK_GALLERY_BACKUP_KEY = "_blindmotion_mcp_totalblock_gallery_backups";
-const TOTALBLOCK_ELEMENTOR_ZIPGRIP_PATTERNS = [
-	/zip guided blinds/i,
-	/zipgrip/i,
-	/outdoor space/i,
-	/mesh fabric in 94%/i,
-	/available up to 6400mm wide/i,
-] as const;
-const TOTALBLOCK_FABRIC_INSTALLED_HASH =
-	"56baa1454189de29feda97493fc59405f76de11111c686379262c7458a8bed52";
-const TOTALBLOCK_DUO_BLOCK_INSTALLED_HASH =
-	"6dac64e0b458af244027410655e4fdc6dcf8e48e741810a408393cd9db60c741";
-const TOTALBLOCK_SEO_TITLE = "Total Blockout Cassette Blinds with Side Channels | Blindmotion";
-const TOTALBLOCK_SEO_DESCRIPTION =
-	"Made-to-measure TotalBlock cassette blinds with side channels and a bottom seal, designed to dramatically reduce the light gaps around ordinary roller blinds.";
-const TOTALBLOCK_SHORT_DESCRIPTION = `<p><strong>When an ordinary blockout blind isn’t dark enough.</strong></p>
-<p>TotalBlock is a made-to-measure blockout cassette blind with side channels and a bottom seal. The enclosed system dramatically reduces the light gaps normally found around conventional roller blinds for a darker, more comfortable room.</p>`;
-const TOTALBLOCK_DESCRIPTION = `<h2>Blockout fabric is only part of the answer</h2>
-<p>A conventional blockout roller blind uses light-blocking fabric, but light can still enter around the top, sides and bottom of the blind. Blindmotion TotalBlock addresses those gaps with a complete cassette roller blind system.</p>
-<p>The fabric rolls neatly into an enclosed head cassette. Side channels guide and contain the fabric edges, while the bottom seal helps close the remaining gap at the sill. The result is dramatically better room darkening than an ordinary blockout roller blind.</p>
-
-<h2>Designed for rooms where darkness matters</h2>
-<p>TotalBlock cassette blinds are particularly well suited to:</p>
-<ul>
-	<li>Bedrooms and nurseries</li>
-	<li>Media rooms and home cinemas</li>
-	<li>Shift workers and daytime sleepers</li>
-	<li>Streetlights, early sunrise and other unwanted outside light</li>
-	<li>Anyone frustrated by light leaking around standard roller blinds</li>
-</ul>
-
-<h2>How the TotalBlock system reduces light gaps</h2>
-<ul>
-	<li><strong>Enclosed cassette:</strong> houses the roller and reduces light entering above the blind.</li>
-	<li><strong>Side channels:</strong> contain the fabric edges and reduce the bright strips commonly visible beside a roller blind.</li>
-	<li><strong>Bottom seal:</strong> helps reduce light beneath the lowered blind.</li>
-	<li><strong>Made-to-measure construction:</strong> manufactured to suit the dimensions of your window opening.</li>
-</ul>
-
-<h2>TotalBlock compared with an ordinary blockout roller blind</h2>
-<p>Both products use blockout fabric. The important difference is what happens around that fabric. A normal roller blind leaves operating clearances around its edges. TotalBlock surrounds the blind with a cassette, side channels and a bottom seal to control those common sources of light leakage.</p>
-
-<h2>A complete blockout cassette blind system</h2>
-<p>TotalBlock combines practical room-darkening performance with the clean appearance of a purpose-built cassette blind. It is a strong choice when a standard blockout blind is not dark enough, without resorting to bulky layers of additional window coverings.</p>
-<p><small>TotalBlock is designed to dramatically reduce incoming light. The final result depends on the window, opening, installation and surrounding sources of light; absolute darkness cannot be guaranteed in every room.</small></p>`;
-
-function normalizeTotalBlockHtml(value: unknown) {
-	return String(value ?? "")
-		.replace(/\r\n?/g, "\n")
-		.replace(/[\t ]+\n/g, "\n")
-		.replace(/>\s+</g, "><")
-		.trim();
-}
-
 function parseWapfFieldGroup(value: unknown) {
 	if (value && typeof value === "object") return value as Record<string, any>;
 	if (typeof value !== "string" || value.trim() === "") return null;
@@ -294,49 +214,6 @@ function wapfFieldLabel(field: any) {
 	return String(
 		field?.label ?? field?.title ?? field?.name ?? field?.options?.label ?? "",
 	).trim();
-}
-
-function wapfFabricCandidates(group: Record<string, any>) {
-	const fields = Array.isArray(group.fields) ? group.fields : [];
-	return fields
-		.map((field: any, index: number) => ({ field, index, label: wapfFieldLabel(field) }))
-		.filter(({ field, label }) => {
-			const choiceLabels = Array.isArray(field?.options?.choices)
-				? field.options.choices
-						.slice(0, 10)
-						.map((choice: any) =>
-							String(choice?.label ?? choice?.name ?? choice?.value ?? ""),
-						)
-						.join(" ")
-				: "";
-			return /fabric|blockout|blackout/i.test(`${label} ${choiceLabels}`);
-		})
-		.map(({ field, index, label }) => ({
-			index,
-			id: field?.id ?? field?.key ?? null,
-			label,
-			type: field?.type ?? null,
-			required: field?.required ?? field?.options?.required ?? null,
-			field_keys: Object.keys(field ?? {}).sort(),
-			option_keys: Object.keys(field?.options ?? {}).sort(),
-			choice_count: Array.isArray(field?.options?.choices) ? field.options.choices.length : 0,
-			choices: Array.isArray(field?.options?.choices)
-				? field.options.choices.map((choice: any, choiceIndex: number) => ({
-						index: choiceIndex,
-						id: choice?.id ?? choice?.key ?? null,
-						label: choice?.label ?? choice?.name ?? null,
-						value: choice?.value ?? null,
-						slug: choice?.slug ?? null,
-						price: choice?.price ?? choice?.pricing ?? null,
-						pricing_type: choice?.pricing_type ?? null,
-						pricing_amount: choice?.pricing_amount ?? null,
-						image: choice?.image ?? null,
-						attachment: choice?.attachment ?? null,
-						keys: Object.keys(choice ?? {}).sort(),
-					}))
-				: [],
-			condition_data: field?.conditionals ?? field?.conditions ?? field?.rules ?? null,
-		}));
 }
 
 function wapfFieldSummary(field: any, index: number) {
@@ -361,51 +238,6 @@ function wapfFieldSummary(field: any, index: number) {
 			: [],
 		condition_data: field?.conditionals ?? field?.conditions ?? field?.rules ?? null,
 	};
-}
-
-function wapfPricingContext(group: Record<string, any>) {
-	const fields = Array.isArray(group.fields) ? group.fields : [];
-	return fields
-		.map((field: any, index: number) => ({ field, index }))
-		.filter(({ field }) => {
-			const choices = Array.isArray(field?.options?.choices) ? field.options.choices : [];
-			return (
-				field?.pricing?.enabled === true ||
-				choices.some(
-					(choice: any) =>
-						String(choice?.pricing_type ?? "none") !== "none" ||
-						!["", "0"].includes(String(choice?.pricing_amount ?? "")),
-				)
-			);
-		})
-		.map(({ field, index }) => wapfFieldSummary(field, index));
-}
-
-function wapfFabricPricingDefinitions(group: Record<string, any>) {
-	const matches: Array<{ path: string; value: unknown }> = [];
-	function visit(value: unknown, path: string, depth: number) {
-		if (depth > 5 || value == null) return;
-		if (Array.isArray(value)) {
-			value.forEach((item, index) => visit(item, `${path}[${index}]`, depth + 1));
-			return;
-		}
-		if (typeof value !== "object") return;
-		for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-			if (path === "group" && key === "fields") continue;
-			const childPath = `${path}.${key}`;
-			const serialized = JSON.stringify(child);
-			if (
-				/fabric|blockout|vibe|lookup/i.test(`${key} ${serialized}`) &&
-				(serialized.length <= 4000 || depth >= 2)
-			) {
-				matches.push({ path: childPath, value: child });
-				continue;
-			}
-			visit(child, childPath, depth + 1);
-		}
-	}
-	visit(group, "group", 0);
-	return matches.slice(0, 100);
 }
 
 function singleWapfFieldGroup(product: any) {
@@ -868,46 +700,6 @@ function parseElementorData(value: unknown) {
 	} catch {
 		return null;
 	}
-}
-
-function totalBlockElementorMatches(nodes: any[]) {
-	const matches: any[] = [];
-	function visit(node: any, ancestors: string[] = []) {
-		if (!node || typeof node !== "object") return;
-		const settings = node.settings && typeof node.settings === "object" ? node.settings : {};
-		const matchedSettings = Object.entries(settings)
-			.filter((entry): entry is [string, string] => typeof entry[1] === "string")
-			.filter(([, value]) =>
-				TOTALBLOCK_ELEMENTOR_ZIPGRIP_PATTERNS.some((pattern) => pattern.test(value)),
-			)
-			.map(([key, value]) => ({
-				key,
-				plain_text: htmlToPlainText(value).slice(0, 4000),
-				sha256_input_length: value.length,
-			}));
-		const imageSettings = Object.fromEntries(
-			Object.entries(settings).filter(
-				([key, value]) =>
-					/(?:background|image)/i.test(key) &&
-					(value === null || ["string", "number", "object"].includes(typeof value)),
-			),
-		);
-		if (matchedSettings.length > 0) {
-			matches.push({
-				id: node.id ?? null,
-				el_type: node.elType ?? null,
-				widget_type: node.widgetType ?? null,
-				ancestor_ids: ancestors,
-				matched_settings: matchedSettings,
-				image_settings: imageSettings,
-			});
-		}
-		for (const child of Array.isArray(node.elements) ? node.elements : []) {
-			visit(child, [...ancestors, String(node.id ?? "")]);
-		}
-	}
-	for (const node of nodes) visit(node);
-	return matches;
 }
 
 function elementorLiteralSettingMatches(nodes: any[], searchTerms: string[]) {
