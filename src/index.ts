@@ -12423,7 +12423,8 @@ function createServer() {
 		async (args) => {
 			try {
 				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
-				const plan = await buildWapfPricingReferencePlan(args, product);
+				const pricingArgs = wapfPricingReferenceMigrationBase.parse(args);
+				const plan = await buildWapfPricingReferencePlan(pricingArgs, product);
 				if (plan.planHash !== args.expected_plan_sha256) {
 					throw new Error("The deterministic pricing-reference plan changed after preview; refusing write.");
 				}
