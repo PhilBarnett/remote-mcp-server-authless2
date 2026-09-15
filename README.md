@@ -245,6 +245,25 @@ result is verified against an exact post-write hash; if the write or verificatio
 fails, the original WAPF field group is restored and verified. Product identity,
 visibility, descriptions, images and all non-WAPF data remain untouched.
 
+## Guarded WAPF image delivery optimisation
+
+The generic WAPF image-delivery workflow reduces option-selector payload without
+replacing or deleting original WordPress attachments.
+
+- `preview_wapf_image_delivery_optimisation` accepts an exact draft/hidden product,
+  WAPF hash, runtime-selected image-swatch field IDs and labels, target maximum
+  dimension, offset and batch size. It selects the largest existing square WordPress
+  derivative at or below the requested size and returns a deterministic plan hash.
+- `apply_wapf_image_delivery_optimisation_guarded` requires that exact plan plus
+  `CONFIRM APPLY WAPF IMAGE DELIVERY OPTIMISATION`. It changes only the selected
+  choice image URLs and option-derived attachment alt text, verifies the product and
+  media, and attempts exact rollback on failure.
+
+Batches are capped at ten choices to stay within Worker subrequest limits. Attachment
+IDs, original files, WAPF fields, slugs, labels, pricing, conditions and unrelated
+product data are preserved. Product IDs, names, field IDs, labels, image sizes and
+batch boundaries are runtime parameters.
+
 ## Connect to Cloudflare AI Playground
 
 You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
