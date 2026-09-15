@@ -12133,6 +12133,450 @@ function createServer() {
 		},
 	);
 
+
+	/* Generic, hash-locked migration from generated WAPF pricing formulas to lookup/ACF references. */
+	const wapfPricingReferenceName = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
+	const wapfPricingReferenceMigrationBase = z.object({
+		product_id: genericWapfId,
+		expected_product_name: z.string().trim().min(1).max(500),
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		expected_regular_price: z.number().nonnegative().finite(),
+		width_field_id: z.string().min(1),
+		expected_width_field_label: z.string().min(1),
+		drop_field_id: z.string().min(1),
+		expected_drop_field_label: z.string().min(1),
+		width_breakpoints: pricingAxis,
+		drop_breakpoints: pricingAxis,
+		base_price_grid: pricingMatrix,
+		base_lookup: z.object({
+			name: wapfPricingReferenceName,
+			expected_sha256: genericWapfHash,
+		}),
+		fit_field_id: z.string().min(1),
+		expected_fit_field_label: z.string().min(1),
+		face_fit_choice_slug: z.string().min(1),
+		expected_face_fit_choice_label: z.string().min(1),
+		face_fit_values: z.array(z.number().nonnegative().finite()).min(2).max(50),
+		face_fit_lookup: z.object({
+			name: wapfPricingReferenceName,
+			expected_sha256: genericWapfHash,
+			width_breakpoint: z.number().positive().finite(),
+		}),
+		acf_field_group_id: genericWapfId,
+		expected_acf_field_group_title: z.string().min(1).max(200),
+		expected_acf_field_group_post_name: z.string().min(1).max(200),
+		expected_lookup_option_sha256: genericWapfHash,
+		global_prices: z.array(z.object({
+			name: wapfPricingReferenceName,
+			expected_field_key: z.string().min(1).max(200),
+			expected_value_sha256: genericWapfHash,
+			expected_value: z.number().nonnegative().finite(),
+		})).min(1).max(20),
+		fabric_selector_field_id: z.string().min(1),
+		expected_fabric_selector_label: z.string().min(1),
+		fabric_groups: z.array(z.object({
+			choice_slug: z.string().min(1),
+			expected_choice_label: z.string().min(1),
+			global_price_name: wapfPricingReferenceName,
+			surcharge_grid: pricingMatrix,
+		})).min(1).max(50),
+		waste_multiplier: z.number().positive().finite(),
+		gst_multiplier: z.number().positive().finite(),
+		discount_multiplier: z.number().positive().max(1).finite(),
+		post_discount_gross_margin: z.number().min(0).max(0.99).finite(),
+		rounding_increment: z.number().positive().finite(),
+	});
+
+	function pricingReferenceLookupValue(widths: number[], drops: number[], values: number[][]) {
+		return Object.fromEntries(widths.map((width, widthIndex) => [
+			String(width),
+			Object.fromEntries(drops.map((drop, dropIndex) => [
+				String(drop),
+				values[widthIndex][dropIndex],
+			])),
+		]));
+	}
+
+	async function buildWapfPricingReferencePlan(
+		args: z.infer<typeof wapfPricingReferenceMigrationBase>,
+		productOverride?: any,
+	) {
+		validatePricingAxis(args.width_breakpoints, "Width breakpoints");
+		validatePricingAxis(args.drop_breakpoints, "Drop breakpoints");
+		if (
+			args.base_price_grid.length !== args.width_breakpoints.length ||
+			args.base_price_grid.some((row) => row.length !== args.drop_breakpoints.length) ||
+			args.face_fit_values.length !== args.drop_breakpoints.length
+		) {
+			throw new Error("Pricing-reference parity matrices do not match their axes.");
+		}
+		const product = productOverride ?? await (await wcFetch("products/" + args.product_id)).json<any>();
+		if (product.id !== args.product_id || product.name !== args.expected_product_name) {
+			throw new Error("WooCommerce product identity does not match the pricing-reference target.");
+		}
+		if (product.status !== "draft" || product.catalog_visibility !== "hidden") {
+			throw new Error("Pricing-reference writes are restricted to draft/hidden products.");
+		}
+		if (Number(product.regular_price) !== args.expected_regular_price) {
+			throw new Error("The product regular price changed after review.");
+		}
+		const wapf = genericWapf(product);
+		if (wapf.meta.id !== args.expected_meta_data_id) throw new Error("WAPF metadata identity changed.");
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		if (beforeHash !== args.expected_field_group_sha256) {
+			throw new Error("WAPF field group changed after review.");
+		}
+
+		const lookupNames = [args.base_lookup.name, args.face_fit_lookup.name];
+		if (new Set(lookupNames).size !== lookupNames.length) {
+			throw new Error("Base and Face Fit lookup names must differ.");
+		}
+		const globalPriceNames = args.global_prices.map((item) => item.name);
+		if (new Set(globalPriceNames).size !== globalPriceNames.length) {
+			throw new Error("Duplicate Global Price names are not allowed.");
+		}
+		const detailQuery = new URLSearchParams({
+			lookup_names: lookupNames.join(","),
+			acf_field_group_id: String(args.acf_field_group_id),
+			expected_acf_field_group_title: args.expected_acf_field_group_title,
+		});
+		const [storage, details] = await Promise.all([
+			authenticatedWpRest("blindmotion-mcp/v1/wapf-pricing-storage?include_value_shapes=false"),
+			authenticatedWpRest("blindmotion-mcp/v1/wapf-pricing-details?" + detailQuery.toString()),
+		]);
+		if (
+			storage?.read_only !== true || storage?.write_performed !== false ||
+			details?.read_only !== true || details?.write_performed !== false ||
+			details?.unrelated_values_returned !== false ||
+			details?.plugin?.slug !== "blindmotion-wapf-pricing-bridge" ||
+			details?.plugin?.version !== "0.3.0"
+		) {
+			throw new Error("WAPF pricing storage did not satisfy the read-only verification contract.");
+		}
+		const lookupOption = (storage?.options ?? []).find(
+			(option: any) => String(option?.option_name) === "wapf_imported_tables",
+		);
+		if (lookupOption?.value_sha256 !== args.expected_lookup_option_sha256) {
+			throw new Error("The complete WAPF lookup storage changed after review.");
+		}
+		if (
+			details?.acf_field_group?.id !== args.acf_field_group_id ||
+			details?.acf_field_group?.title !== args.expected_acf_field_group_title ||
+			details?.acf_field_group?.post_name !== args.expected_acf_field_group_post_name
+		) {
+			throw new Error("The ACF Global Prices group identity changed after review.");
+		}
+		const expectedLookups = [
+			{
+				spec: args.base_lookup,
+				value: pricingReferenceLookupValue(
+					args.width_breakpoints, args.drop_breakpoints, args.base_price_grid,
+				),
+			},
+			{
+				spec: args.face_fit_lookup,
+				value: pricingReferenceLookupValue(
+					[args.face_fit_lookup.width_breakpoint],
+					args.drop_breakpoints,
+					[args.face_fit_values],
+				),
+			},
+		];
+		for (const expected of expectedLookups) {
+			const actual = details?.lookups?.[expected.spec.name];
+			if (
+				actual?.value_sha256 !== expected.spec.expected_sha256 ||
+				JSON.stringify(actual?.value) !== JSON.stringify(expected.value)
+			) {
+				throw new Error("Lookup table content or hash changed: " + expected.spec.name + ".");
+			}
+		}
+		const globalPriceByName = new Map<string, z.infer<typeof wapfPricingReferenceMigrationBase>["global_prices"][number]>();
+		for (const expected of args.global_prices) {
+			const matches = (details?.acf_field_group?.fields ?? []).filter(
+				(field: any) => String(field?.name) === expected.name,
+			);
+			if (
+				matches.length !== 1 ||
+				String(matches[0]?.key) !== expected.expected_field_key ||
+				matches[0]?.value_sha256 !== expected.expected_value_sha256 ||
+				Number(matches[0]?.value) !== expected.expected_value
+			) {
+				throw new Error("Global Price content or identity changed: " + expected.name + ".");
+			}
+			globalPriceByName.set(expected.name, expected);
+		}
+
+		const updatedGroup = structuredClone(wapf.group);
+		const fields = updatedGroup.fields as any[];
+		const exactField = (id: string, label: string) => {
+			const matches = fields.filter((field) => String(field?.id) === id);
+			if (matches.length !== 1 || String(matches[0]?.label) !== label) {
+				throw new Error("Expected WAPF field identity not found: " + label + ".");
+			}
+			return matches[0];
+		};
+		const widthField = exactField(args.width_field_id, args.expected_width_field_label);
+		const dropField = exactField(args.drop_field_id, args.expected_drop_field_label);
+		if (widthField.type !== "number" || dropField.type !== "number") {
+			throw new Error("Width and drop pricing fields must both be number fields.");
+		}
+		const legacyBaseFormula = twoDimensionalPricingFormula(
+			args.width_field_id,
+			args.drop_field_id,
+			args.width_breakpoints,
+			args.drop_breakpoints,
+			args.base_price_grid,
+		) + "-[price]";
+		if (
+			dropField?.pricing?.enabled !== true ||
+			dropField?.pricing?.type !== "fx" ||
+			String(dropField?.pricing?.amount) !== legacyBaseFormula
+		) {
+			throw new Error("The current generated base-price formula no longer matches the parity grid.");
+		}
+		dropField.pricing = {
+			enabled: true,
+			type: "fx",
+			amount: "lookuptable(" + args.base_lookup.name + ";" +
+				args.width_field_id + ";" + args.drop_field_id + ")-[price]",
+		};
+
+		const fabricField = exactField(
+			args.fabric_selector_field_id, args.expected_fabric_selector_label,
+		);
+		const fabricChoices = fabricField?.options?.choices;
+		if (!Array.isArray(fabricChoices)) throw new Error("Fabric selector choices are missing.");
+		const seenFabricSlugs = new Set<string>();
+		for (const mapping of args.fabric_groups) {
+			if (seenFabricSlugs.has(mapping.choice_slug)) {
+				throw new Error("Duplicate fabric choice slug in pricing-reference plan.");
+			}
+			seenFabricSlugs.add(mapping.choice_slug);
+			if (
+				mapping.surcharge_grid.length !== args.width_breakpoints.length ||
+				mapping.surcharge_grid.some((row) => row.length !== args.drop_breakpoints.length)
+			) {
+				throw new Error("Fabric surcharge parity matrix dimensions are invalid.");
+			}
+			const matches = fabricChoices.filter(
+				(choice: any) => String(choice?.slug) === mapping.choice_slug,
+			);
+			if (matches.length !== 1 || String(matches[0]?.label) !== mapping.expected_choice_label) {
+				throw new Error("Expected fabric choice identity not found: " + mapping.expected_choice_label + ".");
+			}
+			const globalPrice = globalPriceByName.get(mapping.global_price_name);
+			if (!globalPrice) {
+				throw new Error("Fabric choice references an unverified Global Price.");
+			}
+			const legacyFormula = twoDimensionalPricingFormula(
+				args.width_field_id,
+				args.drop_field_id,
+				args.width_breakpoints,
+				args.drop_breakpoints,
+				mapping.surcharge_grid,
+			) + "*[qty]";
+			if (
+				matches[0]?.pricing_type !== "fx" ||
+				String(matches[0]?.pricing_amount) !== legacyFormula
+			) {
+				throw new Error("Current generated fabric formula changed: " + mapping.expected_choice_label + ".");
+			}
+			for (let widthIndex = 0; widthIndex < args.width_breakpoints.length; widthIndex += 1) {
+				for (let dropIndex = 0; dropIndex < args.drop_breakpoints.length; dropIndex += 1) {
+					const raw =
+						(args.width_breakpoints[widthIndex] / 1000) *
+						(args.drop_breakpoints[dropIndex] / 1000) *
+						globalPrice.expected_value *
+						args.waste_multiplier *
+						args.gst_multiplier /
+						((1 - args.post_discount_gross_margin) * args.discount_multiplier);
+					const calculated = Math.ceil(raw / args.rounding_increment) * args.rounding_increment;
+					if (Math.abs(calculated - mapping.surcharge_grid[widthIndex][dropIndex]) > 0.000001) {
+						throw new Error(
+							"Fabric Global Price formula failed parity at " +
+							args.width_breakpoints[widthIndex] + "x" +
+							args.drop_breakpoints[dropIndex] + " for " +
+							mapping.expected_choice_label + ".",
+						);
+					}
+				}
+			}
+			matches[0].pricing_type = "fx";
+			matches[0].pricing_amount =
+				"ceil((([field." + args.width_field_id + "]/1000)*([field." +
+				args.drop_field_id + "]/1000)*acf_option(" + globalPrice.name + ")*" +
+				pricingNumber(args.waste_multiplier) + "*" + pricingNumber(args.gst_multiplier) +
+				"/((1-" + pricingNumber(args.post_discount_gross_margin) + ")*" +
+				pricingNumber(args.discount_multiplier) + ")))/" +
+				pricingNumber(args.rounding_increment) + ")*" +
+				pricingNumber(args.rounding_increment) + "*[qty]";
+		}
+		if (seenFabricSlugs.size !== fabricChoices.length) {
+			throw new Error("The pricing-reference plan must cover every fabric selector choice.");
+		}
+
+		const fitField = exactField(args.fit_field_id, args.expected_fit_field_label);
+		const fitChoices = fitField?.options?.choices;
+		if (!Array.isArray(fitChoices)) throw new Error("Fit Type choices are missing.");
+		const faceMatches = fitChoices.filter(
+			(choice: any) => String(choice?.slug) === args.face_fit_choice_slug,
+		);
+		if (
+			faceMatches.length !== 1 ||
+			String(faceMatches[0]?.label) !== args.expected_face_fit_choice_label
+		) {
+			throw new Error("Expected Face Fit choice identity not found.");
+		}
+		const legacyFaceFormula = oneDimensionalPricingFormula(
+			args.drop_field_id, args.drop_breakpoints, args.face_fit_values,
+		);
+		if (
+			faceMatches[0]?.pricing_type !== "fx" ||
+			String(faceMatches[0]?.pricing_amount) !== legacyFaceFormula
+		) {
+			throw new Error("The current generated Face Fit formula no longer matches its parity grid.");
+		}
+		faceMatches[0].pricing_type = "fx";
+		faceMatches[0].pricing_amount =
+			"lookuptable(" + args.face_fit_lookup.name + ";" +
+			args.width_field_id + ";" + args.drop_field_id + ")";
+
+		const updatedValue =
+			typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+		const afterHash = await genericWapfHashOf(updatedValue);
+		const planHash = await genericWapfHashOf({
+			...args,
+			before_field_group_sha256: beforeHash,
+			after_field_group_sha256: afterHash,
+		});
+		return { product, wapf, beforeHash, afterHash, planHash, updatedValue };
+	}
+
+	server.registerTool(
+		"preview_wapf_pricing_reference_migration",
+		{
+			description: "Preview replacing generated WAPF base, fabric and Face Fit formulas with verified lookup-table and ACF Global Price references. Verifies exact storage identities and full matrix parity; performs no writes.",
+			inputSchema: wapfPricingReferenceMigrationBase,
+		},
+		async (args) => {
+			try {
+				const plan = await buildWapfPricingReferencePlan(args);
+				return toolResult({
+					preview_only: true,
+					write_performed: false,
+					product: {
+						id: plan.product.id,
+						name: plan.product.name,
+						status: plan.product.status,
+						catalog_visibility: plan.product.catalog_visibility,
+					},
+					before_field_group_sha256: plan.beforeHash,
+					after_field_group_sha256: plan.afterHash,
+					plan_sha256: plan.planHash,
+					parity: {
+						base_cells: args.width_breakpoints.length * args.drop_breakpoints.length,
+						fabric_cells: args.fabric_groups.length *
+							args.width_breakpoints.length * args.drop_breakpoints.length,
+						face_fit_cells: args.face_fit_values.length,
+						mismatches: 0,
+					},
+					untouched: [
+						"regular price",
+						"product identity",
+						"draft/hidden state",
+						"field and choice identities",
+						"images",
+						"conditions",
+						"non-pricing product data",
+					],
+				});
+			} catch (error) { return toolError(error); }
+		},
+	);
+
+	server.registerTool(
+		"apply_wapf_pricing_reference_migration_guarded",
+		{
+			description: "Apply one exact parity-tested migration from generated WAPF pricing formulas to verified lookup-table and ACF Global Price references on a draft/hidden product. Changes only the selected pricing formulas, verifies the final hash and rolls back exactly on failure.",
+			inputSchema: wapfPricingReferenceMigrationBase.extend({
+				expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal("CONFIRM APPLY WAPF PRICING REFERENCES"),
+			}),
+		},
+		async (args) => {
+			try {
+				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
+				const plan = await buildWapfPricingReferencePlan(args, product);
+				if (plan.planHash !== args.expected_plan_sha256) {
+					throw new Error("The deterministic pricing-reference plan changed after preview; refusing write.");
+				}
+				try {
+					await wcWrite("products/" + args.product_id, {
+						meta_data: [{
+							id: plan.wapf.meta.id,
+							key: "_wapf_fieldgroup",
+							value: plan.updatedValue,
+						}],
+					});
+					const verified = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const verifiedWapf = genericWapf(verified);
+					const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+					if (
+						verified.id !== args.product_id ||
+						verified.name !== args.expected_product_name ||
+						verified.status !== "draft" ||
+						verified.catalog_visibility !== "hidden" ||
+						Number(verified.regular_price) !== args.expected_regular_price ||
+						verifiedHash !== plan.afterHash
+					) {
+						throw new Error("Post-write pricing-reference verification failed.");
+					}
+					return toolResult({
+						updated: true,
+						verified: true,
+						rollback_performed: false,
+						product: {
+							id: verified.id,
+							name: verified.name,
+							status: verified.status,
+							catalog_visibility: verified.catalog_visibility,
+						},
+						regular_price: verified.regular_price,
+						before_field_group_sha256: plan.beforeHash,
+						after_field_group_sha256: verifiedHash,
+						plan_sha256: plan.planHash,
+						parity: {
+							base_cells: args.width_breakpoints.length * args.drop_breakpoints.length,
+							fabric_cells: args.fabric_groups.length *
+								args.width_breakpoints.length * args.drop_breakpoints.length,
+							face_fit_cells: args.face_fit_values.length,
+							mismatches: 0,
+						},
+					});
+				} catch (writeError) {
+					await wcWrite("products/" + args.product_id, {
+						meta_data: [{
+							id: plan.wapf.meta.id,
+							key: "_wapf_fieldgroup",
+							value: plan.wapf.meta.value,
+						}],
+					});
+					const rolledBack = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const rolledBackHash = await genericWapfHashOf(genericWapf(rolledBack).meta.value);
+					if (rolledBackHash !== plan.beforeHash) {
+						throw new Error("Pricing-reference update and exact rollback verification both failed.");
+					}
+					throw new Error(
+						"Pricing-reference update failed; exact rollback succeeded: " +
+						(writeError instanceof Error ? writeError.message : String(writeError)),
+					);
+				}
+			} catch (error) { return toolError(error); }
+		},
+	);
+
 	return server;
 }
 
