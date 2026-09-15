@@ -10604,6 +10604,416 @@ function createServer() {
 		return unique;
 	}
 
+	const wapfImageDeliveryConfirmation = "CONFIRM APPLY WAPF IMAGE DELIVERY OPTIMISATION";
+	const wapfImageDeliveryField = z.object({
+		field_id: z.string().trim().min(1).max(120),
+		expected_field_label: z.string().trim().min(1).max(300),
+	});
+	const wapfImageDeliveryInput = {
+		product_id: genericWapfId,
+		expected_product_name: z.string().trim().min(1).max(500),
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		fields: z.array(wapfImageDeliveryField).min(1).max(30),
+		target_max_dimension: z.number().int().min(200).max(1600),
+		batch_offset: z.number().int().min(0).max(500).default(0),
+		batch_size: z.number().int().min(1).max(10).default(10),
+	};
+
+	async function buildWapfImageDeliveryPlan(args: {
+		product_id: number;
+		expected_product_name: string;
+		expected_meta_data_id: number;
+		expected_field_group_sha256: string;
+		fields: Array<{ field_id: string; expected_field_label: string }>;
+		target_max_dimension: number;
+		batch_offset: number;
+		batch_size: number;
+	}) {
+		const product = await (await wcFetch("products/" + args.product_id)).json<any>();
+		if (
+			product.id !== args.product_id ||
+			product.name !== args.expected_product_name ||
+			product.status !== "draft" ||
+			product.catalog_visibility !== "hidden"
+		) {
+			throw new Error("Product identity or draft/hidden state changed; no write performed.");
+		}
+		const wapf = genericWapf(product);
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		if (
+			wapf.meta.id !== args.expected_meta_data_id ||
+			beforeHash !== args.expected_field_group_sha256
+		) {
+			throw new Error("The WAPF field group changed after inspection; no write performed.");
+		}
+		const requestedIds = args.fields.map((field) => field.field_id);
+		if (new Set(requestedIds).size !== requestedIds.length) {
+			throw new Error("Duplicate field IDs in image-delivery request.");
+		}
+		const references: Array<{
+			field_id: string;
+			field_label: string;
+			choice_slug: string;
+			choice_label: string;
+			attachment_id: number;
+			current_url: string;
+		}> = [];
+		for (const requested of args.fields) {
+			const matches = wapf.group.fields.filter(
+				(field: any) => genericWapfFieldId(field) === requested.field_id,
+			);
+			if (matches.length !== 1) {
+				throw new Error("Selected WAPF field is missing or ambiguous: " + requested.field_id);
+			}
+			const field = matches[0];
+			if (
+				wapfFieldLabel(field) !== requested.expected_field_label ||
+				field.type !== "image-swatch" ||
+				!Array.isArray(field.options?.choices)
+			) {
+				throw new Error("Selected field label, type or choices changed: " + requested.field_id);
+			}
+			for (const choice of field.options.choices) {
+				const attachmentId = Number(choice?.attachment);
+				const currentUrl = String(choice?.image ?? "");
+				const choiceSlug = String(choice?.slug ?? "");
+				const choiceLabel = String(choice?.label ?? "").trim();
+				if (
+					!Number.isInteger(attachmentId) ||
+					attachmentId <= 0 ||
+					!/^https:\/\//i.test(currentUrl) ||
+					!choiceSlug ||
+					!choiceLabel
+				) {
+					throw new Error("Every selected image-swatch choice needs an attachment, HTTPS image, slug and label.");
+				}
+				references.push({
+					field_id: requested.field_id,
+					field_label: requested.expected_field_label,
+					choice_slug: choiceSlug,
+					choice_label: choiceLabel,
+					attachment_id: attachmentId,
+					current_url: currentUrl,
+				});
+			}
+		}
+		if (args.batch_offset > references.length) {
+			throw new Error("Batch offset exceeds the selected image count.");
+		}
+		const batch = references.slice(args.batch_offset, args.batch_offset + args.batch_size);
+		if (!batch.length) {
+			const emptyCore = {
+				product_id: args.product_id,
+				before_field_group_sha256: beforeHash,
+				target_max_dimension: args.target_max_dimension,
+				batch_offset: args.batch_offset,
+				batch_size: args.batch_size,
+				selected_image_count: references.length,
+				items: [],
+			};
+			return {
+				product,
+				wapf,
+				beforeHash,
+				planCore: emptyCore,
+				planHash: await genericWapfHashOf(emptyCore),
+			};
+		}
+		const attachmentIds = [...new Set(batch.map((item) => item.attachment_id))];
+		const mediaResponse = await wpAuthenticatedFetch(
+			"media?include=" + attachmentIds.join(",") + "&per_page=" + attachmentIds.length + "&context=edit",
+		);
+		const mediaById = new Map<number, any>(
+			(await mediaResponse.json<any[]>()).map((media: any) => [Number(media.id), media]),
+		);
+		const items = batch.map((reference) => {
+			const media = mediaById.get(reference.attachment_id);
+			if (!media || !String(media.mime_type ?? "").startsWith("image/")) {
+				throw new Error("Selected attachment is missing or is not an image: " + reference.attachment_id);
+			}
+			const candidates = [
+				{
+					width: Number(media.media_details?.width ?? 0),
+					height: Number(media.media_details?.height ?? 0),
+					source_url: String(media.source_url ?? ""),
+					file_size_bytes: Number(media.media_details?.filesize ?? 0) || null,
+					size_name: "original",
+				},
+				...Object.entries(media.media_details?.sizes ?? {}).map(([sizeName, value]) => {
+					const size = value as any;
+					return {
+						width: Number(size?.width ?? 0),
+						height: Number(size?.height ?? 0),
+						source_url: String(size?.source_url ?? ""),
+						file_size_bytes: Number(size?.filesize ?? 0) || null,
+						size_name: sizeName,
+					};
+				}),
+			]
+				.filter(
+					(candidate) =>
+						candidate.width > 0 &&
+						candidate.height > 0 &&
+						candidate.width === candidate.height &&
+						candidate.width <= args.target_max_dimension &&
+						/^https:\/\//i.test(candidate.source_url),
+				)
+				.sort((a, b) => b.width - a.width);
+			if (!candidates.length) {
+				throw new Error(
+					"No square WordPress size at or below " +
+						args.target_max_dimension +
+						"px exists for attachment " +
+						reference.attachment_id,
+				);
+			}
+			const target = candidates[0];
+			const targetAlt = (reference.field_label + " – " + reference.choice_label).slice(0, 500);
+			return {
+				...reference,
+				target_url: target.source_url,
+				target_width: target.width,
+				target_height: target.height,
+				target_size_name: target.size_name,
+				target_file_size_bytes: target.file_size_bytes,
+				current_alt_text: String(media.alt_text ?? ""),
+				target_alt_text: targetAlt,
+				url_change_required:
+					normaliseImageUrl(reference.current_url) !== normaliseImageUrl(target.source_url),
+				alt_change_required: String(media.alt_text ?? "") !== targetAlt,
+			};
+		});
+		const duplicateAttachments = new Map<number, Set<string>>();
+		for (const item of items) {
+			const alts = duplicateAttachments.get(item.attachment_id) ?? new Set<string>();
+			alts.add(item.target_alt_text);
+			duplicateAttachments.set(item.attachment_id, alts);
+		}
+		for (const [attachmentId, alts] of duplicateAttachments) {
+			if (alts.size > 1) {
+				throw new Error("One attachment has conflicting option-derived alt text: " + attachmentId);
+			}
+		}
+		const planCore = {
+			product_id: args.product_id,
+			before_field_group_sha256: beforeHash,
+			target_max_dimension: args.target_max_dimension,
+			batch_offset: args.batch_offset,
+			batch_size: args.batch_size,
+			selected_image_count: references.length,
+			items,
+		};
+		return {
+			product,
+			wapf,
+			beforeHash,
+			planCore,
+			planHash: await genericWapfHashOf(planCore),
+		};
+	}
+
+	server.registerTool(
+		"preview_wapf_image_delivery_optimisation",
+		{
+			description:
+				"Build a deterministic, non-writing plan to switch selected image-swatch choices on one exact draft/hidden product to the largest existing square WordPress derivative at or below a caller-selected dimension, while preparing option-derived attachment alt text.",
+			inputSchema: z.object(wapfImageDeliveryInput),
+		},
+		async (args) => {
+			try {
+				const plan = await buildWapfImageDeliveryPlan(args);
+				return toolResult({
+					write_performed: false,
+					plan_sha256: plan.planHash,
+					...plan.planCore,
+					batch_item_count: plan.planCore.items.length,
+					next_batch_offset:
+						args.batch_offset + plan.planCore.items.length >= plan.planCore.selected_image_count
+							? null
+							: args.batch_offset + plan.planCore.items.length,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_wapf_image_delivery_optimisation_guarded",
+		{
+			description:
+				"Apply one exact previewed WAPF image-delivery batch to a draft/hidden product. Changes only selected choice image URLs to verified existing WordPress square derivatives and their attachment alt text; preserves original attachments, attachment IDs, fields, prices and conditions, verifies the result and rolls back on failure.",
+			inputSchema: z.object({
+				...wapfImageDeliveryInput,
+				expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal(wapfImageDeliveryConfirmation),
+			}),
+		},
+		async (args) => {
+			try {
+				const plan = await buildWapfImageDeliveryPlan(args);
+				if (plan.planHash !== args.expected_plan_sha256) {
+					throw new Error("The image-delivery plan changed after preview; no write performed.");
+				}
+				if (!plan.planCore.items.length) {
+					return toolResult({
+						updated: false,
+						completed: true,
+						plan_sha256: plan.planHash,
+						before_field_group_sha256: plan.beforeHash,
+						after_field_group_sha256: plan.beforeHash,
+						results: [],
+					});
+				}
+				const updatedGroup = structuredClone(plan.wapf.group);
+				for (const item of plan.planCore.items) {
+					const field = updatedGroup.fields.find(
+						(candidate: any) => genericWapfFieldId(candidate) === item.field_id,
+					);
+					const choice = field?.options?.choices?.find(
+						(candidate: any) => String(candidate?.slug ?? "") === item.choice_slug,
+					);
+					if (
+						!choice ||
+						Number(choice.attachment) !== item.attachment_id ||
+						normaliseImageUrl(String(choice.image ?? "")) !== normaliseImageUrl(item.current_url)
+					) {
+						throw new Error("A selected image choice changed while building the update.");
+					}
+					choice.image = item.target_url;
+				}
+				const updatedValue =
+					typeof plan.wapf.meta.value === "string"
+						? JSON.stringify(updatedGroup)
+						: updatedGroup;
+				const expectedAfterHash = await genericWapfHashOf(updatedValue);
+				const changedAlts: Array<{ attachment_id: number; old_alt_text: string }> = [];
+				let productWritePerformed = false;
+				try {
+					if (expectedAfterHash !== plan.beforeHash) {
+						await wcWrite("products/" + args.product_id, {
+							meta_data: [
+								{
+									id: plan.wapf.meta.id,
+									key: "_wapf_fieldgroup",
+									value: updatedValue,
+								},
+							],
+						});
+						productWritePerformed = true;
+					}
+					const uniqueItems = [
+						...new Map(
+							plan.planCore.items.map((item) => [item.attachment_id, item]),
+						).values(),
+					];
+					for (const item of uniqueItems) {
+						if (!item.alt_change_required) continue;
+						await wpAuthenticatedWrite("media/" + item.attachment_id, {
+							alt_text: item.target_alt_text,
+						});
+						changedAlts.push({
+							attachment_id: item.attachment_id,
+							old_alt_text: item.current_alt_text,
+						});
+					}
+					const verified = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const verifiedHash = await genericWapfHashOf(genericWapf(verified).meta.value);
+					if (
+						verified.id !== args.product_id ||
+						verified.name !== args.expected_product_name ||
+						verified.status !== "draft" ||
+						verified.catalog_visibility !== "hidden" ||
+						verifiedHash !== expectedAfterHash
+					) {
+						throw new Error("Post-write WAPF image-delivery verification failed.");
+					}
+					const attachmentIds = [...new Set(plan.planCore.items.map((item) => item.attachment_id))];
+					const mediaResponse = await wpAuthenticatedFetch(
+						"media?include=" + attachmentIds.join(",") + "&per_page=" + attachmentIds.length + "&context=edit",
+					);
+					const verifiedMedia = new Map<number, any>(
+						(await mediaResponse.json<any[]>()).map((media: any) => [Number(media.id), media]),
+					);
+					for (const item of plan.planCore.items) {
+						if (String(verifiedMedia.get(item.attachment_id)?.alt_text ?? "") !== item.target_alt_text) {
+							throw new Error("Post-write attachment alt-text verification failed.");
+						}
+					}
+					const processedThrough = args.batch_offset + plan.planCore.items.length;
+					const completed = processedThrough >= plan.planCore.selected_image_count;
+					return toolResult({
+						updated: expectedAfterHash !== plan.beforeHash || changedAlts.length > 0,
+						completed,
+						plan_sha256: plan.planHash,
+						before_field_group_sha256: plan.beforeHash,
+						after_field_group_sha256: verifiedHash,
+						batch_offset: args.batch_offset,
+						batch_item_count: plan.planCore.items.length,
+						next_batch_offset: completed ? null : processedThrough,
+						results: plan.planCore.items.map((item) => ({
+							field_id: item.field_id,
+							choice_slug: item.choice_slug,
+							attachment_id: item.attachment_id,
+							target_url: item.target_url,
+							target_width: item.target_width,
+							target_height: item.target_height,
+							alt_text: item.target_alt_text,
+						})),
+						original_attachments_deleted: false,
+					});
+				} catch (writeError) {
+					const rollbackErrors: string[] = [];
+					if (productWritePerformed) {
+						try {
+							await wcWrite("products/" + args.product_id, {
+								meta_data: [
+									{
+										id: plan.wapf.meta.id,
+										key: "_wapf_fieldgroup",
+										value: plan.wapf.meta.value,
+									},
+								],
+							});
+						} catch (rollbackError) {
+							rollbackErrors.push(
+								"WAPF rollback: " +
+									(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)),
+							);
+						}
+					}
+					for (const item of changedAlts.reverse()) {
+						try {
+							await wpAuthenticatedWrite("media/" + item.attachment_id, {
+								alt_text: item.old_alt_text,
+							});
+						} catch (rollbackError) {
+							rollbackErrors.push(
+								"Alt-text rollback " +
+									item.attachment_id +
+									": " +
+									(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)),
+							);
+						}
+					}
+					if (rollbackErrors.length) {
+						throw new Error(
+							"Image-delivery update failed and rollback was incomplete: " +
+								rollbackErrors.join(" | "),
+						);
+					}
+					throw new Error(
+						"Image-delivery update failed; rollback succeeded: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)),
+					);
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	server.registerTool(
 		"inspect_wapf_product_option_fields",
 		{
