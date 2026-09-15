@@ -256,8 +256,9 @@ replacing or deleting original WordPress attachments.
   derivative at or below the requested size and returns a deterministic plan hash.
 - `apply_wapf_image_delivery_optimisation_guarded` requires that exact plan plus
   `CONFIRM APPLY WAPF IMAGE DELIVERY OPTIMISATION`. It changes only the selected
-  choice image URLs and option-derived attachment alt text, verifies the product and
-  media, and attempts exact rollback on failure.
+  choice image URLs, preserves every non-empty attachment alt value and generates
+  option-derived alt text only when blank. It verifies the product and media and
+  attempts exact rollback on failure.
 
 Batches are capped at ten choices to stay within Worker subrequest limits. Attachment
 IDs, original files, WAPF fields, slugs, labels, pricing, conditions and unrelated

@@ -10769,7 +10769,9 @@ function createServer() {
 				);
 			}
 			const target = candidates[0];
-			const targetAlt = (reference.field_label + " – " + reference.choice_label).slice(0, 500);
+			const currentAlt = String(media.alt_text ?? "");
+			const generatedAlt = (reference.field_label + " – " + reference.choice_label).slice(0, 500);
+			const targetAlt = currentAlt.trim() ? currentAlt : generatedAlt;
 			return {
 				...reference,
 				target_url: target.source_url,
@@ -10777,11 +10779,11 @@ function createServer() {
 				target_height: target.height,
 				target_size_name: target.size_name,
 				target_file_size_bytes: target.file_size_bytes,
-				current_alt_text: String(media.alt_text ?? ""),
+				current_alt_text: currentAlt,
 				target_alt_text: targetAlt,
 				url_change_required:
 					normaliseImageUrl(reference.current_url) !== normaliseImageUrl(target.source_url),
-				alt_change_required: String(media.alt_text ?? "") !== targetAlt,
+				alt_change_required: currentAlt !== targetAlt,
 			};
 		});
 		const duplicateAttachments = new Map<number, Set<string>>();
