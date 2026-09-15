@@ -11845,6 +11845,23 @@ function createServer() {
 		return { product, wapf, beforeHash, afterHash, planHash, updatedValue, baseFormula };
 	}
 
+	// Keep the legacy plan implementation available for source compatibility, but do not register its superseded tools.
+	void wapfPricingGridConfirmation;
+	void buildWapfPricingGridPlan;
+
+	const wapfStorageKeyPattern = /(?:blindmotion-mcp|wapf|advanced_product_fields|acf.*option|lookup.*table|global.*price)/i;
+
+	async function authenticatedWpRest(path: string) {
+		const workerEnv = env as unknown as Record<string, string>;
+		const response = await fetch(workerEnv.WC_SITE + "/wp-json/" + path.replace(/^\/+/, ""), {
+			headers: { Authorization: getWpWriteAuthHeader(), Accept: "application/json" },
+		});
+		if (!response.ok) {
+			throw new Error("Authenticated WordPress REST inspection failed: " + response.status + " " + await response.text());
+		}
+		return response.json<any>();
+	}
+
 	server.registerTool(
 		"inspect_wapf_pricing_storage",
 		{
