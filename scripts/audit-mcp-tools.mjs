@@ -1,8 +1,9 @@
 import { readFile, readdir } from "node:fs/promises";
 import { extname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("../", import.meta.url);
-const SRC = new URL("../src/", import.meta.url);
+const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
 async function walk(directory) {
 	const entries = await readdir(directory, { withFileTypes: true });
@@ -52,7 +53,7 @@ for (const file of files) {
 		const line = before.split("\n").length;
 		tools.push({
 			name: match[1],
-			file: relative(new URL(ROOT).pathname, file),
+			file: relative(ROOT, file),
 			line,
 			domain: domainFor(match[1]),
 			stem: consolidationStem(match[1]),

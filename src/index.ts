@@ -10269,85 +10269,27 @@ function createServer() {
 		},
 	);
 
-	/* Read-only Google Search Console reporting tools */
+	/* Read-only Google Search Console reporting tool */
 
 	const searchConsoleDateSchema = z
 		.string()
 		.regex(/^\d{4}-\d{2}-\d{2}$/, "Use an ISO date in YYYY-MM-DD format.");
 	const searchConsoleFilterSchema = z.string().trim().min(1).max(500).optional();
 	const searchConsoleLimitSchema = z.number().int().min(1).max(1000).default(250);
-
-	
-	server.registerTool(
-		"get_search_console_queries",
-		{
-			description:
-				"Return Blindmotion organic Google Search queries with clicks, impressions, CTR and average position. Optionally filter to queries containing a phrase.",
-			inputSchema: z.object({
-				start_date: searchConsoleDateSchema,
-				end_date: searchConsoleDateSchema,
-				limit: searchConsoleLimitSchema,
-				query_filter: searchConsoleFilterSchema,
-			}),
-		},
-		async ({ start_date, end_date, limit, query_filter }) => {
-			try {
-				assertSearchConsoleDateRange(start_date, end_date);
-				const dimensions: SearchConsoleDimension[] = ["query"];
-				const report = await searchConsoleQuery({
-					startDate: start_date,
-					endDate: end_date,
-					dimensions,
-					rowLimit: limit,
-					dimensionFilterGroups: searchConsoleFilters(query_filter, undefined),
-				});
-				return toolResult(
-					searchConsoleReportResult(report, start_date, end_date, dimensions),
-				);
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
+	const searchConsoleReportTypeSchema = z.enum([
+		"queries",
+		"pages",
+		"query_pages",
+		"daily",
+	]);
 
 	server.registerTool(
-		"get_search_console_pages",
+		"get_search_console_report",
 		{
 			description:
-				"Return Blindmotion organic Google Search landing pages with clicks, impressions, CTR and average position. Optionally filter to pages containing a phrase or path.",
+				"Return Blindmotion Google Search Console performance using one parameter-driven report. Supports query, page, query+page and daily dimensions while preserving the existing filters, limits and metrics.",
 			inputSchema: z.object({
-				start_date: searchConsoleDateSchema,
-				end_date: searchConsoleDateSchema,
-				limit: searchConsoleLimitSchema,
-				page_filter: searchConsoleFilterSchema,
-			}),
-		},
-		async ({ start_date, end_date, limit, page_filter }) => {
-			try {
-				assertSearchConsoleDateRange(start_date, end_date);
-				const dimensions: SearchConsoleDimension[] = ["page"];
-				const report = await searchConsoleQuery({
-					startDate: start_date,
-					endDate: end_date,
-					dimensions,
-					rowLimit: limit,
-					dimensionFilterGroups: searchConsoleFilters(undefined, page_filter),
-				});
-				return toolResult(
-					searchConsoleReportResult(report, start_date, end_date, dimensions),
-				);
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"get_search_console_query_pages",
-		{
-			description:
-				"Return Blindmotion organic Google Search performance by query and landing-page pair, with optional query and page filters.",
-			inputSchema: z.object({
+				report_type: searchConsoleReportTypeSchema,
 				start_date: searchConsoleDateSchema,
 				end_date: searchConsoleDateSchema,
 				limit: searchConsoleLimitSchema,
@@ -10355,48 +10297,42 @@ function createServer() {
 				page_filter: searchConsoleFilterSchema,
 			}),
 		},
-		async ({ start_date, end_date, limit, query_filter, page_filter }) => {
+		async ({ report_type, start_date, end_date, limit, query_filter, page_filter }) => {
 			try {
 				assertSearchConsoleDateRange(start_date, end_date);
-				const dimensions: SearchConsoleDimension[] = ["query", "page"];
-				const report = await searchConsoleQuery({
-					startDate: start_date,
-					endDate: end_date,
-					dimensions,
-					rowLimit: limit,
-					dimensionFilterGroups: searchConsoleFilters(query_filter, page_filter),
-				});
-				return toolResult(
-					searchConsoleReportResult(report, start_date, end_date, dimensions),
-				);
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
 
-	server.registerTool(
-		"get_search_console_daily_performance",
-		{
-			description:
-				"Return daily Blindmotion organic Google Search clicks, impressions, CTR and average position for an ISO date range.",
-			inputSchema: z.object({
-				start_date: searchConsoleDateSchema,
-				end_date: searchConsoleDateSchema,
-			}),
-		},
-		async ({ start_date, end_date }) => {
-			try {
-				assertSearchConsoleDateRange(start_date, end_date);
-				const dimensions: SearchConsoleDimension[] = ["date"];
+				if (report_type === "queries" && page_filter) {
+					throw new Error("page_filter is only supported for pages or query_pages reports.");
+				}
+				if (report_type === "pages" && query_filter) {
+					throw new Error("query_filter is only supported for queries or query_pages reports.");
+				}
+				if (report_type === "daily" && (query_filter || page_filter)) {
+					throw new Error("Daily Search Console reports do not accept query or page filters.");
+				}
+
+				const dimensions: SearchConsoleDimension[] =
+					report_type === "queries"
+						? ["query"]
+						: report_type === "pages"
+							? ["page"]
+							: report_type === "query_pages"
+								? ["query", "page"]
+								: ["date"];
+
 				const report = await searchConsoleQuery({
 					startDate: start_date,
 					endDate: end_date,
 					dimensions,
-					rowLimit: 5000,
+					rowLimit: report_type === "daily" ? 5000 : limit,
+					...(report_type === "daily"
+						? {}
+						: { dimensionFilterGroups: searchConsoleFilters(query_filter, page_filter) }),
 				});
 				const result = searchConsoleReportResult(report, start_date, end_date, dimensions);
-				result.rows.sort((left: any, right: any) => left.date.localeCompare(right.date));
+				if (report_type === "daily") {
+					result.rows.sort((left: any, right: any) => left.date.localeCompare(right.date));
+				}
 				return toolResult(result);
 			} catch (error) {
 				return toolError(error);
