@@ -112,8 +112,8 @@ const replacement = `\t/* Read-only Google Search Console reporting tool */
 `;
 
 const updated = source.slice(0, start) + replacement + source.slice(end);
-const registerToolCountBefore = (source.match(/server\\.registerTool\\(/g) ?? []).length;
-const registerToolCountAfter = (updated.match(/server\\.registerTool\\(/g) ?? []).length;
+const registerToolCountBefore = (source.match(/server\.registerTool\(/g) ?? []).length;
+const registerToolCountAfter = (updated.match(/server\.registerTool\(/g) ?? []).length;
 if (registerToolCountAfter !== registerToolCountBefore - 3) {
   throw new Error(
     `Expected tool count to fall by exactly 3; before=${registerToolCountBefore}, after=${registerToolCountAfter}.`,
