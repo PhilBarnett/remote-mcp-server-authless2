@@ -7231,7 +7231,7 @@ function createServer() {
 		"create_meta_website_sales_adset_paused",
 		{
 			description:
-				"Create one PAUSED website-sales ad set under an owned PAUSED campaign, restricted to Australian targeting and an assigned Meta pixel.",
+				"Create one PAUSED website-sales ad set under an owned PAUSED campaign, restricted to Australian targeting and an assigned Meta pixel. Explicitly enables or disables Meta Advantage+ Audience and verifies the stored setting.",
 			inputSchema: z.object({
 				campaign_id: z.string().regex(/^\d+$/),
 				name: z.string().trim().min(3).max(200),
@@ -7244,6 +7244,7 @@ function createServer() {
 					.array(z.union([z.literal(1), z.literal(2)]))
 					.max(2)
 					.optional(),
+				advantage_audience: z.boolean().default(true),
 				confirmation: z.literal(META_CREATE_CONFIRMATION),
 			}),
 		},
@@ -7256,6 +7257,7 @@ function createServer() {
 			age_min,
 			age_max,
 			genders,
+			advantage_audience,
 		}) => {
 			try {
 				if (age_max < age_min) throw new Error("age_max must be at least age_min.");
@@ -7284,6 +7286,9 @@ function createServer() {
 					geo_locations: { countries: ["AU"] },
 					age_min,
 					age_max,
+					targeting_automation: {
+						advantage_audience: advantage_audience ? 1 : 0,
+					},
 				};
 				if (genders?.length) targeting.genders = genders;
 
@@ -7320,6 +7325,19 @@ function createServer() {
 				const verified = await metaFetch(created.id, {
 					fields: "id,name,account_id,campaign_id,status,effective_status,daily_budget,lifetime_budget,billing_event,optimization_goal,destination_type,promoted_object,targeting",
 				});
+				const storedAdvantageAudience = Number(
+					verified?.targeting?.targeting_automation?.advantage_audience,
+				);
+				if (
+					verified.status !== "PAUSED" ||
+					verified.destination_type !== "WEBSITE" ||
+					verified.optimization_goal !== "OFFSITE_CONVERSIONS" ||
+					storedAdvantageAudience !== (advantage_audience ? 1 : 0)
+				) {
+					throw new Error(
+						"Created ad set failed PAUSED WEBSITE OFFSITE_CONVERSIONS or Advantage+ Audience verification.",
+					);
+				}
 				return toolResult({
 					created: true,
 					activation_performed: false,
