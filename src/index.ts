@@ -1409,6 +1409,7 @@ const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
 const META_CREATE_SPRING_FORM_CONFIRMATION = "CONFIRM CREATE SPRING META FORM";
 const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
 const META_REPAIR_SPRING_ADS_CONFIRMATION = "CONFIRM REPAIR ACTIVE SPRING META ADS";
+const META_PAUSE_CAMPAIGN_CONFIRMATION = "CONFIRM PAUSE META CAMPAIGN";
 const META_REFRESH_SPRING_OFFER_REASON = "PROMOTE 20.5 PERCENT OFFER";
 const META_LEAD_AD_LINK = "https://fb.me/";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
@@ -6569,6 +6570,77 @@ function createServer() {
 						"optimisation",
 						"bid_strategy",
 					],
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+
+	server.registerTool(
+		"pause_meta_campaign_guarded",
+		{
+			description:
+				"Pause exactly one Meta campaign after explicit confirmation and exact identity/account validation. Only ACTIVE to PAUSED is permitted; an already-PAUSED campaign is a verified no-op. This tool cannot activate, archive or delete campaigns.",
+			inputSchema: z.object({
+				campaign_id: z.string().regex(/^\d+$/),
+				expected_campaign_name: z.string().trim().min(3).max(200),
+				confirmation: z.literal(META_PAUSE_CAMPAIGN_CONFIRMATION),
+			}),
+		},
+		async ({ campaign_id, expected_campaign_name }) => {
+			try {
+				const current = await assertMetaObjectOwnership(campaign_id, "campaign");
+				if (String(current.id) !== campaign_id) {
+					throw new Error("Refusing pause: returned campaign ID did not exactly match expectation.");
+				}
+				if (current.name !== expected_campaign_name) {
+					throw new Error("Refusing pause: campaign name did not exactly match expectation.");
+				}
+
+				if (current.status === "PAUSED") {
+					return toolResult({
+						updated: false,
+						verified_noop: true,
+						campaign: {
+							id: current.id,
+							name: current.name,
+							status: current.status,
+							effective_status: current.effective_status,
+						},
+					});
+				}
+				if (current.status !== "ACTIVE") {
+					throw new Error(
+						`Refusing pause: only ACTIVE campaigns can transition to PAUSED; current status is ${String(current.status ?? "unknown")}.`,
+					);
+				}
+
+				await metaPost(campaign_id, { status: "PAUSED" });
+
+				const verified = await assertMetaObjectOwnership(campaign_id, "campaign");
+				if (
+					String(verified.id) !== campaign_id ||
+					verified.name !== expected_campaign_name ||
+					verified.status !== "PAUSED"
+				) {
+					throw new Error(
+						"Meta campaign pause write could not be verified against the exact campaign identity and PAUSED state.",
+					);
+				}
+
+				return toolResult({
+					updated: true,
+					verified_noop: false,
+					campaign: {
+						id: verified.id,
+						name: verified.name,
+						previous_status: current.status,
+						status: verified.status,
+						effective_status: verified.effective_status,
+					},
+					unchanged_fields: ["name", "objective", "budget", "targeting", "creative"],
 				});
 			} catch (error) {
 				return toolError(error);
