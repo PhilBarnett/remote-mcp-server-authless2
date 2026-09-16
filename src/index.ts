@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
+import { registerMetaEcommerceToolkit } from "./meta-ecommerce-toolkit";
 
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
@@ -3974,6 +3975,8 @@ function createServer() {
 		name: "Blindmotion WooCommerce",
 		version: "2.0.0",
 	});
+
+	registerMetaEcommerceToolkit(server);
 
 	server.registerTool(
 		"get_blindmotion_github_app_status",
