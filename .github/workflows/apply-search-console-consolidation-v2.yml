@@ -1,9 +1,10 @@
 name: Apply Search Console consolidation v2
 
 on:
-  push:
+  pull_request:
     branches:
-      - refactor/search-console-consolidation-v2
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
