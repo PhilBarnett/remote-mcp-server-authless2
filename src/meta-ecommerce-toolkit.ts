@@ -734,7 +734,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 						},
 					});
 					if (sourceResponse.status !== 206) {
-						sourceResponse.body?.cancel().catch(() => undefined);
+						await sourceResponse.body?.cancel().catch(() => undefined);
 						throw new Error(
 							`Trusted video source must honor HTTP Range with 206; received ${sourceResponse.status}.`,
 						);
@@ -742,12 +742,12 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					const expectedContentRangePrefix = `bytes ${start}-${end - 1}/`;
 					const contentRange = sourceResponse.headers.get("content-range") ?? "";
 					if (!contentRange.startsWith(expectedContentRangePrefix)) {
-						sourceResponse.body?.cancel().catch(() => undefined);
+						await sourceResponse.body?.cancel().catch(() => undefined);
 						throw new Error("Trusted video source returned an unexpected Content-Range.");
 					}
 					const declaredLength = sourceResponse.headers.get("content-length");
 					if (declaredLength && Number(declaredLength) !== end - start) {
-						sourceResponse.body?.cancel().catch(() => undefined);
+						await sourceResponse.body?.cancel().catch(() => undefined);
 						throw new Error("Trusted video source range Content-Length is incorrect.");
 					}
 					bytes = new Uint8Array(await sourceResponse.arrayBuffer());
