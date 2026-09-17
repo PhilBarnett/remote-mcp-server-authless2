@@ -879,16 +879,23 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				let bytes: Uint8Array;
 				if (chunk_base64.startsWith("https://")) {
 					const sourceResponse = await fetch(assertTrustedVideoSourceUrl(chunk_base64), {
-						headers: { Accept: "video/mp4,video/quicktime,application/octet-stream" },
+						headers: {
+							Accept: "video/mp4,video/quicktime,application/octet-stream",
+							Range: `bytes=${start}-${end - 1}`,
+						},
 					});
 					if (!sourceResponse.ok) {
-						throw new Error(`Trusted video source download failed (${sourceResponse.status}).`);
+						throw new Error(`Trusted video source range download failed (${sourceResponse.status}).`);
 					}
 					const sourceBytes = new Uint8Array(await sourceResponse.arrayBuffer());
-					if (end > sourceBytes.length) {
-						throw new Error("Requested chunk range exceeds the trusted video source length.");
+					if (sourceResponse.status === 206) {
+						bytes = sourceBytes;
+					} else {
+						if (end > sourceBytes.length) {
+							throw new Error("Requested chunk range exceeds the trusted video source length.");
+						}
+						bytes = sourceBytes.slice(start, end);
 					}
-					bytes = sourceBytes.slice(start, end);
 				} else {
 					bytes = decodeResumableChunk(chunk_base64);
 				}
