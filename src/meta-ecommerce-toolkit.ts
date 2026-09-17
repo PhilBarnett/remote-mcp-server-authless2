@@ -974,11 +974,36 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				});
 				if (!creative?.id) throw new Error("Meta did not return a creative ID.");
 				const ad = await createPausedAd(args.adset_id, args.name, String(creative.id));
-				const verifiedVideos = collectVideoIds(ad.creative);
-				if (!verifiedVideos.has(args.video_4x5_id) || !verifiedVideos.has(args.video_9x16_id)) {
-					throw new Error("Created placement ad did not verify both intended video IDs.");
+				const creativeVideos = Array.isArray(ad.creative?.asset_feed_spec?.videos)
+					? ad.creative.asset_feed_spec.videos
+					: [];
+				const verifiedLabels = new Set(
+					creativeVideos.flatMap((video: any) =>
+						Array.isArray(video?.adlabels)
+							? video.adlabels.map((label: any) => String(label?.name ?? ""))
+							: [],
+					),
+				);
+				const allCreativeVideosHaveIds =
+					creativeVideos.length === 2 &&
+					creativeVideos.every((video: any) => /^\d+$/.test(String(video?.video_id ?? "")));
+				if (
+					!allCreativeVideosHaveIds ||
+					!verifiedLabels.has("video_feed_4x5") ||
+					!verifiedLabels.has("video_vertical_9x16")
+				) {
+					throw new Error("Created placement ad did not verify both labeled placement videos.");
 				}
-				return textResult({ created: true, activation_performed: false, tracked_url: trackedUrl, ad });
+				return textResult({
+					created: true,
+					activation_performed: false,
+					tracked_url: trackedUrl,
+					source_video_ids: {
+						feed_4x5: args.video_4x5_id,
+						vertical_9x16: args.video_9x16_id,
+					},
+					ad,
+				});
 			} catch (error) {
 				return errorResult(error);
 			}
