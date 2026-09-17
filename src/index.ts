@@ -9150,6 +9150,20 @@ function createServer() {
 		.default(20)
 		.describe("Daily campaign budget in AUD, hard-limited to A$5–A$50.");
 
+	/* Read-only Google Search Console reporting schemas. */
+
+	const searchConsoleDateSchema = z
+		.string()
+		.regex(/^\d{4}-\d{2}-\d{2}$/, "Use an ISO date in YYYY-MM-DD format.");
+	const searchConsoleFilterSchema = z.string().trim().min(1).max(500).optional();
+	const searchConsoleLimitSchema = z.number().int().min(1).max(1000).default(250);
+	const searchConsoleReportTypeSchema = z.enum([
+		"queries",
+		"pages",
+		"query_pages",
+		"daily",
+	]);
+
 	server.registerTool(
 		"get_search_console_report",
 		{
