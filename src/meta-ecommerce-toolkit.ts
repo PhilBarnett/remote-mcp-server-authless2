@@ -2,13 +2,11 @@ import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-const META_VIDEO_UPLOAD_CONFIRMATION = "CONFIRM UPLOAD META VIDEO";
 const META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION = "CONFIRM UPLOAD META VIDEO BATCH";
 const META_MAX_RESUMABLE_CHUNK_BYTES = 16_000_000;
 const META_ECOMMERCE_AD_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ECOMMERCE AD";
 const META_AD_STATUS_CONFIRMATION = "CONFIRM META AD STATUS CHANGE";
 const META_ECOMMERCE_LAUNCH_CONFIRMATION = "CONFIRM LAUNCH META ECOMMERCE CAMPAIGN";
-const META_MAX_INLINE_VIDEO_BYTES = 55_000_000;
 const META_MAX_LIST_ITEMS = 500;
 
 type MetaConfig = {
@@ -115,21 +113,6 @@ async function toolkitMetaPost(path: string, params: Record<string, string | num
 async function toolkitSha256Hex(bytes: Uint8Array) {
 	const digest = await crypto.subtle.digest("SHA-256", bytes);
 	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function decodeBase64(value: string) {
-	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
-		throw new Error("video_base64 is not canonical base64 data.");
-	}
-	const binary = atob(value);
-	if (binary.length > META_MAX_INLINE_VIDEO_BYTES) {
-		throw new Error(
-			`Inline video exceeds the ${META_MAX_INLINE_VIDEO_BYTES} byte safety limit. Export a smaller ad-ready file before upload.`,
-		);
-	}
-	const bytes = new Uint8Array(binary.length);
-	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-	return bytes;
 }
 
 function decodeResumableChunk(value: string) {
@@ -852,60 +835,6 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					ready,
 					video: { ...video, derived_dimensions: derivedVideoDimensions(video) },
 					read_only: true,
-				});
-			} catch (error) {
-				return errorResult(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"upload_meta_ad_video_guarded",
-		{
-			description:
-				"Upload one hash-verified MP4 or MOV to the configured Meta ad account. Media-only: cannot create, attach, activate, archive or delete ads/campaigns.",
-			inputSchema: z.object({
-				title: z.string().trim().min(1).max(255),
-				filename: z.string().trim().min(5).max(200),
-				mime_type: z.enum(["video/mp4", "video/quicktime"]),
-				video_base64: z.string().min(4).max(75_000_000),
-				expected_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				confirmation: z.literal(META_VIDEO_UPLOAD_CONFIRMATION),
-			}),
-		},
-		async ({ title, filename, mime_type, video_base64, expected_sha256 }) => {
-			try {
-				const safeFilename = safeVideoFilename(filename, mime_type);
-				const bytes = decodeBase64(video_base64);
-				const actualHash = await toolkitSha256Hex(bytes);
-				if (actualHash !== expected_sha256) {
-					throw new Error("Video SHA-256 does not match expected_sha256; nothing was uploaded.");
-				}
-				const { accessToken, apiVersion, adAccountId } = getToolkitMetaConfig();
-				const form = new FormData();
-				form.set("title", title);
-				form.set("source", new Blob([bytes], { type: mime_type }), safeFilename);
-				const response = await fetch(
-					`https://graph.facebook.com/${apiVersion}/${adAccountId}/advideos`,
-					{
-						method: "POST",
-						headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-						body: form,
-					},
-				);
-				const payload: any = await response.json().catch(() => ({}));
-				if (!response.ok || payload?.error || !payload?.id) {
-					throw new Error(
-						`Meta video upload failed (${response.status}): ${payload?.error?.message ?? "unknown error"}`,
-					);
-				}
-				const verified = await assertOwnedVideo(String(payload.id));
-				return textResult({
-					uploaded: true,
-					ad_or_campaign_created: false,
-					activation_performed: false,
-					video_sha256: actualHash,
-					video: verified,
 				});
 			} catch (error) {
 				return errorResult(error);
