@@ -118,8 +118,20 @@ async function toolkitMetaGet(path: string, fields: string) {
 	return toolkitMetaRequest(path, "GET", { fields });
 }
 
-async function toolkitMetaPost(path: string, params: Record<string, string | number | undefined>) {
-	return toolkitMetaRequest(path, "POST", params);
+async function toolkitMetaPost(
+	path: string,
+	params: Record<string, string | number | undefined>,
+	diagnosticContext?: Record<string, unknown>,
+) {
+	try {
+		return await toolkitMetaRequest(path, "POST", params);
+	} catch (error) {
+		if (!diagnosticContext) throw error;
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(
+			`${message} [creative_diagnostic=${JSON.stringify(diagnosticContext)}]`,
+		);
+	}
 }
 
 async function toolkitSha256Hex(bytes: Uint8Array) {
@@ -163,7 +175,7 @@ function toolkitSiteOrigin() {
 	return new URL(workerEnv.WC_SITE).origin;
 }
 
-function buildTrackedDestination(destinationUrl: string, utm: UtmInput) {
+function buildMetaDestination(destinationUrl: string, utm: UtmInput) {
 	const destination = new URL(destinationUrl);
 	const site = new URL(toolkitSiteOrigin());
 	if (destination.protocol !== "https:" || destination.origin !== site.origin) {
@@ -179,12 +191,24 @@ function buildTrackedDestination(destinationUrl: string, utm: UtmInput) {
 		["utm_content", utm.content],
 		["utm_term", utm.term],
 	];
+	const urlTags = new URLSearchParams();
 	for (const [key, value] of entries) {
-		if (value === undefined || value.trim() === "") continue;
-		if (value.length > 200 || /[\r\n]/.test(value)) throw new Error(`${key} is invalid.`);
-		destination.searchParams.set(key, value.trim());
+		const resolved = value?.trim() || destination.searchParams.get(key)?.trim();
+		destination.searchParams.delete(key);
+		if (!resolved) continue;
+		if (resolved.length > 200 || /[\r\n]/.test(resolved)) {
+			throw new Error(`${key} is invalid.`);
+		}
+		urlTags.set(key, resolved);
 	}
-	return destination.toString();
+	const cleanDestination = destination.toString();
+	const trackedDestination = new URL(cleanDestination);
+	for (const [key, value] of urlTags) trackedDestination.searchParams.set(key, value);
+	return {
+		destinationUrl: cleanDestination,
+		urlTags: urlTags.toString(),
+		trackedUrl: trackedDestination.toString(),
+	};
 }
 
 async function listAccountVideos() {
@@ -364,12 +388,32 @@ function collectDestinationUrls(creative: any) {
 	}))];
 }
 
-function checkUtm(urlValue: string) {
+function checkUtm(urlValue: string, urlTags = "") {
 	const url = new URL(urlValue);
+	for (const [key, value] of new URLSearchParams(urlTags)) {
+		if (!url.searchParams.has(key)) url.searchParams.set(key, value);
+	}
 	const required = ["utm_source", "utm_medium", "utm_campaign", "utm_content"];
 	return {
 		url: url.toString(),
 		missing_utm_parameters: required.filter((key) => !url.searchParams.get(key)),
+	};
+}
+
+function buildMetaCreativeDiagnostic(
+	stage: "create_single_video_creative" | "create_placement_video_creative",
+	destinationUrl: string,
+	urlTags: string,
+	videoIds: string[],
+) {
+	const destination = new URL(destinationUrl);
+	return {
+		stage,
+		destination_origin: destination.origin,
+		destination_pathname: destination.pathname,
+		destination_query_keys: [...new Set(destination.searchParams.keys())].sort(),
+		url_tag_keys: [...new Set(new URLSearchParams(urlTags).keys())].sort(),
+		video_ids: [...videoIds],
 	};
 }
 
@@ -382,6 +426,7 @@ async function createWebsiteSalesVideoCreative(input: {
 	description?: string;
 	ctaType: "SHOP_NOW" | "LEARN_MORE" | "SIGN_UP";
 	destinationUrl: string;
+	urlTags: string;
 }) {
 	const { adAccountId } = getToolkitMetaConfig();
 	const instagramUserId = await resolveInstagramUserId(input.pageId);
@@ -395,10 +440,24 @@ async function createWebsiteSalesVideoCreative(input: {
 		},
 	};
 	if (input.description) videoData.link_description = input.description;
-	return toolkitMetaPost(`${adAccountId}/adcreatives`, {
-		name: `${input.name} | Creative`,
-		object_story_spec: JSON.stringify({ page_id: input.pageId, instagram_user_id: instagramUserId, video_data: videoData }),
-	});
+	return toolkitMetaPost(
+		`${adAccountId}/adcreatives`,
+		{
+			name: `${input.name} | Creative`,
+			object_story_spec: JSON.stringify({
+				page_id: input.pageId,
+				instagram_user_id: instagramUserId,
+				video_data: videoData,
+			}),
+			url_tags: input.urlTags || undefined,
+		},
+		buildMetaCreativeDiagnostic(
+			"create_single_video_creative",
+			input.destinationUrl,
+			input.urlTags,
+			[input.videoId],
+		),
+	);
 }
 
 async function createWebsiteSalesPlacementCreative(input: {
@@ -411,6 +470,7 @@ async function createWebsiteSalesPlacementCreative(input: {
 	description?: string;
 	ctaType: "SHOP_NOW" | "LEARN_MORE" | "SIGN_UP";
 	destinationUrl: string;
+	urlTags: string;
 }) {
 	const { adAccountId } = getToolkitMetaConfig();
 	const instagramUserId = await resolveInstagramUserId(input.pageId);
@@ -447,11 +507,24 @@ async function createWebsiteSalesPlacementCreative(input: {
 			},
 		],
 	};
-	return toolkitMetaPost(`${adAccountId}/adcreatives`, {
-		name: `${input.name} | Creative`,
-		object_story_spec: JSON.stringify({ page_id: input.pageId, instagram_user_id: instagramUserId }),
-		asset_feed_spec: JSON.stringify(assetFeedSpec),
-	});
+	return toolkitMetaPost(
+		`${adAccountId}/adcreatives`,
+		{
+			name: `${input.name} | Creative`,
+			object_story_spec: JSON.stringify({
+				page_id: input.pageId,
+				instagram_user_id: instagramUserId,
+			}),
+			asset_feed_spec: JSON.stringify(assetFeedSpec),
+			url_tags: input.urlTags || undefined,
+		},
+		buildMetaCreativeDiagnostic(
+			"create_placement_video_creative",
+			input.destinationUrl,
+			input.urlTags,
+			[input.video4x5Id, input.video9x16Id],
+		),
+	);
 }
 
 async function createPausedAd(adsetId: string, name: string, creativeId: string) {
@@ -532,8 +605,12 @@ async function buildPreflight(campaignId: string, expectedCampaignName: string) 
 		if (!urls.length) blockers.push(`Ad ${ad.id} creative has no website destination URL.`);
 		for (const url of urls) {
 			try {
-				const validated = buildTrackedDestination(url, {});
-				const utm = checkUtm(validated);
+				const validated = buildMetaDestination(url, {});
+				const creativeUrlTags = String(ad.creative?.url_tags ?? "");
+				const combinedUrlTags = [validated.urlTags, creativeUrlTags]
+					.filter(Boolean)
+					.join("&");
+				const utm = checkUtm(validated.destinationUrl, combinedUrlTags);
 				destinationChecks.push({ ad_id: ad.id, ...utm });
 				if (utm.missing_utm_parameters.length) {
 					warnings.push(
@@ -941,7 +1018,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				await assertOwnedPage(page_id);
 				await assertOwnedVideo(video_id, { title: expected_video_title });
 				await refuseDuplicateAdName(name);
-				const trackedUrl = buildTrackedDestination(destination_url, utm);
+				const tracking = buildMetaDestination(destination_url, utm);
 				const creative = await createWebsiteSalesVideoCreative({
 					name,
 					pageId: page_id,
@@ -950,14 +1027,21 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					headline,
 					description,
 					ctaType: cta_type,
-					destinationUrl: trackedUrl,
+					destinationUrl: tracking.destinationUrl,
+					urlTags: tracking.urlTags,
 				});
 				if (!creative?.id) throw new Error("Meta did not return a creative ID.");
 				const ad = await createPausedAd(adset_id, name, String(creative.id));
 				if (!collectVideoIds(ad.creative).has(video_id)) {
 					throw new Error("Created ad did not verify against the intended video.");
 				}
-				return textResult({ created: true, activation_performed: false, tracked_url: trackedUrl, ad });
+				return textResult({
+					created: true,
+					activation_performed: false,
+					tracked_url: tracking.trackedUrl,
+					tracking_transport: "url_tags",
+					ad,
+				});
 			} catch (error) {
 				return errorResult(error);
 			}
@@ -1006,7 +1090,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					height: args.video_9x16_expected_height,
 				});
 				await refuseDuplicateAdName(args.name);
-				const trackedUrl = buildTrackedDestination(args.destination_url, args.utm);
+				const tracking = buildMetaDestination(args.destination_url, args.utm);
 				const creative = await createWebsiteSalesPlacementCreative({
 					name: args.name,
 					pageId: args.page_id,
@@ -1016,7 +1100,8 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					headline: args.headline,
 					description: args.description,
 					ctaType: args.cta_type,
-					destinationUrl: trackedUrl,
+					destinationUrl: tracking.destinationUrl,
+					urlTags: tracking.urlTags,
 				});
 				if (!creative?.id) throw new Error("Meta did not return a creative ID.");
 				const ad = await createPausedAd(args.adset_id, args.name, String(creative.id));
@@ -1043,7 +1128,8 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				return textResult({
 					created: true,
 					activation_performed: false,
-					tracked_url: trackedUrl,
+					tracked_url: tracking.trackedUrl,
+					tracking_transport: "url_tags",
 					source_video_ids: {
 						feed_4x5: args.video_4x5_id,
 						vertical_9x16: args.video_9x16_id,
