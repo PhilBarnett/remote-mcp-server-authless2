@@ -851,7 +851,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"transfer_meta_ad_video_resumable_chunk_guarded",
 		{
 			description:
-				"Transfer exactly one hash-verified, Meta-requested byte range to an existing resumable ad-account video upload. Retry-safe when the caller follows returned offsets.",
+				"Transfer exactly one hash-verified, Meta-requested byte range from canonical base64 or a trusted expiring OpenAI file URL to an existing resumable ad-account video upload. Retry-safe when the caller follows returned offsets.",
 			inputSchema: z.object({
 				video_id: z.string().regex(/^\d+$/),
 				upload_session_id: z.string().regex(/^\d+$/),
@@ -876,7 +876,22 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end <= start) {
 					throw new Error("Invalid resumable upload byte offsets.");
 				}
-				const bytes = decodeResumableChunk(chunk_base64);
+				let bytes: Uint8Array;
+				if (chunk_base64.startsWith("https://")) {
+					const sourceResponse = await fetch(assertTrustedVideoSourceUrl(chunk_base64), {
+						headers: { Accept: "video/mp4,video/quicktime,application/octet-stream" },
+					});
+					if (!sourceResponse.ok) {
+						throw new Error(`Trusted video source download failed (${sourceResponse.status}).`);
+					}
+					const sourceBytes = new Uint8Array(await sourceResponse.arrayBuffer());
+					if (end > sourceBytes.length) {
+						throw new Error("Requested chunk range exceeds the trusted video source length.");
+					}
+					bytes = sourceBytes.slice(start, end);
+				} else {
+					bytes = decodeResumableChunk(chunk_base64);
+				}
 				if (bytes.length !== end - start) {
 					throw new Error(
 						`Chunk byte length ${bytes.length} does not match Meta-requested range ${start_offset}-${end_offset}.`,
