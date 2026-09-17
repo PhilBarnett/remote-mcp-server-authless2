@@ -466,20 +466,29 @@ async function createWebsiteSalesPlacementCreative(input: {
 	video4x5Id: string;
 	video9x16Id: string;
 	primaryText: string;
+	primaryTextVariations: string[];
 	headline: string;
+	headlineVariations: string[];
 	description?: string;
+	descriptionVariations: string[];
 	ctaType: "SHOP_NOW" | "LEARN_MORE" | "SIGN_UP";
 	destinationUrl: string;
 	urlTags: string;
 }) {
 	const { adAccountId } = getToolkitMetaConfig();
 	const instagramUserId = await resolveInstagramUserId(input.pageId);
+	const primaryTexts = [input.primaryText, ...input.primaryTextVariations];
+	const headlines = [input.headline, ...input.headlineVariations];
+	const descriptions = [
+		...(input.description ? [input.description] : []),
+		...input.descriptionVariations,
+	];
 	const assetFeedSpec = {
 		optimization_type: "PLACEMENT",
 		ad_formats: ["SINGLE_VIDEO"],
-		bodies: [{ text: input.primaryText }],
-		titles: [{ text: input.headline }],
-		descriptions: input.description ? [{ text: input.description }] : [],
+		bodies: primaryTexts.map((text) => ({ text })),
+		titles: headlines.map((text) => ({ text })),
+		descriptions: descriptions.map((text) => ({ text })),
 		videos: [
 			{ video_id: input.video4x5Id, adlabels: [{ name: "video_feed_4x5" }] },
 			{ video_id: input.video9x16Id, adlabels: [{ name: "video_vertical_9x16" }] },
@@ -1052,7 +1061,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"create_meta_website_sales_placement_video_ad_paused",
 		{
 			description:
-				"Create one PAUSED website-sales ad with an exact owned 4:5 video for feeds and exact owned 9:16 video for Stories/Reels. Validates titles, upload times, durations and dimensions, supports same-site UTM tracking, and cannot activate delivery.",
+				"Create one PAUSED website-sales ad with an exact owned 4:5 video for feeds and exact owned 9:16 video for Stories/Reels. Supports one required base primary text/headline plus up to four distinct variations of each, and up to five descriptions total. Validates videos and the exact returned copy assets, supports same-site UTM tracking, and cannot activate delivery.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				video_4x5_id: z.string().regex(/^\d+$/),
@@ -1068,6 +1077,18 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				video_9x16_expected_width: z.number().int().positive().max(10000),
 				video_9x16_expected_height: z.number().int().positive().max(10000),
 				...websiteAdCopySchema,
+				primary_text_variations: z
+					.array(z.string().trim().min(1).max(5000))
+					.max(4)
+					.default([]),
+				headline_variations: z
+					.array(z.string().trim().min(1).max(255))
+					.max(4)
+					.default([]),
+				description_variations: z
+					.array(z.string().trim().min(1).max(255))
+					.max(4)
+					.default([]),
 				confirmation: z.literal(META_ECOMMERCE_AD_CREATE_CONFIRMATION),
 			}),
 		},
@@ -1091,14 +1112,32 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				});
 				await refuseDuplicateAdName(args.name);
 				const tracking = buildMetaDestination(args.destination_url, args.utm);
+				const requestedPrimaryTexts = [args.primary_text, ...args.primary_text_variations];
+				const requestedHeadlines = [args.headline, ...args.headline_variations];
+				const requestedDescriptions = [
+					...(args.description ? [args.description] : []),
+					...args.description_variations,
+				];
+				for (const [label, values] of [
+					["primary text", requestedPrimaryTexts],
+					["headline", requestedHeadlines],
+					["description", requestedDescriptions],
+				] as const) {
+					if (new Set(values).size !== values.length) {
+						throw new Error(`Refusing creation: duplicate ${label} assets were supplied.`);
+					}
+				}
 				const creative = await createWebsiteSalesPlacementCreative({
 					name: args.name,
 					pageId: args.page_id,
 					video4x5Id: args.video_4x5_id,
 					video9x16Id: args.video_9x16_id,
 					primaryText: args.primary_text,
+					primaryTextVariations: args.primary_text_variations,
 					headline: args.headline,
+					headlineVariations: args.headline_variations,
 					description: args.description,
+					descriptionVariations: args.description_variations,
 					ctaType: args.cta_type,
 					destinationUrl: tracking.destinationUrl,
 					urlTags: tracking.urlTags,
@@ -1118,12 +1157,37 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				const allCreativeVideosHaveIds =
 					creativeVideos.length === 2 &&
 					creativeVideos.every((video: any) => /^\d+$/.test(String(video?.video_id ?? "")));
+				const verifiedCopy = {
+					primaryTexts: (ad.creative?.asset_feed_spec?.bodies ?? []).map(
+						(item: any) => String(item?.text ?? ""),
+					),
+					headlines: (ad.creative?.asset_feed_spec?.titles ?? []).map(
+						(item: any) => String(item?.text ?? ""),
+					),
+					descriptions: (ad.creative?.asset_feed_spec?.descriptions ?? []).map(
+						(item: any) => String(item?.text ?? ""),
+					),
+				};
+				const exactCopyAssetsVerified = (
+					[
+						[requestedPrimaryTexts, verifiedCopy.primaryTexts],
+						[requestedHeadlines, verifiedCopy.headlines],
+						[requestedDescriptions, verifiedCopy.descriptions],
+					] as const
+				).every(
+					([requested, verified]) =>
+						requested.length === verified.length &&
+						requested.every((value) => verified.includes(value)),
+				);
 				if (
 					!allCreativeVideosHaveIds ||
 					!verifiedLabels.has("video_feed_4x5") ||
-					!verifiedLabels.has("video_vertical_9x16")
+					!verifiedLabels.has("video_vertical_9x16") ||
+					!exactCopyAssetsVerified
 				) {
-					throw new Error("Created placement ad did not verify both labeled placement videos.");
+					throw new Error(
+						"Created placement ad did not verify both labeled videos and the exact requested copy assets.",
+					);
 				}
 				return textResult({
 					created: true,
@@ -1133,6 +1197,11 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					source_video_ids: {
 						feed_4x5: args.video_4x5_id,
 						vertical_9x16: args.video_9x16_id,
+					},
+					copy_assets: {
+						primary_texts: requestedPrimaryTexts,
+						headlines: requestedHeadlines,
+						descriptions: requestedDescriptions,
 					},
 					ad,
 				});
