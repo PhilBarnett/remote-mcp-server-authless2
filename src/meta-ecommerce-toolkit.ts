@@ -247,6 +247,29 @@ async function assertOwnedPage(pageId: string) {
 	return page;
 }
 
+async function resolveInstagramUserId(pageId: string) {
+	const page = await toolkitMetaGet(
+		pageId,
+		"id,instagram_business_account{id,username},connected_instagram_account{id,username}",
+	);
+	const connectedId = String(
+		page?.instagram_business_account?.id ?? page?.connected_instagram_account?.id ?? "",
+	);
+	if (/^\d+$/.test(connectedId)) return connectedId;
+
+	const pageBacked = await toolkitMetaRequest(
+		`${pageId}/page_backed_instagram_accounts`,
+		"GET",
+		{ fields: "id,username", limit: 25 },
+	);
+	const pageBackedId = String(pageBacked?.data?.[0]?.id ?? "");
+	if (/^\d+$/.test(pageBackedId)) return pageBackedId;
+
+	throw new Error(
+		`Page ${pageId} has no connected or page-backed Instagram identity available for Instagram placements.`,
+	);
+}
+
 async function assertAccountObject(
 	id: string,
 	type: "campaign" | "adset" | "ad" | "creative",
@@ -343,6 +366,7 @@ async function createWebsiteSalesVideoCreative(input: {
 	destinationUrl: string;
 }) {
 	const { adAccountId } = getToolkitMetaConfig();
+	const instagramUserId = await resolveInstagramUserId(input.pageId);
 	const videoData: Record<string, unknown> = {
 		video_id: input.videoId,
 		message: input.primaryText,
@@ -355,7 +379,7 @@ async function createWebsiteSalesVideoCreative(input: {
 	if (input.description) videoData.link_description = input.description;
 	return toolkitMetaPost(`${adAccountId}/adcreatives`, {
 		name: `${input.name} | Creative`,
-		object_story_spec: JSON.stringify({ page_id: input.pageId, video_data: videoData }),
+		object_story_spec: JSON.stringify({ page_id: input.pageId, instagram_user_id: instagramUserId, video_data: videoData }),
 	});
 }
 
@@ -371,6 +395,7 @@ async function createWebsiteSalesPlacementCreative(input: {
 	destinationUrl: string;
 }) {
 	const { adAccountId } = getToolkitMetaConfig();
+	const instagramUserId = await resolveInstagramUserId(input.pageId);
 	const assetFeedSpec = {
 		optimization_type: "PLACEMENT",
 		ad_formats: ["SINGLE_VIDEO"],
@@ -406,7 +431,7 @@ async function createWebsiteSalesPlacementCreative(input: {
 	};
 	return toolkitMetaPost(`${adAccountId}/adcreatives`, {
 		name: `${input.name} | Creative`,
-		object_story_spec: JSON.stringify({ page_id: input.pageId }),
+		object_story_spec: JSON.stringify({ page_id: input.pageId, instagram_user_id: instagramUserId }),
 		asset_feed_spec: JSON.stringify(assetFeedSpec),
 	});
 }
