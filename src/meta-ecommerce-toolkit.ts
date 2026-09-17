@@ -315,6 +315,141 @@ async function refuseDuplicateAdName(name: string) {
 	}
 }
 
+function assertTrustedVideoSourceUrl(value: string) {
+	const source = new URL(value);
+	if (
+		source.protocol !== "https:" ||
+		(source.hostname !== "oaiusercontent.com" && !source.hostname.endsWith(".oaiusercontent.com")) ||
+		source.username ||
+		source.password ||
+		source.hash
+	) {
+		throw new Error("source_url must be a credential-free HTTPS URL on oaiusercontent.com.");
+	}
+	return source.toString();
+}
+
+async function fetchVerifiedVideoSource(
+	sourceUrl: string,
+	expectedSize: number,
+	expectedSha256: string,
+) {
+	const response = await fetch(assertTrustedVideoSourceUrl(sourceUrl), {
+		headers: { Accept: "video/mp4,video/quicktime,application/octet-stream" },
+	});
+	if (!response.ok) {
+		throw new Error(`Trusted video source download failed (${response.status}).`);
+	}
+	const declaredLength = response.headers.get("content-length");
+	if (declaredLength && Number(declaredLength) !== expectedSize) {
+		throw new Error("Trusted video source Content-Length does not match file_size.");
+	}
+	const bytes = new Uint8Array(await response.arrayBuffer());
+	if (bytes.length !== expectedSize) {
+		throw new Error("Downloaded video byte length does not match file_size.");
+	}
+	const actualSha256 = await toolkitSha256Hex(bytes);
+	if (actualSha256 !== expectedSha256) {
+		throw new Error("Downloaded video SHA-256 does not match expected_sha256.");
+	}
+	return bytes;
+}
+
+async function uploadVerifiedVideoBytesResumable(
+	bytes: Uint8Array,
+	title: string,
+) {
+	const { accessToken, apiVersion, adAccountId } = getToolkitMetaConfig();
+	const started = await toolkitMetaPost(`${adAccountId}/advideos`, {
+		upload_phase: "start",
+		file_size: bytes.length,
+	});
+	const videoId = String(started?.video_id ?? "");
+	const uploadSessionId = String(started?.upload_session_id ?? "");
+	let startOffset = String(started?.start_offset ?? "");
+	let endOffset = String(started?.end_offset ?? "");
+	if (
+		!/^\d+$/.test(videoId) ||
+		!/^\d+$/.test(uploadSessionId) ||
+		!/^\d+$/.test(startOffset) ||
+		!/^\d+$/.test(endOffset)
+	) {
+		throw new Error("Meta returned an invalid resumable upload session.");
+	}
+
+	while (startOffset !== endOffset) {
+		const start = Number(startOffset);
+		const end = Number(endOffset);
+		if (
+			!Number.isSafeInteger(start) ||
+			!Number.isSafeInteger(end) ||
+			end <= start ||
+			end > bytes.length ||
+			end - start > META_MAX_RESUMABLE_CHUNK_BYTES
+		) {
+			throw new Error("Meta requested an invalid resumable upload byte range.");
+		}
+		const form = new FormData();
+		form.set("upload_phase", "transfer");
+		form.set("upload_session_id", uploadSessionId);
+		form.set("start_offset", startOffset);
+		form.set(
+			"video_file_chunk",
+			new Blob([bytes.slice(start, end)], { type: "application/octet-stream" }),
+			"chunk.bin",
+		);
+		const response = await fetch(
+			`https://graph.facebook.com/${apiVersion}/${adAccountId}/advideos`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+				body: form,
+			},
+		);
+		const payload: any = await response.json().catch(() => ({}));
+		if (!response.ok || payload?.error) {
+			throw new Error(
+				`Meta resumable chunk transfer failed (${response.status}): ${payload?.error?.message ?? "unknown error"}`,
+			);
+		}
+		const nextStartOffset = String(payload?.start_offset ?? "");
+		const nextEndOffset = String(payload?.end_offset ?? "");
+		if (
+			!/^\d+$/.test(nextStartOffset) ||
+			!/^\d+$/.test(nextEndOffset) ||
+			nextStartOffset !== endOffset ||
+			Number(nextEndOffset) < Number(nextStartOffset)
+		) {
+			throw new Error("Meta returned unexpected resumable offsets.");
+		}
+		startOffset = nextStartOffset;
+		endOffset = nextEndOffset;
+	}
+	if (Number(startOffset) !== bytes.length) {
+		throw new Error("Meta upload offsets do not prove that the complete file was transferred.");
+	}
+
+	const finished = await toolkitMetaPost(`${adAccountId}/advideos`, {
+		upload_phase: "finish",
+		upload_session_id: uploadSessionId,
+		title,
+	});
+	if (finished?.success !== true) {
+		throw new Error("Meta did not confirm resumable upload completion.");
+	}
+	const visibleVideo = (await listAccountVideos()).find(
+		(item: any) => String(item?.id) === videoId,
+	);
+	return {
+		video_id: videoId,
+		upload_session_id: uploadSessionId,
+		final_offset: startOffset,
+		visible_as_owned_ad_account_video: Boolean(visibleVideo),
+		processing_complete: visibleVideo?.status?.processing_phase?.status === "complete",
+		video: visibleVideo ? { ...visibleVideo, derived_dimensions: derivedVideoDimensions(visibleVideo) } : null,
+	};
+}
+
 function collectStringsByKey(value: unknown, keys: Set<string>, results: string[] = []) {
 	if (Array.isArray(value)) {
 		for (const item of value) collectStringsByKey(item, keys, results);
@@ -607,6 +742,40 @@ const websiteAdCopySchema = {
 };
 
 export function registerMetaEcommerceToolkit(server: McpServer) {
+	server.registerTool(
+		"upload_meta_ad_video_from_trusted_url_guarded",
+		{
+			description:
+				"Fetch one video from an expiring trusted OpenAI file URL, verify exact bytes and SHA-256, and complete Meta's resumable ad-account upload internally. Cannot create or activate ads.",
+			inputSchema: z.object({
+				source_url: z.string().url().max(4096),
+				title: z.string().trim().min(1).max(255),
+				filename: z.string().trim().min(5).max(200),
+				mime_type: z.enum(["video/mp4", "video/quicktime"]),
+				file_size: z.number().int().positive().max(100_000_000),
+				expected_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
+			}),
+		},
+		async ({ source_url, title, filename, mime_type, file_size, expected_sha256 }) => {
+			try {
+				safeVideoFilename(filename, mime_type);
+				const bytes = await fetchVerifiedVideoSource(source_url, file_size, expected_sha256);
+				const uploaded = await uploadVerifiedVideoBytesResumable(bytes, title);
+				return textResult({
+					uploaded: true,
+					source_verified: true,
+					source_manifest: { title, filename, mime_type, file_size, expected_sha256 },
+					...uploaded,
+					ad_or_campaign_created: false,
+					activation_performed: false,
+				});
+			} catch (error) {
+				return errorResult(error);
+			}
+		},
+	);
+
 	server.registerTool(
 		"start_meta_ad_video_resumable_upload_guarded",
 		{
