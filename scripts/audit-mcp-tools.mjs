@@ -4,6 +4,14 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
+const DEFAULT_MAX_TOOLS = 95;
+const maxArgumentIndex = process.argv.indexOf("--max");
+const maxTools =
+	maxArgumentIndex === -1 ? DEFAULT_MAX_TOOLS : Number(process.argv[maxArgumentIndex + 1]);
+
+if (!Number.isInteger(maxTools) || maxTools < 1) {
+	throw new Error("--max must be followed by a positive integer.");
+}
 
 async function walk(directory) {
 	const entries = await readdir(directory, { withFileTypes: true });
@@ -34,7 +42,10 @@ function domainFor(name) {
 
 function consolidationStem(name) {
 	return name
-		.replace(/^(get|list|inspect|preview|apply|create|update|delete|copy|clone|link|activate|pause|import|install|replace|repair|set)_/i, "")
+		.replace(
+			/^(get|list|inspect|preview|apply|create|update|delete|copy|clone|link|activate|pause|import|install|replace|repair|set)_/i,
+			"",
+		)
 		.replace(/_(guarded|readonly|read_only|preview)$/i, "")
 		.replace(/_(queries|pages|query_pages|daily_performance|summary|performance)$/i, "")
 		.replace(/_(text|image|youtube)_assets?$/i, "_assets")
@@ -83,9 +94,12 @@ const candidates = [...byStem.entries()]
 
 console.log(`# MCP tool surface audit`);
 console.log(`\nTotal exposed tools: ${tools.length}`);
+console.log(`Maximum allowed tools: ${maxTools}`);
 console.log(`Source files scanned: ${files.length}`);
 console.log("\n## Tools by domain");
-for (const [domain, values] of [...byDomain.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
+for (const [domain, values] of [...byDomain.entries()].sort(
+	(a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]),
+)) {
 	console.log(`- ${domain}: ${values.length}`);
 }
 
@@ -96,4 +110,17 @@ for (const [stem, values] of candidates) {
 }
 
 console.log("\n## Full exposed tool inventory");
-for (const tool of tools) console.log(`- ${tool.name} — ${tool.file}:${tool.line} [${tool.domain}]`);
+for (const tool of tools)
+	console.log(`- ${tool.name} — ${tool.file}:${tool.line} [${tool.domain}]`);
+
+const duplicateNames = [...new Set(tools.map((tool) => tool.name))].filter(
+	(name) => tools.filter((tool) => tool.name === name).length > 1,
+);
+if (duplicateNames.length) {
+	console.error(`\nDuplicate tool names: ${duplicateNames.join(", ")}`);
+	process.exitCode = 1;
+}
+if (tools.length > maxTools) {
+	console.error(`\nTool ceiling exceeded: ${tools.length} registered, maximum ${maxTools}.`);
+	process.exitCode = 1;
+}

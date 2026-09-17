@@ -6,6 +6,7 @@
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"format": "oxfmt --write .",
+		"lint": "oxlint src",
 		"lint:fix": "oxlint --fix",
 		"start": "wrangler dev",
 		"cf-typegen": "wrangler types",

@@ -3,6 +3,10 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { registerMetaEcommerceToolkit } from "./meta-ecommerce-toolkit";
+import {
+	registerSearchConsoleTools,
+	type SearchConsoleQueryRequest,
+} from "./tools/search-console";
 
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
@@ -1808,26 +1812,6 @@ async function ga4RunReport(request: Ga4ReportRequest) {
 	return response.json<any>();
 }
 
-type SearchConsoleDimension = "date" | "page" | "query";
-
-type SearchConsoleQueryRequest = {
-	startDate: string;
-	endDate: string;
-	dimensions?: SearchConsoleDimension[];
-	rowLimit?: number;
-	startRow?: number;
-	type?: "web";
-	aggregationType?: "auto";
-	dimensionFilterGroups?: Array<{
-		groupType: "and";
-		filters: Array<{
-			dimension: "page" | "query";
-			operator: "contains";
-			expression: string;
-		}>;
-	}>;
-};
-
 let searchConsoleAccessTokenCache: { token: string; expiresAt: number } | undefined;
 
 function getSearchConsoleConfig() {
@@ -1928,26 +1912,6 @@ async function searchConsoleQuery(request: SearchConsoleQueryRequest) {
 		}),
 	});
 }
-
-function searchConsoleFilters(queryFilter?: string, pageFilter?: string) {
-	const filters: Array<{
-		dimension: "page" | "query";
-		operator: "contains";
-		expression: string;
-	}> = [];
-	if (queryFilter)
-		filters.push({ dimension: "query", operator: "contains", expression: queryFilter });
-	if (pageFilter)
-		filters.push({ dimension: "page", operator: "contains", expression: pageFilter });
-	return filters.length ? [{ groupType: "and" as const, filters }] : undefined;
-}
-
-function assertSearchConsoleDateRange(startDate: string, endDate: string) {
-	if (startDate > endDate) {
-		throw new Error("start_date must be on or before end_date.");
-	}
-}
-
 
 type GoogleAdsConfig = {
 	developerToken: string;
@@ -2785,34 +2749,6 @@ function ga4ReportResult(report: any, startDate: string, endDate: string) {
 	};
 }
 
-function searchConsoleReportResult(
-	report: any,
-	startDate: string,
-	endDate: string,
-	dimensions: SearchConsoleDimension[],
-) {
-	const rows = (report.rows ?? []).map((row: any) => ({
-		...Object.fromEntries(
-			dimensions.map((dimension, index) => [dimension, row.keys?.[index] ?? ""]),
-		),
-		clicks: Number(row.clicks ?? 0),
-		impressions: Number(row.impressions ?? 0),
-		ctr: Number(row.ctr ?? 0),
-		position: Number(row.position ?? 0),
-	}));
-
-	return {
-		site_url: SEARCH_CONSOLE_SITE_URL,
-		start_date: startDate,
-		end_date: endDate,
-		search_type: "web",
-		row_count: rows.length,
-		rows,
-		response_aggregation_type: report.responseAggregationType,
-		metadata: report.metadata,
-	};
-}
-
 async function getAllOrders(startDate: string, endDate: string) {
 	const allOrders: any[] = [];
 	const perPage = 100;
@@ -3275,6 +3211,10 @@ function createServer() {
 	});
 
 	registerMetaEcommerceToolkit(server);
+	registerSearchConsoleTools(server, {
+		query: searchConsoleQuery,
+		siteUrl: SEARCH_CONSOLE_SITE_URL,
+	});
 
 	server.registerTool(
 		"get_blindmotion_github_app_status",
@@ -8440,77 +8380,6 @@ function createServer() {
 
 	/* Guarded Google Ads creation tools. They can only build a PAUSED ZipGrip draft.
 	 * Kept for backwards compatibility while callers migrate to the reusable tools. */
-
-	/* Read-only Google Search Console reporting schemas. */
-
-	const searchConsoleDateSchema = z
-		.string()
-		.regex(/^\d{4}-\d{2}-\d{2}$/, "Use an ISO date in YYYY-MM-DD format.");
-	const searchConsoleFilterSchema = z.string().trim().min(1).max(500).optional();
-	const searchConsoleLimitSchema = z.number().int().min(1).max(1000).default(250);
-	const searchConsoleReportTypeSchema = z.enum([
-		"queries",
-		"pages",
-		"query_pages",
-		"daily",
-	]);
-
-	server.registerTool(
-		"get_search_console_report",
-		{
-			description:
-				"Return Blindmotion Google Search Console performance using one parameter-driven report. Supports query, page, query+page and daily dimensions while preserving the existing filters, limits and metrics.",
-			inputSchema: z.object({
-				report_type: searchConsoleReportTypeSchema,
-				start_date: searchConsoleDateSchema,
-				end_date: searchConsoleDateSchema,
-				limit: searchConsoleLimitSchema,
-				query_filter: searchConsoleFilterSchema,
-				page_filter: searchConsoleFilterSchema,
-			}),
-		},
-		async ({ report_type, start_date, end_date, limit, query_filter, page_filter }) => {
-			try {
-				assertSearchConsoleDateRange(start_date, end_date);
-
-				if (report_type === "queries" && page_filter) {
-					throw new Error("page_filter is only supported for pages or query_pages reports.");
-				}
-				if (report_type === "pages" && query_filter) {
-					throw new Error("query_filter is only supported for queries or query_pages reports.");
-				}
-				if (report_type === "daily" && (query_filter || page_filter)) {
-					throw new Error("Daily Search Console reports do not accept query or page filters.");
-				}
-
-				const dimensions: SearchConsoleDimension[] =
-					report_type === "queries"
-						? ["query"]
-						: report_type === "pages"
-							? ["page"]
-							: report_type === "query_pages"
-								? ["query", "page"]
-								: ["date"];
-
-				const report = await searchConsoleQuery({
-					startDate: start_date,
-					endDate: end_date,
-					dimensions,
-					rowLimit: report_type === "daily" ? 5000 : limit,
-					...(report_type === "daily"
-						? {}
-						: { dimensionFilterGroups: searchConsoleFilters(query_filter, page_filter) }),
-				});
-				const result = searchConsoleReportResult(report, start_date, end_date, dimensions);
-				if (report_type === "daily") {
-					result.rows.sort((left: any, right: any) => left.date.localeCompare(right.date));
-				}
-				return toolResult(result);
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
 
 	/* Read-only Google Analytics 4 reporting tools */
 
