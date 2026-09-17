@@ -373,6 +373,7 @@ async function createWebsiteSalesPlacementCreative(input: {
 	const { adAccountId } = getToolkitMetaConfig();
 	const assetFeedSpec = {
 		optimization_type: "PLACEMENT",
+		ad_formats: ["SINGLE_VIDEO"],
 		bodies: [{ text: input.primaryText }],
 		titles: [{ text: input.headline }],
 		descriptions: input.description ? [{ text: input.description }] : [],
