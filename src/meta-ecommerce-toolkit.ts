@@ -96,8 +96,16 @@ async function toolkitMetaRequest(
 		parsed = { raw: text };
 	}
 	if (!response.ok || parsed?.error) {
-		const detail = parsed?.error?.message ?? text ?? `HTTP ${response.status}`;
-		throw new Error(`Meta request failed (${response.status}): ${detail}`);
+		const metaError = parsed?.error;
+		const detail = metaError?.message ?? text ?? `HTTP ${response.status}`;
+		const diagnostics = [
+			metaError?.error_user_title ? `title=${metaError.error_user_title}` : null,
+			metaError?.error_user_msg ? `user_message=${metaError.error_user_msg}` : null,
+			metaError?.code !== undefined ? `code=${metaError.code}` : null,
+			metaError?.error_subcode !== undefined ? `subcode=${metaError.error_subcode}` : null,
+			metaError?.fbtrace_id ? `fbtrace_id=${metaError.fbtrace_id}` : null,
+		].filter(Boolean).join("; ");
+		throw new Error(`Meta request failed (${response.status}): ${detail}${diagnostics ? ` [${diagnostics}]` : ""}`);
 	}
 	return parsed;
 }
@@ -364,7 +372,7 @@ async function createWebsiteSalesPlacementCreative(input: {
 }) {
 	const { adAccountId } = getToolkitMetaConfig();
 	const assetFeedSpec = {
-		optimization_type: "REGULAR",
+		optimization_type: "PLACEMENT",
 		bodies: [{ text: input.primaryText }],
 		titles: [{ text: input.headline }],
 		descriptions: input.description ? [{ text: input.description }] : [],
@@ -378,7 +386,7 @@ async function createWebsiteSalesPlacementCreative(input: {
 			{
 				customization_spec: {
 					publisher_platforms: ["facebook", "instagram"],
-					facebook_positions: ["feed", "video_feeds", "search"],
+					facebook_positions: ["feed", "search"],
 					instagram_positions: ["stream", "explore", "profile_feed"],
 				},
 				video_label: { name: "video_feed_4x5" },
