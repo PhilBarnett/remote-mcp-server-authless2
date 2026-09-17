@@ -37,7 +37,10 @@ jobs:
         run: npm run type-check
 
       - name: Lint
-        run: npx oxlint src/index.ts
+        run: npm run lint
+
+      - name: Enforce MCP tool ceiling
+        run: npm run audit:mcp-tools -- --max 95
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
