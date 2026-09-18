@@ -10143,6 +10143,549 @@ function createServer() {
 		},
 	);
 
+
+	/* Guarded outdoor-fabric replacement for live or draft WAPF products. The
+	 * caller supplies every product, field, label, colour and source URL at
+	 * runtime. Pricing is copied from the existing selector choices and verified
+	 * unchanged; colour choices must be zero-priced. The batch is hash locked,
+	 * fully verified and rolled back across every written product on failure. */
+	const outdoorFabricReplacementConfirmation = "CONFIRM REPLACE OUTDOOR FABRIC";
+	const outdoorFabricStatus = z.enum(["publish", "draft", "private", "pending"]);
+	const outdoorFabricVisibility = z.enum(["visible", "catalog", "search", "hidden"]);
+	const outdoorFabricSelectorChoice = z.object({
+		field_id: wapfVisualFieldId,
+		expected_field_label: z.string().trim().min(1).max(300),
+		choice_slug: wapfVisualChoiceSlug,
+		expected_choice_label: z.string().trim().min(1).max(300),
+	});
+	const outdoorFabricProduct = z.object({
+		product_id: genericWapfId,
+		expected_product_name: z.string().trim().min(1).max(500),
+		expected_status: outdoorFabricStatus,
+		expected_catalog_visibility: outdoorFabricVisibility,
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		selector_choices: z.array(outdoorFabricSelectorChoice).min(1).max(10),
+		colour_field_id: wapfVisualFieldId,
+		expected_colour_field_label: z.string().trim().min(1).max(300),
+		expected_colour_field_type: z.enum(["image-swatch", "multi-image-swatch"]),
+	});
+	const outdoorFabricColour = z.object({
+		label: z.string().trim().min(1).max(200),
+		slug: wapfVisualChoiceSlug,
+		source_url: z.string().url(),
+		filename: wapfVisualFilename,
+	});
+	const outdoorFabricReplacementBase = z.object({
+		products: z.array(outdoorFabricProduct).min(1).max(10),
+		new_fabric_label: z.string().trim().min(1).max(300),
+		new_colour_field_label: z.string().trim().min(1).max(300),
+		representative_colour_slug: wapfVisualChoiceSlug,
+		colours: z.array(outdoorFabricColour).min(1).max(20),
+	});
+	type OutdoorFabricReplacementInput = z.infer<typeof outdoorFabricReplacementBase>;
+	type OutdoorFabricProductInput = z.infer<typeof outdoorFabricProduct>;
+	type OutdoorFabricLockedColour = z.infer<typeof outdoorFabricColour> & {
+		expected_sha256: string;
+		mime_type: string;
+		byte_length: number;
+	};
+
+	function outdoorFabricChoicePricingIsZero(choice: any) {
+		const type = String(choice?.pricing_type ?? "none");
+		const amount = choice?.pricing_amount ?? 0;
+		return (type === "none" || type === "fixed") && Number(amount) === 0;
+	}
+
+	function outdoorFabricPricingSnapshot(product: any, group: any, colourFieldId: string) {
+		return {
+			regular_price: String(product?.regular_price ?? ""),
+			sale_price: String(product?.sale_price ?? ""),
+			price: String(product?.price ?? ""),
+			fields: group.fields.map((field: any) => {
+				const fieldId = genericWapfFieldId(field);
+				const base = {
+					field_id: fieldId,
+					pricing: structuredClone(field?.pricing ?? null),
+				};
+				if (fieldId === colourFieldId) {
+					return {
+						...base,
+						colour_choices_zero_priced: (field?.options?.choices ?? []).every(outdoorFabricChoicePricingIsZero),
+					};
+				}
+				return {
+					...base,
+					choices: (field?.options?.choices ?? []).map((choice: any) => ({
+						slug: String(choice?.slug ?? ""),
+						pricing_type: choice?.pricing_type ?? null,
+						pricing_amount: choice?.pricing_amount ?? null,
+					})),
+				};
+			}),
+		};
+	}
+
+	async function lockOutdoorFabricColours(
+		colours: z.infer<typeof outdoorFabricColour>[],
+	): Promise<OutdoorFabricLockedColour[]> {
+		const locked: OutdoorFabricLockedColour[] = [];
+		for (const colour of colours) {
+			const { response } = await fetchPublicResource(
+				colour.source_url,
+				"image/jpeg,image/png,image/webp",
+			);
+			const mimeType = String(response.headers.get("content-type") ?? "")
+				.split(";")[0]
+				.trim()
+				.toLocaleLowerCase();
+			const bytes = new Uint8Array(await response.arrayBuffer());
+			if (
+				!["image/jpeg", "image/png", "image/webp"].includes(mimeType) ||
+				!bytes.length ||
+				bytes.length > 6_000_000 ||
+				!hasExpectedImageSignature(bytes, mimeType)
+			) {
+				throw new Error("A supplied colour swatch is not a valid supported image: " + colour.source_url + ".");
+			}
+			const extension = colour.filename.split(".").pop()?.toLocaleLowerCase() ?? "";
+			const extensions: Record<string, string[]> = {
+				"image/jpeg": ["jpg", "jpeg"],
+				"image/png": ["png"],
+				"image/webp": ["webp"],
+			};
+			if (!extensions[mimeType]?.includes(extension)) {
+				throw new Error("A colour swatch filename and MIME type disagree.");
+			}
+			locked.push({
+				...colour,
+				expected_sha256: await sha256Hex(bytes),
+				mime_type: mimeType,
+				byte_length: bytes.length,
+			});
+		}
+		return locked;
+	}
+
+	function outdoorFabricRemoteImage(colour: OutdoorFabricLockedColour): WapfPatchImage {
+		return {
+			kind: "remote_image",
+			source_url: colour.source_url,
+			expected_sha256: colour.expected_sha256,
+			filename: colour.filename,
+		};
+	}
+
+	async function inspectOutdoorFabricProduct(spec: OutdoorFabricProductInput) {
+		const product = await (await wcFetch("products/" + spec.product_id)).json<any>();
+		if (
+			product.id !== spec.product_id ||
+			product.name !== spec.expected_product_name ||
+			product.status !== spec.expected_status ||
+			product.catalog_visibility !== spec.expected_catalog_visibility
+		) {
+			throw new Error("A caller-supplied outdoor product identity or state no longer matches WooCommerce.");
+		}
+		const wapf = genericWapf(product);
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		if (
+			wapf.meta.id !== spec.expected_meta_data_id ||
+			beforeHash !== spec.expected_field_group_sha256
+		) {
+			throw new Error("An outdoor product WAPF field group changed after inspection; refusing the plan.");
+		}
+		const selectorKeys = new Set<string>();
+		const selectors = spec.selector_choices.map((selector) => {
+			const key = selector.field_id + ":" + selector.choice_slug;
+			if (selectorKeys.has(key)) throw new Error("A selector choice was supplied more than once.");
+			selectorKeys.add(key);
+			const field = wapf.group.fields.find(
+				(candidate: any) => genericWapfFieldId(candidate) === selector.field_id,
+			);
+			if (
+				!field ||
+				field.label !== selector.expected_field_label ||
+				field.type !== "image-swatch"
+			) {
+				throw new Error("A selected outdoor fabric field no longer matches.");
+			}
+			const matches = (field?.options?.choices ?? []).filter(
+				(choice: any) => String(choice?.slug ?? "") === selector.choice_slug,
+			);
+			if (matches.length !== 1 || matches[0].label !== selector.expected_choice_label) {
+				throw new Error("A selected outdoor fabric choice no longer matches.");
+			}
+			return {
+				...selector,
+				current_pricing_type: matches[0].pricing_type ?? null,
+				current_pricing_amount: matches[0].pricing_amount ?? null,
+			};
+		});
+		const colourField = wapf.group.fields.find(
+			(field: any) => genericWapfFieldId(field) === spec.colour_field_id,
+		);
+		if (
+			!colourField ||
+			colourField.label !== spec.expected_colour_field_label ||
+			colourField.type !== spec.expected_colour_field_type
+		) {
+			throw new Error("The selected outdoor colour field no longer matches.");
+		}
+		const oldColourChoices = colourField?.options?.choices;
+		if (!Array.isArray(oldColourChoices) || !oldColourChoices.length) {
+			throw new Error("The selected outdoor colour field has no choices.");
+		}
+		if (!oldColourChoices.every(outdoorFabricChoicePricingIsZero)) {
+			throw new Error("The selected outdoor colour field contains priced choices; refusing replacement.");
+		}
+		const oldColourSlugs = new Set(
+			oldColourChoices.map((choice: any) => String(choice?.slug ?? "")).filter(Boolean),
+		);
+		for (const field of wapf.group.fields) {
+			if (genericWapfFieldId(field) === spec.colour_field_id) continue;
+			for (const group of field?.conditionals ?? []) {
+				for (const rule of group?.rules ?? []) {
+					if (oldColourSlugs.has(String(rule?.value ?? ""))) {
+						throw new Error("An old colour choice is referenced by another conditional field.");
+					}
+				}
+			}
+		}
+		const pricingSnapshot = outdoorFabricPricingSnapshot(product, wapf.group, spec.colour_field_id);
+		return {
+			spec,
+			product,
+			wapf,
+			beforeHash,
+			selectors,
+			old_colour_choice_count: oldColourChoices.length,
+			pricingSnapshot,
+		};
+	}
+
+	async function buildOutdoorFabricReplacementPlan(args: OutdoorFabricReplacementInput) {
+		const productIds = args.products.map((product) => product.product_id);
+		if (new Set(productIds).size !== productIds.length) {
+			throw new Error("Each outdoor product may appear only once.");
+		}
+		const colourSlugs = args.colours.map((colour) => colour.slug);
+		if (new Set(colourSlugs).size !== colourSlugs.length) {
+			throw new Error("Each new outdoor colour slug must be unique.");
+		}
+		if (!colourSlugs.includes(args.representative_colour_slug)) {
+			throw new Error("The representative colour slug is not present in the new colour list.");
+		}
+		const filenames = args.colours.map((colour) => colour.filename.toLocaleLowerCase());
+		if (new Set(filenames).size !== filenames.length) {
+			throw new Error("Each new outdoor colour filename must be unique.");
+		}
+		const [lockedColours, products] = await Promise.all([
+			lockOutdoorFabricColours(args.colours),
+			Promise.all(args.products.map(inspectOutdoorFabricProduct)),
+		]);
+		const planHash = await genericWapfHashOf({
+			request: {
+				products: args.products,
+				new_fabric_label: args.new_fabric_label,
+				new_colour_field_label: args.new_colour_field_label,
+				representative_colour_slug: args.representative_colour_slug,
+				colours: args.colours,
+			},
+			locked_colours: lockedColours.map((colour) => ({
+				label: colour.label,
+				slug: colour.slug,
+				source_url: colour.source_url,
+				filename: colour.filename,
+				sha256: colour.expected_sha256,
+				mime_type: colour.mime_type,
+				byte_length: colour.byte_length,
+			})),
+			products: products.map((product) => ({
+				product_id: product.spec.product_id,
+				before_field_group_sha256: product.beforeHash,
+				selector_choices: product.selectors,
+				old_colour_choice_count: product.old_colour_choice_count,
+				pricing_snapshot: product.pricingSnapshot,
+			})),
+		});
+		return { lockedColours, products, planHash };
+	}
+
+	function buildOutdoorFabricUpdatedProduct(
+		args: OutdoorFabricReplacementInput,
+		plan: Awaited<ReturnType<typeof inspectOutdoorFabricProduct>>,
+		lockedColours: OutdoorFabricLockedColour[],
+		media: Map<string, { attachment: number | null; source_url: string; filename: string; mime_type: string }>,
+	) {
+		const representative = lockedColours.find(
+			(colour) => colour.slug === args.representative_colour_slug,
+		);
+		if (!representative) throw new Error("The representative colour disappeared from the locked plan.");
+		const representativeMedia = media.get(wapfPatchImageKey(outdoorFabricRemoteImage(representative)));
+		if (!representativeMedia?.attachment) throw new Error("The representative colour was not imported.");
+		const updatedGroup = structuredClone(plan.wapf.group);
+		for (const selector of plan.spec.selector_choices) {
+			const field = updatedGroup.fields.find(
+				(candidate: any) => genericWapfFieldId(candidate) === selector.field_id,
+			);
+			const choice = field?.options?.choices?.find(
+				(candidate: any) => String(candidate?.slug ?? "") === selector.choice_slug,
+			);
+			if (!choice || choice.label !== selector.expected_choice_label) {
+				throw new Error("A selected outdoor fabric choice changed while building the update.");
+			}
+			choice.label = args.new_fabric_label;
+			choice.image = representativeMedia.source_url;
+			choice.attachment = representativeMedia.attachment;
+		}
+		const colourField = updatedGroup.fields.find(
+			(field: any) => genericWapfFieldId(field) === plan.spec.colour_field_id,
+		);
+		if (!colourField || colourField.label !== plan.spec.expected_colour_field_label) {
+			throw new Error("The outdoor colour field changed while building the update.");
+		}
+		const template = structuredClone(colourField.options.choices[0] ?? {});
+		colourField.label = args.new_colour_field_label;
+		colourField.options = {
+			...structuredClone(colourField.options ?? {}),
+			choices: lockedColours.map((colour) => {
+				const resolved = media.get(wapfPatchImageKey(outdoorFabricRemoteImage(colour)));
+				if (!resolved?.attachment) throw new Error("A colour swatch was not imported.");
+				return {
+					...structuredClone(template),
+					label: colour.label,
+					slug: colour.slug,
+					pricing_type: "none",
+					pricing_amount: 0,
+					image: resolved.source_url,
+					attachment: resolved.attachment,
+					options: [],
+				};
+			}),
+		};
+		const updatedPricingSnapshot = outdoorFabricPricingSnapshot(
+			plan.product,
+			updatedGroup,
+			plan.spec.colour_field_id,
+		);
+		if (JSON.stringify(updatedPricingSnapshot) !== JSON.stringify(plan.pricingSnapshot)) {
+			throw new Error("Outdoor fabric replacement would change pricing; refusing write.");
+		}
+		const updatedValue =
+			typeof plan.wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+		return { updatedGroup, updatedValue, updatedPricingSnapshot };
+	}
+
+	server.registerTool(
+		"preview_outdoor_fabric_replacement",
+		{
+			description:
+				"Preview a hash-locked, parameter-driven replacement of one outdoor fabric choice and its colour swatches across explicitly identified live or draft WooCommerce products. Fetches and fingerprints supplier images, proves all selected colour choices are zero-priced and preserves every existing product and WAPF pricing value. Performs no writes.",
+			inputSchema: outdoorFabricReplacementBase,
+		},
+		async (args) => {
+			try {
+				const plan = await buildOutdoorFabricReplacementPlan(args);
+				return toolResult({
+					write_performed: false,
+					plan_sha256: plan.planHash,
+					new_fabric_label: args.new_fabric_label,
+					new_colour_field_label: args.new_colour_field_label,
+					representative_colour_slug: args.representative_colour_slug,
+					colours: plan.lockedColours.map((colour) => ({
+						label: colour.label,
+						slug: colour.slug,
+						source_url: colour.source_url,
+						filename: colour.filename,
+						sha256: colour.expected_sha256,
+						mime_type: colour.mime_type,
+						byte_length: colour.byte_length,
+					})),
+					products: plan.products.map((product) => ({
+						product: {
+							id: product.product.id,
+							name: product.product.name,
+							status: product.product.status,
+							catalog_visibility: product.product.catalog_visibility,
+						},
+						meta_data_id: product.wapf.meta.id,
+						before_field_group_sha256: product.beforeHash,
+						selector_choices: product.selectors,
+						colour_field: {
+							field_id: product.spec.colour_field_id,
+							old_label: product.spec.expected_colour_field_label,
+							new_label: args.new_colour_field_label,
+							old_choice_count: product.old_colour_choice_count,
+							new_choice_count: plan.lockedColours.length,
+						},
+						pricing_preserved: true,
+					})),
+					untouched: [
+						"all product prices",
+						"all WAPF pricing formulas and amounts",
+						"fabric selector slugs and conditions",
+						"unselected WAPF fields",
+						"product identity, status and visibility",
+						"non-WAPF product data",
+					],
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_outdoor_fabric_replacement_guarded",
+		{
+			description:
+				"Atomically apply one exact previewed outdoor-fabric replacement across explicitly identified live or draft WooCommerce products. Revalidates product identity, state, WAPF hashes, supplier image bytes and the deterministic plan; preserves all pricing and selector slugs; verifies every product and rolls back all product writes on failure. Media is never deleted. Requires exact confirmation: " +
+				outdoorFabricReplacementConfirmation,
+			inputSchema: outdoorFabricReplacementBase.extend({
+				expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal(outdoorFabricReplacementConfirmation),
+			}),
+		},
+		async (args) => {
+			try {
+				const preview = await buildOutdoorFabricReplacementPlan(args);
+				if (preview.planHash !== args.expected_plan_sha256) {
+					throw new Error("The deterministic outdoor-fabric plan changed after preview; refusing write.");
+				}
+				const media = await loadWapfPatchMedia(
+					preview.lockedColours.map(outdoorFabricRemoteImage),
+					true,
+				);
+				const updates = await Promise.all(
+					preview.products.map(async (product) => {
+						const updated = buildOutdoorFabricUpdatedProduct(
+							args,
+							product,
+							preview.lockedColours,
+							media,
+						);
+						return {
+							...product,
+							...updated,
+							afterHash: await genericWapfHashOf(updated.updatedValue),
+						};
+					}),
+				);
+				const written: typeof updates = [];
+				try {
+					for (const update of updates) {
+						await wcWrite("products/" + update.spec.product_id, {
+							meta_data: [
+								{
+									id: update.wapf.meta.id,
+									key: "_wapf_fieldgroup",
+									value: update.updatedValue,
+								},
+							],
+						});
+						written.push(update);
+					}
+					const verifiedProducts = await Promise.all(
+						updates.map(async (update) => {
+							const verified = await (
+								await wcFetch("products/" + update.spec.product_id)
+							).json<any>();
+							const verifiedWapf = genericWapf(verified);
+							const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+							if (
+								verified.id !== update.spec.product_id ||
+								verified.name !== update.spec.expected_product_name ||
+								verified.status !== update.spec.expected_status ||
+								verified.catalog_visibility !== update.spec.expected_catalog_visibility ||
+								verifiedWapf.meta.id !== update.spec.expected_meta_data_id ||
+								verifiedHash !== update.afterHash
+							) {
+								throw new Error("Post-write outdoor-fabric product verification failed.");
+							}
+							const pricingSnapshot = outdoorFabricPricingSnapshot(
+								verified,
+								verifiedWapf.group,
+								update.spec.colour_field_id,
+							);
+							if (JSON.stringify(pricingSnapshot) !== JSON.stringify(update.pricingSnapshot)) {
+								throw new Error("Post-write outdoor-fabric pricing verification failed.");
+							}
+							return {
+								product_id: verified.id,
+								product_name: verified.name,
+								status: verified.status,
+								catalog_visibility: verified.catalog_visibility,
+								before_field_group_sha256: update.beforeHash,
+								after_field_group_sha256: verifiedHash,
+							};
+						}),
+					);
+					return toolResult({
+						updated: true,
+						plan_sha256: preview.planHash,
+						products: verifiedProducts,
+						new_fabric_label: args.new_fabric_label,
+						new_colour_field_label: args.new_colour_field_label,
+						colours: preview.lockedColours.map((colour) => ({
+							label: colour.label,
+							slug: colour.slug,
+							attachment_id:
+								media.get(wapfPatchImageKey(outdoorFabricRemoteImage(colour)))?.attachment ??
+								null,
+						})),
+						pricing_preserved: true,
+						selector_slugs_preserved: true,
+						media_deleted: false,
+					});
+				} catch (writeError) {
+					const rollbackErrors: string[] = [];
+					for (const update of written.reverse()) {
+						try {
+							await wcWrite("products/" + update.spec.product_id, {
+								meta_data: [
+									{
+										id: update.wapf.meta.id,
+										key: "_wapf_fieldgroup",
+										value: update.wapf.meta.value,
+									},
+								],
+							});
+							const rolledBack = await (
+								await wcFetch("products/" + update.spec.product_id)
+							).json<any>();
+							if (
+								(await genericWapfHashOf(genericWapf(rolledBack).meta.value)) !==
+								update.beforeHash
+							) {
+								throw new Error("Rollback hash verification failed.");
+							}
+						} catch (rollbackError) {
+							rollbackErrors.push(
+								update.spec.product_id +
+									": " +
+									(rollbackError instanceof Error
+										? rollbackError.message
+										: String(rollbackError)),
+							);
+						}
+					}
+					if (rollbackErrors.length) {
+						throw new Error(
+							"Outdoor-fabric replacement failed and rollback was incomplete: " +
+								rollbackErrors.join(" | "),
+						);
+					}
+					throw new Error(
+						"Outdoor-fabric replacement failed; all product writes rolled back: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)),
+					);
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	const wapfPricingGridConfirmation = "CONFIRM APPLY WAPF PRICING GRID";
 	const pricingAxis = z.array(z.number().int().positive()).min(2).max(50);
 	const pricingMatrix = z.array(z.array(z.number().nonnegative()).min(2).max(50)).min(2).max(50);
