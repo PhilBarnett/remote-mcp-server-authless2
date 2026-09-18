@@ -661,6 +661,104 @@ async function wpUploadMedia(filename: string, mimeType: string, bytes: Uint8Arr
 	return response.json<any>();
 }
 
+
+type ProductImageEnvironment = "live" | "staging";
+
+function stagingProductImageAccess() {
+	const workerEnv = env as unknown as Record<string, string | undefined>;
+	if (
+		!workerEnv.WC_STAGING_SITE ||
+		!workerEnv.WP_STAGING_USERNAME ||
+		!workerEnv.WP_STAGING_APPLICATION_PASSWORD
+	) {
+		throw new Error("Staging product-image access is not configured in Cloudflare.");
+	}
+	const site = new URL(workerEnv.WC_STAGING_SITE);
+	if (
+		site.protocol !== "https:" ||
+		site.hostname !== "staging-online.blindmotion.com.au" ||
+		(site.pathname !== "/" && site.pathname !== "") ||
+		site.search !== "" ||
+		site.hash !== ""
+	) {
+		throw new Error("Staging product-image site must be the exact approved HTTPS origin.");
+	}
+	return {
+		baseUrl: site.origin,
+		auth: `Basic ${btoa(`${workerEnv.WP_STAGING_USERNAME}:${workerEnv.WP_STAGING_APPLICATION_PASSWORD}`)}`,
+	};
+}
+
+async function productImageWcFetch(environment: ProductImageEnvironment, path: string) {
+	if (environment === "live") return wcFetch(path);
+	const access = stagingProductImageAccess();
+	const response = await fetch(`${access.baseUrl}/wp-json/wc/v3/${path}`, {
+		headers: { Authorization: access.auth, Accept: "application/json" },
+	});
+	if (!response.ok) {
+		throw new Error(`Staging WooCommerce request failed: ${response.status} ${await response.text()}`);
+	}
+	return response;
+}
+
+async function productImageWcWrite(
+	environment: ProductImageEnvironment,
+	path: string,
+	body: unknown,
+) {
+	if (environment === "live") return wcWrite(path, body);
+	const access = stagingProductImageAccess();
+	const response = await fetch(`${access.baseUrl}/wp-json/wc/v3/${path}`, {
+		method: "PUT",
+		headers: {
+			Authorization: access.auth,
+			Accept: "application/json",
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(body),
+	});
+	if (!response.ok) {
+		throw new Error(`Staging WooCommerce write failed: ${response.status} ${await response.text()}`);
+	}
+	return response;
+}
+
+async function productImageWpFetch(environment: ProductImageEnvironment, path: string) {
+	if (environment === "live") return wpFetch(path);
+	const access = stagingProductImageAccess();
+	const response = await fetch(`${access.baseUrl}/wp-json/wp/v2/${path}`, {
+		headers: { Authorization: access.auth, Accept: "application/json" },
+	});
+	if (!response.ok) {
+		throw new Error(`Staging WordPress request failed: ${response.status} ${await response.text()}`);
+	}
+	return response;
+}
+
+async function productImageWpUploadMedia(
+	environment: ProductImageEnvironment,
+	filename: string,
+	mimeType: string,
+	bytes: Uint8Array,
+) {
+	if (environment === "live") return wpUploadMedia(filename, mimeType, bytes);
+	const access = stagingProductImageAccess();
+	const response = await fetch(`${access.baseUrl}/wp-json/wp/v2/media`, {
+		method: "POST",
+		headers: {
+			Authorization: access.auth,
+			Accept: "application/json",
+			"Content-Type": mimeType,
+			"Content-Disposition": `attachment; filename="${filename.replace(/["\\\r\n]/g, "-")}"`,
+		},
+		body: bytes,
+	});
+	if (!response.ok) {
+		throw new Error(`Staging WordPress media upload failed: ${response.status} ${await response.text()}`);
+	}
+	return response.json<any>();
+}
+
 const FABRIC_COLLECTION_IMPORT_CONFIRMATION = "CONFIRM IMPORT FABRIC COLLECTION";
 
 type FabricSwatch = {
@@ -5081,9 +5179,10 @@ function createServer() {
 		"replace_product_option_image_guarded",
 		{
 			description:
-				"Upload a new WordPress attachment and replace exactly one product-option image reference, preserving the original attachment and a durable rollback record. Cannot delete media.",
+				"Upload a new WordPress attachment and replace exactly one product-option image reference on the caller-selected live or staging site, preserving the original attachment and a durable rollback record. Staging writes require draft/hidden state. Cannot delete media.",
 			inputSchema: z
 				.object({
+					environment: z.enum(["live", "staging"]).default("live"),
 					product_id: z.number().int().positive(),
 					meta_data_id: z.number().int().positive(),
 					custom_field_key: z.string().min(1),
@@ -5123,6 +5222,7 @@ function createServer() {
 				),
 		},
 		async ({
+			environment,
 			product_id,
 			meta_data_id,
 			custom_field_key,
@@ -5135,8 +5235,11 @@ function createServer() {
 			replacement_base64,
 		}) => {
 			try {
-				const productResponse = await wcFetch(`products/${product_id}`);
+				const productResponse = await productImageWcFetch(environment, `products/${product_id}`);
 				const product = await productResponse.json<any>();
+				if (environment === "staging" && (product.status !== "draft" || product.catalog_visibility !== "hidden")) {
+					throw new Error("Staging product must remain draft/hidden; no image uploaded or product write performed.");
+				}
 				const meta = (product.meta_data ?? []).find(
 					(item: any) => item.id === meta_data_id && item.key === custom_field_key,
 				);
@@ -5189,7 +5292,7 @@ function createServer() {
 
 				let uploaded: any;
 				if (replacement_attachment_id !== undefined) {
-					const mediaResponse = await wpFetch(`media/${replacement_attachment_id}`);
+					const mediaResponse = await productImageWpFetch(environment, `media/${replacement_attachment_id}`);
 					uploaded = await mediaResponse.json<any>();
 					if (
 						!uploaded?.id ||
@@ -5212,7 +5315,8 @@ function createServer() {
 							"Replacement bytes do not match the declared image MIME type.",
 						);
 					}
-					uploaded = await wpUploadMedia(
+					uploaded = await productImageWpUploadMedia(
+						environment,
 						replacement_filename!,
 						replacement_mime_type!,
 						bytes,
@@ -5236,6 +5340,7 @@ function createServer() {
 				const backups = Array.isArray(backupMeta?.value) ? [...backupMeta.value] : [];
 				const backup = {
 					backup_id: crypto.randomUUID(),
+					environment,
 					created_at: new Date().toISOString(),
 					product_id,
 					meta_data_id,
@@ -5249,7 +5354,7 @@ function createServer() {
 					new_source_url: uploaded.source_url,
 				};
 				backups.push(backup);
-				const updateResponse = await wcWrite(`products/${product_id}`, {
+				const updateResponse = await productImageWcWrite(environment, `products/${product_id}`, {
 					meta_data: [
 						{
 							id: meta_data_id,
@@ -5287,6 +5392,7 @@ function createServer() {
 
 				return toolResult({
 					replaced: true,
+					environment,
 					product_id,
 					product_name: product.name,
 					meta_data_id,
