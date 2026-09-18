@@ -2090,6 +2090,266 @@ async function googleAdsMutate(mutateOperations: any[], validateOnly: boolean) {
 	return response.json<any>();
 }
 
+
+const GOOGLE_ADS_CAMPAIGN_CHANGE_CONFIRMATION =
+	"CONFIRM APPLY GOOGLE ADS CAMPAIGN CHANGES";
+const GOOGLE_ADS_CAMPAIGN_MAX_DAILY_BUDGET_AUD = 500;
+
+const googleAdsCampaignChangeSchema = z.object({
+	changes: z
+		.array(
+			z.discriminatedUnion("action", [
+				z.object({
+					action: z.literal("PAUSE_CAMPAIGN"),
+					campaign_id: z.string().regex(/^\d{1,20}$/),
+					expected_campaign_name: z.string().trim().min(1).max(255),
+				}),
+				z.object({
+					action: z.literal("INCREASE_DAILY_BUDGET_PERCENT"),
+					campaign_id: z.string().regex(/^\d{1,20}$/),
+					expected_campaign_name: z.string().trim().min(1).max(255),
+					increase_percent: z.number().min(1).max(25).multipleOf(0.01),
+				}),
+			]),
+		)
+		.min(1)
+		.max(10),
+});
+
+
+async function getGoogleAdsCampaignControlSnapshot(
+	campaignId: string,
+	expectedCampaignName: string,
+) {
+	const rows = await googleAdsSearch(
+		"SELECT campaign.id, campaign.resource_name, campaign.name, campaign.status, " +
+			"campaign.advertising_channel_type, campaign.campaign_budget, " +
+			"campaign_budget.id, campaign_budget.resource_name, campaign_budget.name, " +
+			"campaign_budget.amount_micros, campaign_budget.explicitly_shared " +
+			"FROM campaign " +
+			"WHERE campaign.id = " + campaignId + " AND campaign.status != 'REMOVED' " +
+			"LIMIT 2",
+	);
+	if (rows.length !== 1) {
+		throw new Error(
+			"Expected exactly one non-removed Google Ads campaign for ID " +
+				campaignId + "; found " + rows.length + ".",
+		);
+	}
+	const campaign = rows[0]?.campaign;
+	if (
+		String(campaign?.id ?? "") !== campaignId ||
+		String(campaign?.name ?? "") !== expectedCampaignName
+	) {
+		throw new Error(
+			"Google Ads campaign identity did not match ID " + campaignId +
+				" and expected name " + expectedCampaignName + ".",
+		);
+	}
+	const { customerId } = getGoogleAdsConfig();
+	const expectedCampaignResource =
+		"customers/" + customerId + "/campaigns/" + campaignId;
+	if (campaign?.resourceName !== expectedCampaignResource) {
+		throw new Error("Google Ads campaign resource name was unexpected.");
+	}
+	const campaignBudget = rows[0]?.campaignBudget ?? null;
+	return {
+		campaign: {
+			id: String(campaign.id),
+			resource_name: String(campaign.resourceName),
+			name: String(campaign.name),
+			status: String(campaign.status),
+			advertising_channel_type: String(campaign.advertisingChannelType ?? ""),
+		},
+		budget: campaignBudget
+			? {
+					id: String(campaignBudget.id ?? ""),
+					resource_name: String(campaignBudget.resourceName ?? ""),
+					name: String(campaignBudget.name ?? ""),
+					amount_micros: String(campaignBudget.amountMicros ?? ""),
+					explicitly_shared: campaignBudget.explicitlyShared === true,
+				}
+			: null,
+	};
+}
+
+async function buildGoogleAdsCampaignChangePlan(
+	input: z.infer<typeof googleAdsCampaignChangeSchema>,
+) {
+	const seenCampaignIds = new Set<string>();
+	const plannedChanges: any[] = [];
+	const mutateOperations: any[] = [];
+	const rollbackOperations: any[] = [];
+
+	for (const change of input.changes) {
+		if (seenCampaignIds.has(change.campaign_id)) {
+			throw new Error(
+				"Each Google Ads campaign may appear only once in a change plan.",
+			);
+		}
+		seenCampaignIds.add(change.campaign_id);
+		const snapshot = await getGoogleAdsCampaignControlSnapshot(
+			change.campaign_id,
+			change.expected_campaign_name,
+		);
+
+		if (change.action === "PAUSE_CAMPAIGN") {
+			if (!["ENABLED", "PAUSED"].includes(snapshot.campaign.status)) {
+				throw new Error(
+					"Campaign " + change.campaign_id +
+						" must currently be ENABLED or PAUSED to use the pause-only control.",
+				);
+			}
+			const mutationRequired = snapshot.campaign.status === "ENABLED";
+			if (mutationRequired) {
+				mutateOperations.push({
+					campaignOperation: {
+						update: {
+							resourceName: snapshot.campaign.resource_name,
+							status: "PAUSED",
+						},
+						updateMask: "status",
+					},
+				});
+				rollbackOperations.push({
+					campaignOperation: {
+						update: {
+							resourceName: snapshot.campaign.resource_name,
+							status: "ENABLED",
+						},
+						updateMask: "status",
+					},
+				});
+			}
+			plannedChanges.push({
+				action: change.action,
+				campaign: snapshot.campaign,
+				before_status: snapshot.campaign.status,
+				after_status: "PAUSED",
+				mutation_required: mutationRequired,
+			});
+			continue;
+		}
+
+		if (snapshot.campaign.status !== "ENABLED") {
+			throw new Error(
+				"Budget increases are restricted to ENABLED campaigns; campaign " +
+					change.campaign_id + " is " + snapshot.campaign.status + ".",
+			);
+		}
+		if (!snapshot.budget?.resource_name) {
+			throw new Error(
+				"Campaign " + change.campaign_id + " has no readable campaign budget.",
+			);
+		}
+		if (snapshot.budget.explicitly_shared) {
+			throw new Error(
+				"Refusing to change an explicitly shared budget because it could affect other campaigns.",
+			);
+		}
+		const currentMicros = Number(snapshot.budget.amount_micros);
+		if (!Number.isSafeInteger(currentMicros) || currentMicros <= 0) {
+			throw new Error("The current Google Ads daily budget is invalid.");
+		}
+		const newMicros =
+			Math.round(
+				(currentMicros * (1 + change.increase_percent / 100)) / 10_000,
+			) * 10_000;
+		if (newMicros <= currentMicros) {
+			throw new Error("The requested percentage did not produce a budget increase.");
+		}
+		if (
+			newMicros >
+			GOOGLE_ADS_CAMPAIGN_MAX_DAILY_BUDGET_AUD * 1_000_000
+		) {
+			throw new Error(
+				"The resulting daily budget exceeds the guarded A$" +
+					GOOGLE_ADS_CAMPAIGN_MAX_DAILY_BUDGET_AUD + " limit.",
+			);
+		}
+		mutateOperations.push({
+			campaignBudgetOperation: {
+				update: {
+					resourceName: snapshot.budget.resource_name,
+					amountMicros: String(newMicros),
+				},
+				updateMask: "amount_micros",
+			},
+		});
+		rollbackOperations.push({
+			campaignBudgetOperation: {
+				update: {
+					resourceName: snapshot.budget.resource_name,
+					amountMicros: String(currentMicros),
+				},
+				updateMask: "amount_micros",
+			},
+		});
+		plannedChanges.push({
+			action: change.action,
+			campaign: snapshot.campaign,
+			budget: snapshot.budget,
+			increase_percent: change.increase_percent,
+			before_daily_budget_aud: currentMicros / 1_000_000,
+			after_daily_budget_aud: newMicros / 1_000_000,
+			before_amount_micros: String(currentMicros),
+			after_amount_micros: String(newMicros),
+			mutation_required: true,
+		});
+	}
+
+	const { customerId } = getGoogleAdsConfig();
+	const planSha256 = await sha256Hex(
+		new TextEncoder().encode(
+			JSON.stringify({
+				customer_id: customerId,
+				changes: plannedChanges,
+			}),
+		),
+	);
+	return {
+		customerId,
+		plannedChanges,
+		mutateOperations,
+		rollbackOperations,
+		planSha256,
+	};
+}
+
+async function verifyGoogleAdsCampaignChangePlan(
+	plannedChanges: any[],
+	afterWrite: boolean,
+) {
+	const verifiedChanges: any[] = [];
+	for (const planned of plannedChanges) {
+		const snapshot = await getGoogleAdsCampaignControlSnapshot(
+			planned.campaign.id,
+			planned.campaign.name,
+		);
+		if (planned.action === "PAUSE_CAMPAIGN") {
+			const expectedStatus = afterWrite ? "PAUSED" : planned.before_status;
+			if (snapshot.campaign.status !== expectedStatus) {
+				throw new Error(
+					"Campaign status verification failed for " +
+						planned.campaign.id + ".",
+				);
+			}
+		} else {
+			const expectedMicros = afterWrite
+				? planned.after_amount_micros
+				: planned.before_amount_micros;
+			if (snapshot.budget?.amount_micros !== expectedMicros) {
+				throw new Error(
+					"Campaign budget verification failed for " +
+						planned.campaign.id + ".",
+				);
+			}
+		}
+		verifiedChanges.push(snapshot);
+	}
+	return verifiedChanges;
+}
+
 const ZIPGRIP_ASSET_REQUIREMENTS = {
 	HEADLINE: { min: 3, max: 15, character_limit: 30 },
 	LONG_HEADLINE: { min: 1, max: 5, character_limit: 90 },
@@ -7901,6 +8161,138 @@ function createServer() {
 				});
 			}
 		});
+
+
+	server.registerTool(
+		"preview_google_ads_campaign_changes",
+		{
+			description:
+				"Preview a hash-locked batch of exact Google Ads campaign changes. Supports pause-only status changes and percentage daily-budget increases, verifies campaign identity and non-shared budgets, and runs Google Ads validateOnly without writing.",
+			inputSchema: googleAdsCampaignChangeSchema,
+		},
+		async (args) => {
+			try {
+				const plan = await buildGoogleAdsCampaignChangePlan(args);
+				if (plan.mutateOperations.length > 0) {
+					await googleAdsMutate(plan.mutateOperations, true);
+				}
+				return toolResult({
+					preview_only: true,
+					write_performed: false,
+					api_validation_passed: true,
+					customer_id: plan.customerId,
+					changes: plan.plannedChanges,
+					plan_sha256: plan.planSha256,
+					confirmation_required: GOOGLE_ADS_CAMPAIGN_CHANGE_CONFIRMATION,
+					guardrails: {
+						activation_supported: false,
+						budget_decrease_supported: false,
+						maximum_budget_increase_percent: 25,
+						maximum_daily_budget_aud:
+							GOOGLE_ADS_CAMPAIGN_MAX_DAILY_BUDGET_AUD,
+						explicitly_shared_budgets_allowed: false,
+						atomic_google_ads_mutation: true,
+					},
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_google_ads_campaign_changes_guarded",
+		{
+			description:
+				"Apply one exact previewed batch of Google Ads campaign changes atomically. Supports only ENABLED-to-PAUSED status changes and 1%-25% daily-budget increases on non-shared budgets; hash-locks live state, validates before writing, verifies afterward and attempts exact rollback if post-write verification fails.",
+			inputSchema: googleAdsCampaignChangeSchema.extend({
+				expected_plan_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+				confirmation: z.literal(GOOGLE_ADS_CAMPAIGN_CHANGE_CONFIRMATION),
+			}),
+		},
+		async (args) => {
+			try {
+				const parsed = googleAdsCampaignChangeSchema.parse(args);
+				const plan = await buildGoogleAdsCampaignChangePlan(parsed);
+				if (plan.planSha256 !== args.expected_plan_sha256) {
+					throw new Error(
+						"The Google Ads campaign-change plan or live account state changed after preview; refusing write.",
+					);
+				}
+				if (plan.mutateOperations.length === 0) {
+					const verified = await verifyGoogleAdsCampaignChangePlan(
+						plan.plannedChanges,
+						true,
+					);
+					return toolResult({
+						updated: false,
+						verified: true,
+						no_op: true,
+						customer_id: plan.customerId,
+						changes: plan.plannedChanges,
+						verified_resources: verified,
+						plan_sha256: plan.planSha256,
+					});
+				}
+
+				await googleAdsMutate(plan.mutateOperations, true);
+				let mutationReturned = false;
+				try {
+					await googleAdsMutate(plan.mutateOperations, false);
+					mutationReturned = true;
+					const verified = await verifyGoogleAdsCampaignChangePlan(
+						plan.plannedChanges,
+						true,
+					);
+					return toolResult({
+						updated: true,
+						verified: true,
+						no_op: false,
+						rollback_performed: false,
+						customer_id: plan.customerId,
+						changes: plan.plannedChanges,
+						verified_resources: verified,
+						plan_sha256: plan.planSha256,
+					});
+				} catch (writeError) {
+					if (!mutationReturned) {
+						throw writeError;
+					}
+					try {
+						if (plan.rollbackOperations.length > 0) {
+							await googleAdsMutate(plan.rollbackOperations, true);
+							await googleAdsMutate(plan.rollbackOperations, false);
+						}
+						await verifyGoogleAdsCampaignChangePlan(
+							plan.plannedChanges,
+							false,
+						);
+					} catch (rollbackError) {
+						throw new Error(
+							"Google Ads change failed after mutation and rollback could not be verified. " +
+								"Original error: " +
+								(writeError instanceof Error
+									? writeError.message
+									: String(writeError)) +
+								" Rollback error: " +
+								(rollbackError instanceof Error
+									? rollbackError.message
+									: String(rollbackError)),
+						);
+					}
+					throw new Error(
+						"Google Ads post-write verification failed; exact rollback succeeded: " +
+							(writeError instanceof Error
+								? writeError.message
+								: String(writeError)),
+					);
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 
 	server.registerTool(
 		"preview_google_ads_product_pmax_paused",
