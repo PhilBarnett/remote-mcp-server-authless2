@@ -3,7 +3,6 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 type PromotionEnvironment = "staging" | "live";
-
 type PromotionSite = {
 	environment: PromotionEnvironment;
 	baseUrl: string;
@@ -14,7 +13,10 @@ type PromotionSite = {
 };
 
 const PROMOTION_PLUGIN_SLUG = "blindmotion-product-promotion-bridge";
-const PROMOTION_PLUGIN_VERSION = "0.1.0";
+const PROMOTION_PLUGIN_VERSION = "0.2.0";
+const BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP LIVE PRODUCT TO STAGING";
+const IDENTITY_CONFIRMATION = "CONFIRM ASSIGN PROMOTION IDENTITY";
+const SHA256 = /^[a-f0-9]{64}$/;
 
 function workerEnvironment() {
 	return env as unknown as Record<string, string | undefined>;
@@ -37,13 +39,9 @@ function promotionSite(environment: PromotionEnvironment): PromotionSite {
 			expectedHost: "online.blindmotion.com.au",
 			expectedRole: "target" as const,
 		};
-
 	if (!raw.baseUrl || !raw.username || !raw.applicationPassword) {
-		throw new Error(
-			`${environment} WordPress promotion access is not configured in Cloudflare.`,
-		);
+		throw new Error(`${environment} WordPress promotion access is not configured in Cloudflare.`);
 	}
-
 	const url = new URL(raw.baseUrl);
 	if (
 		url.protocol !== "https:" ||
@@ -52,11 +50,8 @@ function promotionSite(environment: PromotionEnvironment): PromotionSite {
 		url.search !== "" ||
 		url.hash !== ""
 	) {
-		throw new Error(
-			`${environment} WordPress promotion site must be the exact approved HTTPS origin.`,
-		);
+		throw new Error(`${environment} WordPress promotion site must be the exact approved HTTPS origin.`);
 	}
-
 	return {
 		environment,
 		baseUrl: url.origin,
@@ -67,24 +62,26 @@ function promotionSite(environment: PromotionEnvironment): PromotionSite {
 	};
 }
 
-async function promotionRequest(environment: PromotionEnvironment, path: string) {
+async function promotionRequest(
+	environment: PromotionEnvironment,
+	path: string,
+	method: "GET" | "POST" = "GET",
+	body?: unknown,
+) {
 	const site = promotionSite(environment);
-	const url = new URL(
-		`/wp-json/blindmotion-mcp/v1/${path.replace(/^\/+/, "")}`,
-		site.baseUrl,
-	);
+	const url = new URL(`/wp-json/blindmotion-mcp/v1/${path.replace(/^\/+/, "")}`, site.baseUrl);
 	const response = await fetch(url.toString(), {
-		method: "GET",
+		method,
 		headers: {
 			Authorization: `Basic ${btoa(`${site.username}:${site.applicationPassword}`)}`,
 			Accept: "application/json",
+			...(method === "POST" ? { "Content-Type": "application/json" } : {}),
 		},
+		body: method === "POST" ? JSON.stringify(body ?? {}) : undefined,
 	});
 	const responseText = await response.text();
 	if (!response.ok) {
-		throw new Error(
-			`${environment} promotion bridge failed: ${response.status} ${responseText.slice(0, 500)}`,
-		);
+		throw new Error(`${environment} promotion bridge failed: ${response.status} ${responseText.slice(0, 1000)}`);
 	}
 	let payload: any;
 	try {
@@ -95,47 +92,245 @@ async function promotionRequest(environment: PromotionEnvironment, path: string)
 	return { site, payload };
 }
 
-function assertPluginContract(payload: any) {
+function assertPlugin(payload: any) {
 	if (
 		payload?.plugin?.slug !== PROMOTION_PLUGIN_SLUG ||
-		payload?.plugin?.version !== PROMOTION_PLUGIN_VERSION ||
-		payload?.read_only !== true
+		payload?.plugin?.version !== PROMOTION_PLUGIN_VERSION
 	) {
-		throw new Error("Product promotion bridge identity or read-only contract did not match.");
+		throw new Error("Product promotion bridge identity or version did not match.");
 	}
 }
 
-function assertEnvironmentContract(site: PromotionSite, payload: any) {
-	assertPluginContract(payload);
-	const returnedUrl = new URL(String(payload?.site_url ?? ""));
+async function environmentContract(environment: PromotionEnvironment) {
+	const response = await promotionRequest(environment, "product-promotion/environment");
+	assertPlugin(response.payload);
+	const returnedUrl = new URL(String(response.payload?.site_url ?? ""));
 	if (
-		payload?.configured !== true ||
-		payload?.role !== site.expectedRole ||
-		payload?.environment_id !== site.environment ||
-		payload?.write_routes_available !== false ||
-		payload?.automatic_sync_hooks_registered !== false ||
+		response.payload?.configured !== true ||
+		response.payload?.role !== response.site.expectedRole ||
+		response.payload?.environment_id !== environment ||
+		response.payload?.write_routes_available !== true ||
+		response.payload?.automatic_sync_hooks_registered !== false ||
+		response.payload?.write_policy?.automatic_sync !== false ||
+		response.payload?.write_policy?.bootstrap_direction !== "live-to-staging-only" ||
+		response.payload?.write_policy?.bootstrap_destination_state !== "draft-hidden" ||
+		response.payload?.write_policy?.publishing_supported !== false ||
 		returnedUrl.protocol !== "https:" ||
-		returnedUrl.hostname !== site.expectedHost
+		returnedUrl.hostname !== response.site.expectedHost
 	) {
-		throw new Error(`${site.environment} promotion environment failed its safety contract.`);
+		throw new Error(`${environment} promotion environment failed its safety contract.`);
 	}
+	return {
+		verified: true,
+		write_performed: false,
+		environment,
+		role: response.payload.role,
+		environment_id: response.payload.environment_id,
+		site_url: response.payload.site_url,
+		plugin: response.payload.plugin,
+		write_policy: response.payload.write_policy,
+		automatic_sync_hooks_registered: false,
+	};
+}
+
+async function manifest(environment: PromotionEnvironment, productId: number) {
+	const response = await promotionRequest(
+		environment,
+		`product-promotion/products/${productId}/manifest`,
+	);
+	assertPlugin(response.payload);
+	if (
+		response.payload?.read_only !== true ||
+		response.payload?.write_performed !== false ||
+		response.payload?.manifest?.identity?.product_id !== productId ||
+		response.payload?.manifest?.source?.role !== response.site.expectedRole ||
+		response.payload?.manifest?.source?.environment_id !== environment ||
+		!SHA256.test(String(response.payload?.manifest_sha256 ?? ""))
+	) {
+		throw new Error(`${environment} product manifest failed its read-only identity contract.`);
+	}
+	return response.payload;
+}
+
+function changedFields(left: Record<string, unknown> = {}, right: Record<string, unknown> = {}) {
+	return [...new Set([...Object.keys(left), ...Object.keys(right)])]
+		.sort()
+		.filter((key) => JSON.stringify(left[key]) !== JSON.stringify(right[key]));
+}
+
+function normalizedTaxonomy(value: Record<string, any[]> = {}) {
+	return Object.fromEntries(Object.entries(value).map(([taxonomy, terms]) => [
+		taxonomy,
+		terms.map((term) => ({ slug: term.slug, name: term.name }))
+			.sort((a, b) => String(a.slug).localeCompare(String(b.slug))),
+	]));
+}
+
+function normalizedMedia(value: any[] = []) {
+	return value.map((item) => ({
+		relative_file: item.relative_file,
+		mime_type: item.mime_type,
+		file_exists: item.file_exists,
+		file_bytes: item.file_bytes,
+		file_sha256: item.file_sha256,
+	})).sort((a, b) => String(a.relative_file).localeCompare(String(b.relative_file)));
+}
+
+function metadataDiff(staging: Record<string, any> = {}, live: Record<string, any> = {}) {
+	const noise = (key: string) =>
+		key.startsWith("_blindmotion_mcp_") ||
+		key.startsWith("_blindmotion_promotion_snapshot_") ||
+		key === "_last_change_time";
+	const stagingKeys = Object.keys(staging).filter((key) => !noise(key));
+	const liveKeys = Object.keys(live).filter((key) => !noise(key));
+	const common = stagingKeys.filter((key) => liveKeys.includes(key));
+	const changed = common.filter((key) => JSON.stringify(staging[key]) !== JSON.stringify(live[key]));
+	return {
+		staging_key_count: stagingKeys.length,
+		live_key_count: liveKeys.length,
+		same_key_count: common.length - changed.length,
+		changed_keys: changed,
+		only_staging: stagingKeys.filter((key) => !liveKeys.includes(key)),
+		only_live: liveKeys.filter((key) => !stagingKeys.includes(key)),
+	};
+}
+
+function readableDiff(stagingPayload: any, livePayload: any) {
+	const staging = stagingPayload.manifest;
+	const live = livePayload.manifest;
+	const stagingIdentity = { ...staging.identity };
+	const liveIdentity = { ...live.identity };
+	delete stagingIdentity.product_id;
+	delete liveIdentity.product_id;
+	const stagingTaxonomy = normalizedTaxonomy(staging.taxonomy);
+	const liveTaxonomy = normalizedTaxonomy(live.taxonomy);
+	const stagingMedia = normalizedMedia(staging.media);
+	const liveMedia = normalizedMedia(live.media);
+	const sections = {
+		environment_noise_excluded: [
+			"source role, environment ID and site URL",
+			"database product IDs",
+			"taxonomy term IDs",
+			"attachment IDs and host-specific media URLs",
+			"known MCP backup and timestamp metadata",
+		],
+		identity: {
+			changed_fields: changedFields(stagingIdentity, liveIdentity),
+			staging: stagingIdentity,
+			live: liveIdentity,
+		},
+		publication: {
+			changed_fields: changedFields(staging.publication, live.publication),
+			staging: staging.publication,
+			live: live.publication,
+		},
+		content: {
+			changed_fields: changedFields(staging.content, live.content),
+			staging: staging.content,
+			live: live.content,
+		},
+		commerce: {
+			changed_fields: changedFields(staging.commerce, live.commerce),
+			staging: staging.commerce,
+			live: live.commerce,
+		},
+		taxonomy: {
+			changed: JSON.stringify(stagingTaxonomy) !== JSON.stringify(liveTaxonomy),
+			staging: stagingTaxonomy,
+			live: liveTaxonomy,
+		},
+		media: {
+			changed: JSON.stringify(stagingMedia) !== JSON.stringify(liveMedia),
+			staging: stagingMedia,
+			live: liveMedia,
+		},
+		metadata: metadataDiff(staging.metadata, live.metadata),
+	};
+	const equivalent =
+		sections.identity.changed_fields.length === 0 &&
+		sections.publication.changed_fields.length === 0 &&
+		sections.content.changed_fields.length === 0 &&
+		sections.commerce.changed_fields.length === 0 &&
+		sections.taxonomy.changed === false &&
+		sections.media.changed === false &&
+		sections.metadata.changed_keys.length === 0 &&
+		sections.metadata.only_staging.length === 0 &&
+		sections.metadata.only_live.length === 0;
+	return { equivalent, ...sections };
 }
 
 function toolResult(value: unknown) {
-	return {
-		content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
-	};
+	return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 
 function toolError(error: unknown) {
 	return {
-		content: [
-			{
-				type: "text" as const,
-				text: error instanceof Error ? error.message : String(error),
-			},
-		],
+		content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
 		isError: true,
+	};
+}
+
+const inputSchema = z.object({
+	action: z.enum([
+		"inspect_environment",
+		"manifest",
+		"compare",
+		"preview_bootstrap",
+		"apply_bootstrap",
+	]).optional(),
+	environment: z.enum(["staging", "live"]).optional(),
+	product_id: z.number().int().positive().optional(),
+	live_product_id: z.number().int().positive().optional(),
+	staging_product_id: z.number().int().positive().optional(),
+	expected_plan_sha256: z.string().regex(SHA256).optional(),
+	confirmation: z.string().optional(),
+});
+
+function requireNumber(value: number | undefined, label: string) {
+	if (!value) throw new Error(`${label} is required for this action.`);
+	return value;
+}
+
+async function bootstrapPreview(liveProductId: number, stagingProductId?: number) {
+	await Promise.all([environmentContract("live"), environmentContract("staging")]);
+	const exportResponse = await promotionRequest(
+		"live",
+		`product-promotion/products/${liveProductId}/bootstrap-export`,
+	);
+	assertPlugin(exportResponse.payload);
+	if (
+		exportResponse.payload?.read_only !== true ||
+		exportResponse.payload?.write_performed !== false ||
+		!SHA256.test(String(exportResponse.payload?.source_manifest_sha256 ?? "")) ||
+		!SHA256.test(String(exportResponse.payload?.export_sha256 ?? "")) ||
+		exportResponse.payload?.export?.source?.product_id !== liveProductId
+	) {
+		throw new Error("Live bootstrap export failed its read-only contract.");
+	}
+	const previewResponse = await promotionRequest(
+		"staging",
+		"product-promotion/bootstrap/preview",
+		"POST",
+		{
+			export: exportResponse.payload.export,
+			expected_export_sha256: exportResponse.payload.export_sha256,
+			...(stagingProductId ? { destination_product_id: stagingProductId } : {}),
+		},
+	);
+	assertPlugin(previewResponse.payload);
+	if (
+		previewResponse.payload?.preview_only !== true ||
+		previewResponse.payload?.write_performed !== false ||
+		!SHA256.test(String(previewResponse.payload?.plan_sha256 ?? "")) ||
+		previewResponse.payload?.plan?.direction !== "live-to-staging" ||
+		previewResponse.payload?.plan?.forced_destination_state?.status !== "draft" ||
+		previewResponse.payload?.plan?.forced_destination_state?.catalog_visibility !== "hidden"
+	) {
+		throw new Error("Staging bootstrap preview failed its safety contract.");
+	}
+	return {
+		exportPayload: exportResponse.payload,
+		previewPayload: previewResponse.payload,
 	};
 }
 
@@ -144,53 +339,127 @@ export function registerProductPromotionTools(server: McpServer) {
 		"inspect_product_promotion",
 		{
 			description:
-				"Verify the authenticated, read-only Blindmotion product-promotion bridge on staging or live and optionally return one deterministic WooCommerce product manifest. Performs no WordPress or WooCommerce writes.",
-			inputSchema: z.object({
-				environment: z.enum(["staging", "live"]),
-				product_id: z.number().int().positive().optional(),
-			}),
+				"Inspect, compare, preview or explicitly apply the guarded Blindmotion product-promotion workflow. The default and all inspect/manifest/compare/preview actions are read-only. apply_bootstrap is restricted to live-to-staging legacy reconciliation, requires an exact preview hash and confirmation, forces draft/hidden state, verifies media/WAPF/pricing, and never publishes.",
+			inputSchema,
 		},
-		async ({ environment, product_id }) => {
+		async (args) => {
 			try {
-				const environmentResponse = await promotionRequest(
-					environment,
-					"product-promotion/environment",
-				);
-				assertEnvironmentContract(environmentResponse.site, environmentResponse.payload);
-				const environmentResult = {
-					verified: true,
-					write_performed: false,
-					environment,
-					role: environmentResponse.payload.role,
-					environment_id: environmentResponse.payload.environment_id,
-					site_url: environmentResponse.payload.site_url,
-					plugin: environmentResponse.payload.plugin,
-					write_routes_available: false,
-					automatic_sync_hooks_registered: false,
-				};
-				if (product_id === undefined) {
-					return toolResult({ ...environmentResult, manifest: null });
+				const action = args.action ?? (args.product_id ? "manifest" : "inspect_environment");
+				if (action === "inspect_environment") {
+					if (!args.environment) throw new Error("environment is required for inspection.");
+					return toolResult(await environmentContract(args.environment));
 				}
-
-				const { site, payload } = await promotionRequest(
-					environment,
-					`product-promotion/products/${product_id}/manifest`,
+				if (action === "manifest") {
+					if (!args.environment) throw new Error("environment is required for a manifest.");
+					const productId = requireNumber(args.product_id, "product_id");
+					await environmentContract(args.environment);
+					return toolResult(await manifest(args.environment, productId));
+				}
+				if (action === "compare") {
+					const liveId = requireNumber(args.live_product_id, "live_product_id");
+					const stagingId = requireNumber(args.staging_product_id, "staging_product_id");
+					await Promise.all([environmentContract("live"), environmentContract("staging")]);
+					const [live, staging] = await Promise.all([
+						manifest("live", liveId),
+						manifest("staging", stagingId),
+					]);
+					return toolResult({
+						preview_only: true,
+						write_performed: false,
+						live_product_id: liveId,
+						staging_product_id: stagingId,
+						live_manifest_sha256: live.manifest_sha256,
+						staging_manifest_sha256: staging.manifest_sha256,
+						diff: readableDiff(staging, live),
+					});
+				}
+				const liveId = requireNumber(args.live_product_id, "live_product_id");
+				const preview = await bootstrapPreview(liveId, args.staging_product_id);
+				if (action === "preview_bootstrap") {
+					return toolResult({
+						preview_only: true,
+						write_performed: false,
+						plan_sha256: preview.previewPayload.plan_sha256,
+						plan: preview.previewPayload.plan,
+						identity_write_required: preview.exportPayload.export.identity.promotion_key_persisted !== true,
+						required_confirmation: BOOTSTRAP_CONFIRMATION,
+					});
+				}
+				if (action !== "apply_bootstrap") throw new Error("Unsupported product-promotion action.");
+				if (!args.expected_plan_sha256 || args.expected_plan_sha256 !== preview.previewPayload.plan_sha256) {
+					throw new Error("The exact reviewed bootstrap plan hash is required.");
+				}
+				if (args.confirmation !== BOOTSTRAP_CONFIRMATION) {
+					throw new Error(`Exact confirmation required: ${BOOTSTRAP_CONFIRMATION}`);
+				}
+				const source = preview.exportPayload.export;
+				const identityResponse = await promotionRequest(
+					"live",
+					`product-promotion/products/${liveId}/promotion-identity`,
+					"POST",
+					{
+						expected_manifest_sha256: preview.exportPayload.source_manifest_sha256,
+						promotion_key: source.identity.promotion_key,
+						confirmation: IDENTITY_CONFIRMATION,
+					},
 				);
-				assertPluginContract(payload);
+				assertPlugin(identityResponse.payload);
 				if (
-					payload?.write_performed !== false ||
-					payload?.manifest?.identity?.product_id !== product_id ||
-					payload?.manifest?.source?.role !== site.expectedRole ||
-					payload?.manifest?.source?.environment_id !== environment ||
-					typeof payload?.manifest_sha256 !== "string" ||
-					!/^[a-f0-9]{64}$/.test(payload.manifest_sha256)
+					identityResponse.payload?.identity_assigned !== true ||
+					identityResponse.payload?.product_id !== liveId ||
+					identityResponse.payload?.promotion_key !== source.identity.promotion_key
 				) {
-					throw new Error(`${environment} product manifest failed its read-only identity contract.`);
+					throw new Error("Live promotion identity assignment failed verification.");
+				}
+				const applyResponse = await promotionRequest(
+					"staging",
+					"product-promotion/bootstrap/apply",
+					"POST",
+					{
+						export: source,
+						expected_export_sha256: preview.exportPayload.export_sha256,
+						expected_plan_sha256: args.expected_plan_sha256,
+						confirmation: BOOTSTRAP_CONFIRMATION,
+						...(args.staging_product_id ? { destination_product_id: args.staging_product_id } : {}),
+					},
+				);
+				assertPlugin(applyResponse.payload);
+				if (
+					applyResponse.payload?.applied !== true ||
+					applyResponse.payload?.verified !== true ||
+					applyResponse.payload?.write_performed !== true ||
+					applyResponse.payload?.rollback_performed !== false ||
+					applyResponse.payload?.plan_sha256 !== args.expected_plan_sha256 ||
+					applyResponse.payload?.verification?.status !== "draft" ||
+					applyResponse.payload?.verification?.catalog_visibility !== "hidden" ||
+					applyResponse.payload?.verification?.live_domain_references_in_wapf !== 0
+				) {
+					throw new Error("Staging bootstrap apply failed its verification contract.");
+				}
+				const destinationId = Number(applyResponse.payload.destination_product_id);
+				const [liveAfter, stagingAfter] = await Promise.all([
+					manifest("live", liveId),
+					manifest("staging", destinationId),
+				]);
+				if (
+					liveAfter.manifest.identity.promotion_key !== source.identity.promotion_key ||
+					stagingAfter.manifest.identity.promotion_key !== source.identity.promotion_key
+				) {
+					throw new Error("Post-bootstrap promotion identities do not match.");
 				}
 				return toolResult({
-					...environmentResult,
-					manifest_sha256: payload.manifest_sha256,
-					manifest: payload.manifest,
+					applied: true,
+					verified: true,
+					published: false,
+					plan_sha256: args.expected_plan_sha256,
+					live_identity_write_performed: identityResponse.payload.write_performed,
+					destination_product_id: destinationId,
+					created: applyResponse.payload.created,
+					rollback_snapshot_key: applyResponse.payload.rollback_snapshot_key,
+					verification: applyResponse.payload.verification,
+					promotion_key: source.identity.promotion_key,
+					live_manifest_sha256: liveAfter.manifest_sha256,
+					staging_manifest_sha256: stagingAfter.manifest_sha256,
 				});
 			} catch (error) {
 				return toolError(error);
