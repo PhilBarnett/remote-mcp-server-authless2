@@ -2116,8 +2116,6 @@ const googleAdsCampaignChangeSchema = z.object({
 		.max(10),
 });
 
-type GoogleAdsCampaignChangeInput =
-	z.infer<typeof googleAdsCampaignChangeSchema>["changes"][number];
 
 async function getGoogleAdsCampaignControlSnapshot(
 	campaignId: string,
