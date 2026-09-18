@@ -13,11 +13,13 @@ type PromotionSite = {
 };
 
 const PROMOTION_PLUGIN_SLUG = "blindmotion-product-promotion-bridge";
-const PROMOTION_PLUGIN_VERSION = "0.3.0";
+const PROMOTION_PLUGIN_VERSION = "0.3.1";
 const BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP LIVE PRODUCT TO STAGING";
 const IDENTITY_CONFIRMATION = "CONFIRM ASSIGN PROMOTION IDENTITY";
 const MEDIA_CONFIRMATION = "CONFIRM PREPARE BOOTSTRAP MEDIA";
 const FINALIZE_CONFIRMATION = "CONFIRM FINALIZE BOOTSTRAP TO STAGING";
+const ABORT_CONFIRMATION = "CONFIRM ABORT BOOTSTRAP MEDIA";
+const ROLLBACK_CONFIRMATION = "CONFIRM ROLLBACK STAGING BOOTSTRAP";
 const SHA256 = /^[a-f0-9]{64}$/;
 
 function workerEnvironment() {
@@ -282,13 +284,17 @@ const inputSchema = z.object({
 		"begin_bootstrap",
 		"prepare_bootstrap_media",
 		"finalize_bootstrap",
+		"abort_bootstrap_media",
+		"rollback_bootstrap",
 	]).optional(),
 	environment: z.enum(["staging", "live"]).optional(),
 	product_id: z.number().int().positive().optional(),
 	live_product_id: z.number().int().positive().optional(),
 	staging_product_id: z.number().int().positive().optional(),
 	expected_plan_sha256: z.string().regex(SHA256).optional(),
+	expected_current_manifest_sha256: z.string().regex(SHA256).optional(),
 	session_id: z.string().uuid().optional(),
+	rollback_snapshot_key: z.string().regex(/^blindmotion_promotion_snapshot_[a-f0-9]{32}$/).optional(),
 	confirmation: z.string().optional(),
 });
 
@@ -345,12 +351,50 @@ export function registerProductPromotionTools(server: McpServer) {
 		"inspect_product_promotion",
 		{
 			description:
-				"Inspect, compare, preview or explicitly apply the guarded Blindmotion product-promotion workflow. The default and all inspect/manifest/compare/preview actions are read-only. apply_bootstrap is restricted to live-to-staging legacy reconciliation, requires an exact preview hash and confirmation, forces draft/hidden state, verifies media/WAPF/pricing, and never publishes.",
+				"Inspect, compare, preview, bootstrap, abort or roll back the guarded Blindmotion product-promotion workflow. Read actions never write. Bootstrap is live-to-staging legacy reconciliation only, uses hash-locked resumable media preparation, forces draft/hidden state, verifies content/media/WAPF/pricing, and never publishes.",
 			inputSchema,
 		},
 		async (args) => {
 			try {
 				const action = args.action ?? (args.product_id ? "manifest" : "inspect_environment");
+				if (action === "abort_bootstrap_media") {
+					if (!args.session_id || !args.expected_plan_sha256) {
+						throw new Error("session_id and expected_plan_sha256 are required for media abort.");
+					}
+					if (args.confirmation !== ABORT_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${ABORT_CONFIRMATION}`);
+					}
+					await environmentContract("staging");
+					const response = await promotionRequest("staging", "product-promotion/bootstrap/media/abort", "POST", {
+						session_id: args.session_id,
+						expected_plan_sha256: args.expected_plan_sha256,
+						confirmation: ABORT_CONFIRMATION,
+					});
+					assertPlugin(response.payload);
+					if (response.payload?.aborted !== true || response.payload?.product_write_performed !== false) {
+						throw new Error("Bootstrap media abort failed its safety contract.");
+					}
+					return toolResult(response.payload);
+				}
+				if (action === "rollback_bootstrap") {
+					if (!args.rollback_snapshot_key || !args.expected_current_manifest_sha256) {
+						throw new Error("rollback_snapshot_key and expected_current_manifest_sha256 are required for rollback.");
+					}
+					if (args.confirmation !== ROLLBACK_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${ROLLBACK_CONFIRMATION}`);
+					}
+					await environmentContract("staging");
+					const response = await promotionRequest("staging", "product-promotion/bootstrap/rollback", "POST", {
+						snapshot_key: args.rollback_snapshot_key,
+						expected_current_manifest_sha256: args.expected_current_manifest_sha256,
+						confirmation: ROLLBACK_CONFIRMATION,
+					});
+					assertPlugin(response.payload);
+					if (response.payload?.rolled_back !== true || response.payload?.write_performed !== true) {
+						throw new Error("Bootstrap rollback failed its safety contract.");
+					}
+					return toolResult(response.payload);
+				}
 				if (action === "inspect_environment") {
 					if (!args.environment) throw new Error("environment is required for inspection.");
 					return toolResult(await environmentContract(args.environment));
@@ -435,7 +479,9 @@ export function registerProductPromotionTools(server: McpServer) {
 						applyResponse.payload?.plan_sha256 !== args.expected_plan_sha256 ||
 						applyResponse.payload?.verification?.status !== "draft" ||
 						applyResponse.payload?.verification?.catalog_visibility !== "hidden" ||
-						applyResponse.payload?.verification?.live_domain_references_in_wapf !== 0
+						applyResponse.payload?.verification?.live_domain_references_in_wapf !== 0 ||
+						applyResponse.payload?.verification?.live_domain_references_total !== 0 ||
+						!SHA256.test(String(applyResponse.payload?.verification?.wapf_semantic_sha256 ?? ""))
 					) {
 						throw new Error("Staging bootstrap finalization failed its verification contract.");
 					}
