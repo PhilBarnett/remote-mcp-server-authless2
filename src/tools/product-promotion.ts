@@ -13,9 +13,11 @@ type PromotionSite = {
 };
 
 const PROMOTION_PLUGIN_SLUG = "blindmotion-product-promotion-bridge";
-const PROMOTION_PLUGIN_VERSION = "0.2.1";
+const PROMOTION_PLUGIN_VERSION = "0.3.0";
 const BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP LIVE PRODUCT TO STAGING";
 const IDENTITY_CONFIRMATION = "CONFIRM ASSIGN PROMOTION IDENTITY";
+const MEDIA_CONFIRMATION = "CONFIRM PREPARE BOOTSTRAP MEDIA";
+const FINALIZE_CONFIRMATION = "CONFIRM FINALIZE BOOTSTRAP TO STAGING";
 const SHA256 = /^[a-f0-9]{64}$/;
 
 function workerEnvironment() {
@@ -114,6 +116,7 @@ async function environmentContract(environment: PromotionEnvironment) {
 		response.payload?.write_policy?.automatic_sync !== false ||
 		response.payload?.write_policy?.bootstrap_direction !== "live-to-staging-only" ||
 		response.payload?.write_policy?.bootstrap_destination_state !== "draft-hidden" ||
+		response.payload?.write_policy?.resumable_media_batches !== true ||
 		response.payload?.write_policy?.publishing_supported !== false ||
 		returnedUrl.protocol !== "https:" ||
 		returnedUrl.hostname !== response.site.expectedHost
@@ -276,13 +279,16 @@ const inputSchema = z.object({
 		"manifest",
 		"compare",
 		"preview_bootstrap",
-		"apply_bootstrap",
+		"begin_bootstrap",
+		"prepare_bootstrap_media",
+		"finalize_bootstrap",
 	]).optional(),
 	environment: z.enum(["staging", "live"]).optional(),
 	product_id: z.number().int().positive().optional(),
 	live_product_id: z.number().int().positive().optional(),
 	staging_product_id: z.number().int().positive().optional(),
 	expected_plan_sha256: z.string().regex(SHA256).optional(),
+	session_id: z.string().uuid().optional(),
 	confirmation: z.string().optional(),
 });
 
@@ -373,6 +379,91 @@ export function registerProductPromotionTools(server: McpServer) {
 						diff: readableDiff(staging, live),
 					});
 				}
+				if (action === "prepare_bootstrap_media") {
+					if (!args.session_id || !args.expected_plan_sha256) {
+						throw new Error("session_id and expected_plan_sha256 are required for media preparation.");
+					}
+					if (args.confirmation !== MEDIA_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${MEDIA_CONFIRMATION}`);
+					}
+					await environmentContract("staging");
+					const batch = await promotionRequest(
+						"staging",
+						"product-promotion/bootstrap/media/batch",
+						"POST",
+						{
+							session_id: args.session_id,
+							expected_plan_sha256: args.expected_plan_sha256,
+							confirmation: MEDIA_CONFIRMATION,
+						},
+					);
+					assertPlugin(batch.payload);
+					if (
+						batch.payload?.batch_prepared !== true ||
+						batch.payload?.product_write_performed !== false ||
+						batch.payload?.session_id !== args.session_id ||
+						batch.payload?.plan_sha256 !== args.expected_plan_sha256
+					) {
+						throw new Error("Bootstrap media batch failed its safety contract.");
+					}
+					return toolResult(batch.payload);
+				}
+				if (action === "finalize_bootstrap") {
+					const liveId = requireNumber(args.live_product_id, "live_product_id");
+					if (!args.session_id || !args.expected_plan_sha256) {
+						throw new Error("session_id and expected_plan_sha256 are required for finalization.");
+					}
+					if (args.confirmation !== FINALIZE_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${FINALIZE_CONFIRMATION}`);
+					}
+					const applyResponse = await promotionRequest(
+						"staging",
+						"product-promotion/bootstrap/apply",
+						"POST",
+						{
+							session_id: args.session_id,
+							expected_plan_sha256: args.expected_plan_sha256,
+							confirmation: FINALIZE_CONFIRMATION,
+						},
+					);
+					assertPlugin(applyResponse.payload);
+					if (
+						applyResponse.payload?.applied !== true ||
+						applyResponse.payload?.verified !== true ||
+						applyResponse.payload?.write_performed !== true ||
+						applyResponse.payload?.rollback_performed !== false ||
+						applyResponse.payload?.plan_sha256 !== args.expected_plan_sha256 ||
+						applyResponse.payload?.verification?.status !== "draft" ||
+						applyResponse.payload?.verification?.catalog_visibility !== "hidden" ||
+						applyResponse.payload?.verification?.live_domain_references_in_wapf !== 0
+					) {
+						throw new Error("Staging bootstrap finalization failed its verification contract.");
+					}
+					const destinationId = Number(applyResponse.payload.destination_product_id);
+					const [liveAfter, stagingAfter] = await Promise.all([
+						manifest("live", liveId),
+						manifest("staging", destinationId),
+					]);
+					if (
+						liveAfter.manifest.identity.promotion_key === "" ||
+						liveAfter.manifest.identity.promotion_key !== stagingAfter.manifest.identity.promotion_key
+					) {
+						throw new Error("Post-bootstrap promotion identities do not match.");
+					}
+					return toolResult({
+						applied: true,
+						verified: true,
+						published: false,
+						plan_sha256: args.expected_plan_sha256,
+						destination_product_id: destinationId,
+						created: applyResponse.payload.created,
+						rollback_snapshot_key: applyResponse.payload.rollback_snapshot_key,
+						verification: applyResponse.payload.verification,
+						promotion_key: liveAfter.manifest.identity.promotion_key,
+						live_manifest_sha256: liveAfter.manifest_sha256,
+						staging_manifest_sha256: stagingAfter.manifest_sha256,
+					});
+				}
 				const liveId = requireNumber(args.live_product_id, "live_product_id");
 				const preview = await bootstrapPreview(liveId, args.staging_product_id);
 				if (action === "preview_bootstrap") {
@@ -385,7 +476,7 @@ export function registerProductPromotionTools(server: McpServer) {
 						required_confirmation: BOOTSTRAP_CONFIRMATION,
 					});
 				}
-				if (action !== "apply_bootstrap") throw new Error("Unsupported product-promotion action.");
+				if (action !== "begin_bootstrap") throw new Error("Unsupported product-promotion action.");
 				if (!args.expected_plan_sha256 || args.expected_plan_sha256 !== preview.previewPayload.plan_sha256) {
 					throw new Error("The exact reviewed bootstrap plan hash is required.");
 				}
@@ -411,9 +502,9 @@ export function registerProductPromotionTools(server: McpServer) {
 				) {
 					throw new Error("Live promotion identity assignment failed verification.");
 				}
-				const applyResponse = await promotionRequest(
+				const beginResponse = await promotionRequest(
 					"staging",
-					"product-promotion/bootstrap/apply",
+					"product-promotion/bootstrap/media/begin",
 					"POST",
 					{
 						export: source,
@@ -423,43 +514,29 @@ export function registerProductPromotionTools(server: McpServer) {
 						...(args.staging_product_id ? { destination_product_id: args.staging_product_id } : {}),
 					},
 				);
-				assertPlugin(applyResponse.payload);
+				assertPlugin(beginResponse.payload);
 				if (
-					applyResponse.payload?.applied !== true ||
-					applyResponse.payload?.verified !== true ||
-					applyResponse.payload?.write_performed !== true ||
-					applyResponse.payload?.rollback_performed !== false ||
-					applyResponse.payload?.plan_sha256 !== args.expected_plan_sha256 ||
-					applyResponse.payload?.verification?.status !== "draft" ||
-					applyResponse.payload?.verification?.catalog_visibility !== "hidden" ||
-					applyResponse.payload?.verification?.live_domain_references_in_wapf !== 0
+					beginResponse.payload?.session_created !== true ||
+					beginResponse.payload?.write_performed !== true ||
+					beginResponse.payload?.product_write_performed !== false ||
+					beginResponse.payload?.plan_sha256 !== args.expected_plan_sha256 ||
+					typeof beginResponse.payload?.session_id !== "string"
 				) {
-					throw new Error("Staging bootstrap apply failed its verification contract.");
-				}
-				const destinationId = Number(applyResponse.payload.destination_product_id);
-				const [liveAfter, stagingAfter] = await Promise.all([
-					manifest("live", liveId),
-					manifest("staging", destinationId),
-				]);
-				if (
-					liveAfter.manifest.identity.promotion_key !== source.identity.promotion_key ||
-					stagingAfter.manifest.identity.promotion_key !== source.identity.promotion_key
-				) {
-					throw new Error("Post-bootstrap promotion identities do not match.");
+					throw new Error("Staging bootstrap session failed its safety contract.");
 				}
 				return toolResult({
-					applied: true,
-					verified: true,
-					published: false,
+					session_created: true,
+					product_write_performed: false,
 					plan_sha256: args.expected_plan_sha256,
 					live_identity_write_performed: identityResponse.payload.write_performed,
-					destination_product_id: destinationId,
-					created: applyResponse.payload.created,
-					rollback_snapshot_key: applyResponse.payload.rollback_snapshot_key,
-					verification: applyResponse.payload.verification,
+					session_id: beginResponse.payload.session_id,
+					reusable_verified_assets: beginResponse.payload.reusable_verified_assets,
+					pending_assets: beginResponse.payload.pending_assets,
+					batch_size: beginResponse.payload.batch_size,
+					expires_at: beginResponse.payload.expires_at,
 					promotion_key: source.identity.promotion_key,
-					live_manifest_sha256: liveAfter.manifest_sha256,
-					staging_manifest_sha256: stagingAfter.manifest_sha256,
+					next_action: "prepare_bootstrap_media",
+					required_confirmation: MEDIA_CONFIRMATION,
 				});
 			} catch (error) {
 				return toolError(error);
