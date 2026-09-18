@@ -13,7 +13,7 @@ type PromotionSite = {
 };
 
 const PROMOTION_PLUGIN_SLUG = "blindmotion-product-promotion-bridge";
-const PROMOTION_PLUGIN_VERSION = "0.4.2";
+const PROMOTION_PLUGIN_VERSION = "0.4.3";
 const BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP LIVE PRODUCT TO STAGING";
 const IDENTITY_CONFIRMATION = "CONFIRM ASSIGN PROMOTION IDENTITY";
 const MEDIA_CONFIRMATION = "CONFIRM PREPARE BOOTSTRAP MEDIA";
@@ -25,6 +25,7 @@ const PROMOTION_MEDIA_CONFIRMATION = "CONFIRM PREPARE PROMOTION MEDIA";
 const PROMOTION_FINALIZE_CONFIRMATION = "CONFIRM FINALIZE PROMOTION TO LIVE";
 const PROMOTION_ABORT_CONFIRMATION = "CONFIRM ABORT PROMOTION MEDIA";
 const PROMOTION_ROLLBACK_CONFIRMATION = "CONFIRM ROLLBACK LIVE PROMOTION";
+const STAGING_WAPF_COPY_CONFIRMATION = "CONFIRM COPY STAGING WAPF CONFIGURATION";
 const SHA256 = /^[a-f0-9]{64}$/;
 
 function workerEnvironment() {
@@ -315,11 +316,15 @@ const inputSchema = z.object({
 		"finalize_promotion",
 		"abort_promotion_media",
 		"rollback_promotion",
+		"preview_staging_wapf_copy",
+		"apply_staging_wapf_copy",
 	]).optional(),
 	environment: z.enum(["staging", "live"]).optional(),
 	product_id: z.number().int().positive().optional(),
 	live_product_id: z.number().int().positive().optional(),
 	staging_product_id: z.number().int().positive().optional(),
+	source_product_id: z.number().int().positive().optional(),
+	target_product_id: z.number().int().positive().optional(),
 	expected_plan_sha256: z.string().regex(SHA256).optional(),
 	expected_current_manifest_sha256: z.string().regex(SHA256).optional(),
 	session_id: z.string().uuid().optional(),
@@ -427,6 +432,61 @@ export function registerProductPromotionTools(server: McpServer) {
 		async (args) => {
 			try {
 				const action = args.action ?? (args.product_id ? "manifest" : "inspect_environment");
+				if (action === "preview_staging_wapf_copy" || action === "apply_staging_wapf_copy") {
+					const sourceId = requireNumber(args.source_product_id, "source_product_id");
+					const targetId = requireNumber(args.target_product_id, "target_product_id");
+					await environmentContract("staging");
+					if (action === "preview_staging_wapf_copy") {
+						const response = await promotionRequest(
+							"staging",
+							"product-promotion/staging-wapf-copy/preview",
+							"POST",
+							{ source_product_id: sourceId, target_product_id: targetId },
+						);
+						assertPlugin(response.payload);
+						if (
+							response.payload?.preview_only !== true ||
+							response.payload?.write_performed !== false ||
+							!SHA256.test(String(response.payload?.plan_sha256 ?? ""))
+						) {
+							throw new Error("Staging WAPF-copy preview failed its read-only contract.");
+						}
+						return toolResult({
+							...response.payload,
+							required_confirmation: STAGING_WAPF_COPY_CONFIRMATION,
+						});
+					}
+					if (!args.expected_plan_sha256) {
+						throw new Error("expected_plan_sha256 is required for staging WAPF copy.");
+					}
+					if (args.confirmation !== STAGING_WAPF_COPY_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${STAGING_WAPF_COPY_CONFIRMATION}`);
+					}
+					const response = await promotionRequest(
+						"staging",
+						"product-promotion/staging-wapf-copy/apply",
+						"POST",
+						{
+							source_product_id: sourceId,
+							target_product_id: targetId,
+							expected_plan_sha256: args.expected_plan_sha256,
+							confirmation: STAGING_WAPF_COPY_CONFIRMATION,
+						},
+					);
+					assertPlugin(response.payload);
+					if (
+						response.payload?.applied !== true ||
+						response.payload?.verified !== true ||
+						response.payload?.write_performed !== true ||
+						response.payload?.rollback_performed !== false ||
+						response.payload?.target_product_id !== targetId ||
+						response.payload?.verification?.live_domain_references_total !== 0 ||
+						!SHA256.test(String(response.payload?.verification?.wapf_semantic_sha256 ?? ""))
+					) {
+						throw new Error("Staging WAPF copy failed its verification contract.");
+					}
+					return toolResult(response.payload);
+				}
 				if (action === "abort_promotion_media") {
 					if (!args.session_id || !args.expected_plan_sha256) {
 						throw new Error("session_id and expected_plan_sha256 are required for promotion media abort.");
