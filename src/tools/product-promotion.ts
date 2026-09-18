@@ -141,46 +141,13 @@ function toolError(error: unknown) {
 
 export function registerProductPromotionTools(server: McpServer) {
 	server.registerTool(
-		"inspect_product_promotion_environment",
+		"inspect_product_promotion",
 		{
 			description:
-				"Verify the authenticated, read-only Blindmotion product-promotion bridge and exact source/target identity on staging or live. Performs no WordPress or WooCommerce writes.",
+				"Verify the authenticated, read-only Blindmotion product-promotion bridge on staging or live and optionally return one deterministic WooCommerce product manifest. Performs no WordPress or WooCommerce writes.",
 			inputSchema: z.object({
 				environment: z.enum(["staging", "live"]),
-			}),
-		},
-		async ({ environment }) => {
-			try {
-				const { site, payload } = await promotionRequest(
-					environment,
-					"product-promotion/environment",
-				);
-				assertEnvironmentContract(site, payload);
-				return toolResult({
-					verified: true,
-					write_performed: false,
-					environment,
-					role: payload.role,
-					environment_id: payload.environment_id,
-					site_url: payload.site_url,
-					plugin: payload.plugin,
-					write_routes_available: false,
-					automatic_sync_hooks_registered: false,
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"inspect_product_promotion_manifest",
-		{
-			description:
-				"Read and verify a deterministic WooCommerce product manifest from the exact Blindmotion staging or live promotion bridge. Returns identity, publication state, pricing, taxonomy, media integrity and metadata hashes; performs no writes.",
-			inputSchema: z.object({
-				environment: z.enum(["staging", "live"]),
-				product_id: z.number().int().positive(),
+				product_id: z.number().int().positive().optional(),
 			}),
 		},
 		async ({ environment, product_id }) => {
@@ -190,6 +157,20 @@ export function registerProductPromotionTools(server: McpServer) {
 					"product-promotion/environment",
 				);
 				assertEnvironmentContract(environmentResponse.site, environmentResponse.payload);
+				const environmentResult = {
+					verified: true,
+					write_performed: false,
+					environment,
+					role: environmentResponse.payload.role,
+					environment_id: environmentResponse.payload.environment_id,
+					site_url: environmentResponse.payload.site_url,
+					plugin: environmentResponse.payload.plugin,
+					write_routes_available: false,
+					automatic_sync_hooks_registered: false,
+				};
+				if (product_id === undefined) {
+					return toolResult({ ...environmentResult, manifest: null });
+				}
 
 				const { site, payload } = await promotionRequest(
 					environment,
@@ -207,9 +188,7 @@ export function registerProductPromotionTools(server: McpServer) {
 					throw new Error(`${environment} product manifest failed its read-only identity contract.`);
 				}
 				return toolResult({
-					verified: true,
-					write_performed: false,
-					environment,
+					...environmentResult,
 					manifest_sha256: payload.manifest_sha256,
 					manifest: payload.manifest,
 				});
