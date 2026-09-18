@@ -305,3 +305,23 @@ Restart Claude and you should see the tools become available.
 - Product IDs, names, metadata IDs, field IDs, choice slugs, axes and all monetary values are runtime parameters; no product-specific pricing is hard-coded.
 
 <!-- Deployment refresh trigger: 2026-09-15T08:05:29.998Z -->
+
+## Staging-to-live product promotion: read-only foundation
+
+The product-promotion integration is split between a narrowly scoped WordPress bridge
+and a modular MCP tool registration in `src/tools/product-promotion.ts`.
+
+- `inspect_product_promotion` verifies the authenticated bridge identity, exact
+  staging/source or live/target role, approved HTTPS origin and absence of write routes
+  or automatic sync hooks. An optional `product_id` returns the deterministic product
+  manifest containing identity, publication state, pricing, taxonomy, media integrity
+  and metadata hashes.
+
+Both tools are read-only. They cannot create, update, publish, delete, upload or
+synchronise products.
+
+Live reuses `WC_SITE`, `WP_USERNAME` and `WP_APPLICATION_PASSWORD`. Staging
+requires the separate Cloudflare bindings `WC_STAGING_SITE`,
+`WP_STAGING_USERNAME` and `WP_STAGING_APPLICATION_PASSWORD`. Site origins and
+bridge roles are independently verified before a manifest is accepted.
+

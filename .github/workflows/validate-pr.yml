@@ -1,0 +1,45 @@
+name: Validate Blindmotion MCP PR
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - ".github/workflows/validate-pr.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Type-check, lint and audit tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          npm install
+          npm install --no-save "@oxlint/binding-linux-x64-gnu@$(node -p "require('./node_modules/oxlint/package.json').version")"
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Enforce MCP tool ceiling
+        run: npm run audit:mcp-tools -- --max 95
