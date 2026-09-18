@@ -13,13 +13,18 @@ type PromotionSite = {
 };
 
 const PROMOTION_PLUGIN_SLUG = "blindmotion-product-promotion-bridge";
-const PROMOTION_PLUGIN_VERSION = "0.3.4";
+const PROMOTION_PLUGIN_VERSION = "0.4.0";
 const BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP LIVE PRODUCT TO STAGING";
 const IDENTITY_CONFIRMATION = "CONFIRM ASSIGN PROMOTION IDENTITY";
 const MEDIA_CONFIRMATION = "CONFIRM PREPARE BOOTSTRAP MEDIA";
 const FINALIZE_CONFIRMATION = "CONFIRM FINALIZE BOOTSTRAP TO STAGING";
 const ABORT_CONFIRMATION = "CONFIRM ABORT BOOTSTRAP MEDIA";
 const ROLLBACK_CONFIRMATION = "CONFIRM ROLLBACK STAGING BOOTSTRAP";
+const PROMOTION_CONFIRMATION = "CONFIRM PROMOTE STAGING PRODUCT TO LIVE";
+const PROMOTION_MEDIA_CONFIRMATION = "CONFIRM PREPARE PROMOTION MEDIA";
+const PROMOTION_FINALIZE_CONFIRMATION = "CONFIRM FINALIZE PROMOTION TO LIVE";
+const PROMOTION_ABORT_CONFIRMATION = "CONFIRM ABORT PROMOTION MEDIA";
+const PROMOTION_ROLLBACK_CONFIRMATION = "CONFIRM ROLLBACK LIVE PROMOTION";
 const SHA256 = /^[a-f0-9]{64}$/;
 
 function workerEnvironment() {
@@ -118,6 +123,9 @@ async function environmentContract(environment: PromotionEnvironment) {
 		response.payload?.write_policy?.automatic_sync !== false ||
 		response.payload?.write_policy?.bootstrap_direction !== "live-to-staging-only" ||
 		response.payload?.write_policy?.bootstrap_destination_state !== "draft-hidden" ||
+		response.payload?.write_policy?.promotion_direction !== "staging-to-live-only" ||
+		response.payload?.write_policy?.promotion_destination_match !== "stable-identity-only" ||
+		response.payload?.write_policy?.promotion_publication_state !== "preserved" ||
 		response.payload?.write_policy?.resumable_media_batches !== true ||
 		response.payload?.write_policy?.publishing_supported !== false ||
 		returnedUrl.protocol !== "https:" ||
@@ -189,7 +197,11 @@ function metadataDiff(staging: Record<string, any> = {}, live: Record<string, an
 	const stagingKeys = Object.keys(staging).filter((key) => !noise(key));
 	const liveKeys = Object.keys(live).filter((key) => !noise(key));
 	const common = stagingKeys.filter((key) => liveKeys.includes(key));
-	const changed = common.filter((key) => JSON.stringify(staging[key]) !== JSON.stringify(live[key]));
+	const portable = (entry: Record<string, unknown> = {}) => ({
+		row_count: entry.row_count,
+		portable_value_sha256: entry.portable_value_sha256,
+	});
+	const changed = common.filter((key) => JSON.stringify(portable(staging[key])) !== JSON.stringify(portable(live[key])));
 	return {
 		staging_key_count: stagingKeys.length,
 		live_key_count: liveKeys.length,
@@ -211,12 +223,23 @@ function readableDiff(stagingPayload: any, livePayload: any) {
 	const liveTaxonomy = normalizedTaxonomy(live.taxonomy);
 	const stagingMedia = normalizedMedia(staging.media);
 	const liveMedia = normalizedMedia(live.media);
+	const normalizedContent = (content: Record<string, unknown>) => ({
+		name: content.name,
+		portable_description_sha256: content.portable_description_sha256,
+		portable_description_bytes: content.portable_description_bytes,
+		portable_short_description_sha256: content.portable_short_description_sha256,
+		portable_short_description_bytes: content.portable_short_description_bytes,
+		menu_order: content.menu_order,
+	});
+	const stagingContent = normalizedContent(staging.content);
+	const liveContent = normalizedContent(live.content);
 	const sections = {
 		environment_noise_excluded: [
 			"source role, environment ID and site URL",
 			"database product IDs",
 			"taxonomy term IDs",
 			"attachment IDs and host-specific media URLs",
+			"origin-specific content and metadata fingerprints",
 			"known MCP backup and timestamp metadata",
 		],
 		identity: {
@@ -230,9 +253,9 @@ function readableDiff(stagingPayload: any, livePayload: any) {
 			live: live.publication,
 		},
 		content: {
-			changed_fields: changedFields(staging.content, live.content),
-			staging: staging.content,
-			live: live.content,
+			changed_fields: changedFields(stagingContent, liveContent),
+			staging: stagingContent,
+			live: liveContent,
 		},
 		commerce: {
 			changed_fields: changedFields(staging.commerce, live.commerce),
@@ -286,6 +309,12 @@ const inputSchema = z.object({
 		"finalize_bootstrap",
 		"abort_bootstrap_media",
 		"rollback_bootstrap",
+		"preview_promotion",
+		"begin_promotion",
+		"prepare_promotion_media",
+		"finalize_promotion",
+		"abort_promotion_media",
+		"rollback_promotion",
 	]).optional(),
 	environment: z.enum(["staging", "live"]).optional(),
 	product_id: z.number().int().positive().optional(),
@@ -346,17 +375,220 @@ async function bootstrapPreview(liveProductId: number, stagingProductId?: number
 	};
 }
 
+async function promotionPreview(stagingProductId: number) {
+	await Promise.all([environmentContract("staging"), environmentContract("live")]);
+	const exportResponse = await promotionRequest(
+		"staging",
+		`product-promotion/products/${stagingProductId}/promotion-export`,
+	);
+	assertPlugin(exportResponse.payload);
+	if (
+		exportResponse.payload?.read_only !== true ||
+		exportResponse.payload?.write_performed !== false ||
+		!SHA256.test(String(exportResponse.payload?.source_manifest_sha256 ?? "")) ||
+		!SHA256.test(String(exportResponse.payload?.export_sha256 ?? "")) ||
+		exportResponse.payload?.export?.source?.product_id !== stagingProductId ||
+		exportResponse.payload?.export?.identity?.promotion_key_persisted !== true
+	) {
+		throw new Error("Staging promotion export failed its read-only contract.");
+	}
+	const previewResponse = await promotionRequest(
+		"live",
+		"product-promotion/promotion/preview",
+		"POST",
+		{
+			export: exportResponse.payload.export,
+			expected_export_sha256: exportResponse.payload.export_sha256,
+		},
+	);
+	assertPlugin(previewResponse.payload);
+	if (
+		previewResponse.payload?.preview_only !== true ||
+		previewResponse.payload?.write_performed !== false ||
+		!SHA256.test(String(previewResponse.payload?.plan_sha256 ?? "")) ||
+		previewResponse.payload?.plan?.direction !== "staging-to-live" ||
+		previewResponse.payload?.plan?.operation !== "update-existing-identity-match" ||
+		previewResponse.payload?.plan?.publishing_performed !== false ||
+		typeof previewResponse.payload?.plan?.preserved_publication_state?.status !== "string"
+	) {
+		throw new Error("Live promotion preview failed its safety contract.");
+	}
+	return { exportPayload: exportResponse.payload, previewPayload: previewResponse.payload };
+}
+
 export function registerProductPromotionTools(server: McpServer) {
 	server.registerTool(
 		"inspect_product_promotion",
 		{
 			description:
-				"Inspect, compare, preview, bootstrap, abort or roll back the guarded Blindmotion product-promotion workflow. Read actions never write. Bootstrap is live-to-staging legacy reconciliation only, uses hash-locked resumable media preparation, forces draft/hidden state, verifies content/media/WAPF/pricing, and never publishes.",
+				"Inspect and compare Blindmotion products; perform one-time live-to-staging bootstrap; or preview, prepare, finalize and roll back identity-matched staging-to-live promotion. Writes are hash-locked and resumable, verify content/media/metadata/WAPF/pricing, preserve live publication state, and never publish automatically.",
 			inputSchema,
 		},
 		async (args) => {
 			try {
 				const action = args.action ?? (args.product_id ? "manifest" : "inspect_environment");
+				if (action === "abort_promotion_media") {
+					if (!args.session_id || !args.expected_plan_sha256) {
+						throw new Error("session_id and expected_plan_sha256 are required for promotion media abort.");
+					}
+					if (args.confirmation !== PROMOTION_ABORT_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${PROMOTION_ABORT_CONFIRMATION}`);
+					}
+					await environmentContract("live");
+					const response = await promotionRequest("live", "product-promotion/promotion/media/abort", "POST", {
+						session_id: args.session_id,
+						expected_plan_sha256: args.expected_plan_sha256,
+						confirmation: PROMOTION_ABORT_CONFIRMATION,
+					});
+					assertPlugin(response.payload);
+					if (response.payload?.aborted !== true || response.payload?.product_write_performed !== false) {
+						throw new Error("Promotion media abort failed its safety contract.");
+					}
+					return toolResult(response.payload);
+				}
+				if (action === "rollback_promotion") {
+					if (!args.rollback_snapshot_key || !args.expected_current_manifest_sha256) {
+						throw new Error("rollback_snapshot_key and expected_current_manifest_sha256 are required for promotion rollback.");
+					}
+					if (args.confirmation !== PROMOTION_ROLLBACK_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${PROMOTION_ROLLBACK_CONFIRMATION}`);
+					}
+					await environmentContract("live");
+					const response = await promotionRequest("live", "product-promotion/promotion/rollback", "POST", {
+						snapshot_key: args.rollback_snapshot_key,
+						expected_current_manifest_sha256: args.expected_current_manifest_sha256,
+						confirmation: PROMOTION_ROLLBACK_CONFIRMATION,
+					});
+					assertPlugin(response.payload);
+					if (response.payload?.rolled_back !== true || response.payload?.write_performed !== true) {
+						throw new Error("Live promotion rollback failed its safety contract.");
+					}
+					return toolResult(response.payload);
+				}
+				if (action === "prepare_promotion_media") {
+					if (!args.session_id || !args.expected_plan_sha256) {
+						throw new Error("session_id and expected_plan_sha256 are required for promotion media preparation.");
+					}
+					if (args.confirmation !== PROMOTION_MEDIA_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${PROMOTION_MEDIA_CONFIRMATION}`);
+					}
+					await environmentContract("live");
+					const batch = await promotionRequest("live", "product-promotion/promotion/media/batch", "POST", {
+						session_id: args.session_id,
+						expected_plan_sha256: args.expected_plan_sha256,
+						confirmation: PROMOTION_MEDIA_CONFIRMATION,
+					});
+					assertPlugin(batch.payload);
+					if (
+						batch.payload?.batch_prepared !== true ||
+						batch.payload?.product_write_performed !== false ||
+						batch.payload?.session_id !== args.session_id ||
+						batch.payload?.plan_sha256 !== args.expected_plan_sha256
+					) {
+						throw new Error("Promotion media batch failed its safety contract.");
+					}
+					return toolResult(batch.payload);
+				}
+				if (action === "finalize_promotion") {
+					const stagingId = requireNumber(args.staging_product_id, "staging_product_id");
+					if (!args.session_id || !args.expected_plan_sha256) {
+						throw new Error("session_id and expected_plan_sha256 are required for promotion finalization.");
+					}
+					if (args.confirmation !== PROMOTION_FINALIZE_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${PROMOTION_FINALIZE_CONFIRMATION}`);
+					}
+					const applyResponse = await promotionRequest("live", "product-promotion/promotion/apply", "POST", {
+						session_id: args.session_id,
+						expected_plan_sha256: args.expected_plan_sha256,
+						confirmation: PROMOTION_FINALIZE_CONFIRMATION,
+					});
+					assertPlugin(applyResponse.payload);
+					if (
+						applyResponse.payload?.applied !== true ||
+						applyResponse.payload?.verified !== true ||
+						applyResponse.payload?.published !== false ||
+						applyResponse.payload?.publication_state_preserved !== true ||
+						applyResponse.payload?.rollback_performed !== false ||
+						applyResponse.payload?.verification?.publication_state_preserved !== true ||
+						applyResponse.payload?.verification?.staging_origin_references_total !== 0 ||
+						!SHA256.test(String(applyResponse.payload?.verification?.metadata_semantic_sha256 ?? ""))
+					) {
+						throw new Error("Live promotion finalization failed its verification contract.");
+					}
+					const liveId = Number(applyResponse.payload.destination_product_id);
+					const [stagingAfter, liveAfter] = await Promise.all([
+						manifest("staging", stagingId),
+						manifest("live", liveId),
+					]);
+					if (
+						stagingAfter.manifest.identity.promotion_key === "" ||
+						stagingAfter.manifest.identity.promotion_key !== liveAfter.manifest.identity.promotion_key
+					) {
+						throw new Error("Post-promotion identities do not match.");
+					}
+					return toolResult({
+						applied: true,
+						verified: true,
+						published: false,
+						publication_state_preserved: true,
+						plan_sha256: args.expected_plan_sha256,
+						destination_product_id: liveId,
+						rollback_snapshot_key: applyResponse.payload.rollback_snapshot_key,
+						verification: applyResponse.payload.verification,
+						staging_manifest_sha256: stagingAfter.manifest_sha256,
+						live_manifest_sha256: liveAfter.manifest_sha256,
+						diff: readableDiff(stagingAfter, liveAfter),
+					});
+				}
+				if (action === "preview_promotion" || action === "begin_promotion") {
+					const stagingId = requireNumber(args.staging_product_id, "staging_product_id");
+					const preview = await promotionPreview(stagingId);
+					if (action === "preview_promotion") {
+						return toolResult({
+							preview_only: true,
+							write_performed: false,
+							plan_sha256: preview.previewPayload.plan_sha256,
+							plan: preview.previewPayload.plan,
+							required_confirmation: PROMOTION_CONFIRMATION,
+						});
+					}
+					if (!args.expected_plan_sha256 || args.expected_plan_sha256 !== preview.previewPayload.plan_sha256) {
+						throw new Error("The exact reviewed promotion plan hash is required.");
+					}
+					if (args.confirmation !== PROMOTION_CONFIRMATION) {
+						throw new Error(`Exact confirmation required: ${PROMOTION_CONFIRMATION}`);
+					}
+					const beginResponse = await promotionRequest("live", "product-promotion/promotion/media/begin", "POST", {
+						export: preview.exportPayload.export,
+						expected_export_sha256: preview.exportPayload.export_sha256,
+						expected_plan_sha256: args.expected_plan_sha256,
+						confirmation: PROMOTION_CONFIRMATION,
+					});
+					assertPlugin(beginResponse.payload);
+					if (
+						beginResponse.payload?.session_created !== true ||
+						beginResponse.payload?.product_write_performed !== false ||
+						beginResponse.payload?.plan_sha256 !== args.expected_plan_sha256 ||
+						typeof beginResponse.payload?.session_id !== "string"
+					) {
+						throw new Error("Live promotion session failed its safety contract.");
+					}
+					return toolResult({
+						session_created: true,
+						product_write_performed: false,
+						plan_sha256: args.expected_plan_sha256,
+						session_id: beginResponse.payload.session_id,
+						destination_product_id: beginResponse.payload.destination_product_id,
+						reusable_verified_assets: beginResponse.payload.reusable_verified_assets,
+						pending_assets: beginResponse.payload.pending_assets,
+						batch_size: beginResponse.payload.batch_size,
+						expires_at: beginResponse.payload.expires_at,
+						next_action: beginResponse.payload.pending_assets > 0 ? "prepare_promotion_media" : "finalize_promotion",
+						required_confirmation: beginResponse.payload.pending_assets > 0
+							? PROMOTION_MEDIA_CONFIRMATION
+							: PROMOTION_FINALIZE_CONFIRMATION,
+					});
+				}
 				if (action === "abort_bootstrap_media") {
 					if (!args.session_id || !args.expected_plan_sha256) {
 						throw new Error("session_id and expected_plan_sha256 are required for media abort.");
