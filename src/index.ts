@@ -10156,7 +10156,9 @@ function createServer() {
 		field_id: wapfVisualFieldId,
 		expected_field_label: z.string().trim().min(1).max(300),
 		choice_slug: wapfVisualChoiceSlug,
-		expected_choice_label: z.string().trim().min(1).max(300),
+		// Preserve exact legacy WAPF choice labels, including significant trailing
+		// whitespace, so the guarded identity comparison can match and clean them.
+		expected_choice_label: z.string().min(1).max(300),
 	});
 	const outdoorFabricProduct = z.object({
 		product_id: genericWapfId,
