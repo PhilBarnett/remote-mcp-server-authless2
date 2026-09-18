@@ -7,6 +7,7 @@ import {
 	registerSearchConsoleTools,
 	type SearchConsoleQueryRequest,
 } from "./tools/search-console";
+import { registerProductPromotionTools } from "./tools/product-promotion";
 
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
@@ -3215,6 +3216,7 @@ function createServer() {
 		query: searchConsoleQuery,
 		siteUrl: SEARCH_CONSOLE_SITE_URL,
 	});
+	registerProductPromotionTools(server);
 
 	server.registerTool(
 		"get_blindmotion_github_app_status",
