@@ -311,12 +311,11 @@ Restart Claude and you should see the tools become available.
 The product-promotion integration is split between a narrowly scoped WordPress bridge
 and a modular MCP tool registration in `src/tools/product-promotion.ts`.
 
-- `inspect_product_promotion_environment` verifies the authenticated bridge identity,
-  exact staging/source or live/target role, approved HTTPS origin and absence of write
-  routes or automatic sync hooks.
-- `inspect_product_promotion_manifest` returns one deterministic product manifest
-  containing identity, publication state, pricing, taxonomy, media integrity and
-  metadata hashes.
+- `inspect_product_promotion` verifies the authenticated bridge identity, exact
+  staging/source or live/target role, approved HTTPS origin and absence of write routes
+  or automatic sync hooks. An optional `product_id` returns the deterministic product
+  manifest containing identity, publication state, pricing, taxonomy, media integrity
+  and metadata hashes.
 
 Both tools are read-only. They cannot create, update, publish, delete, upload or
 synchronise products.
