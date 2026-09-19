@@ -5175,6 +5175,110 @@ function createServer() {
 		},
 	);
 
+	const clearPromotionIdentityConfirmation = "CONFIRM CLEAR DUPLICATE PROMOTION IDENTITY";
+
+	server.registerTool(
+		"clear_duplicate_product_promotion_identity_guarded",
+		{
+			description:
+				"Clear one exact duplicate Blindmotion promotion identity from an explicitly identified live Draft/Hidden product. Requires the current identity key and product name, records a durable backup, verifies the write, cannot publish, and never changes the intended target product.",
+			inputSchema: z.object({
+				product_id: z.number().int().positive(),
+				expected_product_name: z.string().trim().min(1).max(500),
+				expected_promotion_key: z.string().regex(/^bm_[a-f0-9]{48}$/),
+				confirmation: z.literal(clearPromotionIdentityConfirmation),
+			}),
+		},
+		async ({ product_id, expected_product_name, expected_promotion_key }) => {
+			try {
+				const product = await (await wcFetch(`products/${product_id}`)).json<any>();
+				if (
+					product.id !== product_id ||
+					product.name !== expected_product_name ||
+					product.status !== "draft" ||
+					product.catalog_visibility !== "hidden"
+				) {
+					throw new Error("Product identity or Draft/Hidden state changed; no promotion identity cleared.");
+				}
+				const identityRows = (product.meta_data ?? []).filter(
+					(item: any) => item.key === "_blindmotion_promotion_key",
+				);
+				if (
+					identityRows.length !== 1 ||
+					String(identityRows[0].value ?? "") !== expected_promotion_key
+				) {
+					throw new Error("The exact promotion identity is missing, ambiguous or changed; no write performed.");
+				}
+				const backupKey = "_blindmotion_mcp_promotion_identity_backups";
+				const backupRows = (product.meta_data ?? []).filter(
+					(item: any) => item.key === backupKey,
+				);
+				if (backupRows.length > 1) {
+					throw new Error("Promotion identity backup metadata is ambiguous; no write performed.");
+				}
+				const backups = Array.isArray(backupRows[0]?.value)
+					? [...backupRows[0].value]
+					: [];
+				const backup = {
+					backup_id: crypto.randomUUID(),
+					created_at: new Date().toISOString(),
+					product_id,
+					product_name: product.name,
+					promotion_key: expected_promotion_key,
+				};
+				backups.push(backup);
+				await wcWrite(`products/${product_id}`, {
+					meta_data: [
+						{
+							id: identityRows[0].id,
+							key: "_blindmotion_promotion_key",
+							value: "",
+						},
+						{
+							...(backupRows[0]?.id ? { id: backupRows[0].id } : {}),
+							key: backupKey,
+							value: backups,
+						},
+					],
+				});
+				const verified = await (await wcFetch(`products/${product_id}`)).json<any>();
+				const remaining = (verified.meta_data ?? []).filter(
+					(item: any) =>
+						item.key === "_blindmotion_promotion_key" &&
+						String(item.value ?? "") !== "",
+				);
+				const verifiedBackups = (verified.meta_data ?? []).filter(
+					(item: any) => item.key === backupKey,
+				);
+				if (
+					remaining.length !== 0 ||
+					verified.status !== "draft" ||
+					verified.catalog_visibility !== "hidden" ||
+					verifiedBackups.length !== 1 ||
+					!Array.isArray(verifiedBackups[0].value) ||
+					!verifiedBackups[0].value.some(
+						(item: any) => item.backup_id === backup.backup_id &&
+							item.promotion_key === expected_promotion_key,
+					)
+				) {
+					throw new Error("Promotion identity clear could not be verified; inspect the draft product before continuing.");
+				}
+				return toolResult({
+					cleared: true,
+					product_id,
+					product_name: product.name,
+					status: verified.status,
+					catalog_visibility: verified.catalog_visibility,
+					cleared_promotion_key: expected_promotion_key,
+					backup,
+					published: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	server.registerTool(
 		"replace_product_option_image_guarded",
 		{
@@ -5184,7 +5288,7 @@ function createServer() {
 				.object({
 					environment: z.enum(["live", "staging"]).default("live"),
 					product_id: z.number().int().positive(),
-					meta_data_id: z.number().int().positive(),
+					meta_data_id: z.number().int().positive().optional(),
 					custom_field_key: z.string().min(1),
 					custom_field_path: z.string().min(1),
 					expected_attachment_id: z.number().int().positive().optional(),
@@ -5240,10 +5344,23 @@ function createServer() {
 				if (environment === "staging" && (product.status !== "draft" || product.catalog_visibility !== "hidden")) {
 					throw new Error("Staging product must remain draft/hidden; no image uploaded or product write performed.");
 				}
-				const meta = (product.meta_data ?? []).find(
-					(item: any) => item.id === meta_data_id && item.key === custom_field_key,
+				const matchingMeta = (product.meta_data ?? []).filter(
+					(item: any) =>
+						item.key === custom_field_key &&
+						(meta_data_id === undefined || item.id === meta_data_id),
 				);
-				if (!meta) throw new Error("The exact product meta record was not found.");
+				if (matchingMeta.length !== 1) {
+					throw new Error(
+						meta_data_id === undefined
+							? "The product meta key is missing or ambiguous."
+							: "The exact product meta record was not found.",
+					);
+				}
+				const meta = matchingMeta[0];
+				const resolvedMetaDataId = Number(meta.id);
+				if (!Number.isInteger(resolvedMetaDataId) || resolvedMetaDataId < 1) {
+					throw new Error("The resolved product meta record has an invalid ID.");
+				}
 
 				const storedAsJson =
 					typeof meta.value === "string" && /^[{[]/.test(meta.value.trim());
@@ -5343,7 +5460,7 @@ function createServer() {
 					environment,
 					created_at: new Date().toISOString(),
 					product_id,
-					meta_data_id,
+					meta_data_id: resolvedMetaDataId,
 					custom_field_key,
 					custom_field_path,
 					old_value: oldValue,
@@ -5357,7 +5474,7 @@ function createServer() {
 				const updateResponse = await productImageWcWrite(environment, `products/${product_id}`, {
 					meta_data: [
 						{
-							id: meta_data_id,
+							id: resolvedMetaDataId,
 							key: custom_field_key,
 							value: storedAsJson ? JSON.stringify(parsedValue) : parsedValue,
 						},
@@ -5370,7 +5487,7 @@ function createServer() {
 				});
 				const updatedProduct = await updateResponse.json<any>();
 				const updatedMeta = (updatedProduct.meta_data ?? []).find(
-					(item: any) => item.id === meta_data_id,
+					(item: any) => item.id === resolvedMetaDataId,
 				);
 				const updatedParsed = storedAsJson
 					? JSON.parse(updatedMeta.value)
@@ -5395,7 +5512,7 @@ function createServer() {
 					environment,
 					product_id,
 					product_name: product.name,
-					meta_data_id,
+					meta_data_id: resolvedMetaDataId,
 					custom_field_path,
 					old_value: oldValue,
 					new_value: newValue,
