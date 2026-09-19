@@ -1497,6 +1497,7 @@ const META_CREATE_SPRING_FORM_CONFIRMATION = "CONFIRM CREATE SPRING META FORM";
 const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
 const META_REPAIR_SPRING_ADS_CONFIRMATION = "CONFIRM REPAIR ACTIVE SPRING META ADS";
 const META_PAUSE_CAMPAIGN_CONFIRMATION = "CONFIRM PAUSE META CAMPAIGN";
+const META_ADSET_STATUS_CHANGE_CONFIRMATION = "CONFIRM META ADSET STATUS CHANGE";
 const META_REFRESH_SPRING_OFFER_REASON = "PROMOTE 20.5 PERCENT OFFER";
 const META_LEAD_AD_LINK = "https://fb.me/";
 const META_MAX_CREATION_DAILY_BUDGET_AUD = 500;
@@ -6367,6 +6368,108 @@ function createServer() {
 						effective_status: verified.effective_status,
 					},
 					unchanged_fields: ["name", "objective", "budget", "targeting", "creative"],
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+
+	server.registerTool(
+		"set_meta_adset_status_guarded",
+		{
+			description:
+				"Switch exactly one owned Meta ad set between PAUSED and ACTIVE after exact ad-set/campaign identity checks. Activation requires the parent campaign already ACTIVE. Cannot archive or delete.",
+			inputSchema: z.object({
+				adset_id: z.string().regex(/^\d+$/),
+				expected_adset_name: z.string().trim().min(3).max(200),
+				expected_campaign_id: z.string().regex(/^\d+$/),
+				expected_campaign_name: z.string().trim().min(3).max(200),
+				expected_current_status: z.enum(["PAUSED", "ACTIVE"]),
+				new_status: z.enum(["PAUSED", "ACTIVE"]),
+				confirmation: z.literal(META_ADSET_STATUS_CHANGE_CONFIRMATION),
+			}),
+		},
+		async ({
+			adset_id,
+			expected_adset_name,
+			expected_campaign_id,
+			expected_campaign_name,
+			expected_current_status,
+			new_status,
+		}) => {
+			try {
+				if (expected_current_status === new_status) {
+					throw new Error("Refusing status change: expected_current_status and new_status must differ.");
+				}
+
+				const current = await assertMetaObjectOwnership(adset_id, "adset");
+				if (
+					String(current.id) !== adset_id ||
+					current.name !== expected_adset_name ||
+					String(current.campaign_id) !== expected_campaign_id
+				) {
+					throw new Error("Refusing status change: ad-set identity did not exactly match expectation.");
+				}
+				if (current.status !== expected_current_status) {
+					throw new Error(
+						`Refusing status change: expected ${expected_current_status}, current status is ${String(current.status ?? "unknown")}.`,
+					);
+				}
+
+				const campaign = await assertMetaObjectOwnership(expected_campaign_id, "campaign");
+				if (
+					String(campaign.id) !== expected_campaign_id ||
+					campaign.name !== expected_campaign_name
+				) {
+					throw new Error("Refusing status change: parent campaign identity did not exactly match expectation.");
+				}
+				if (new_status === "ACTIVE" && campaign.status !== "ACTIVE") {
+					throw new Error(
+						`Refusing activation: parent campaign must already be ACTIVE; current status is ${String(campaign.status ?? "unknown")}.`,
+					);
+				}
+
+				await metaPost(adset_id, { status: new_status });
+
+				const verified = await assertMetaObjectOwnership(adset_id, "adset");
+				if (
+					String(verified.id) !== adset_id ||
+					verified.name !== expected_adset_name ||
+					String(verified.campaign_id) !== expected_campaign_id ||
+					verified.status !== new_status
+				) {
+					throw new Error(
+						"Meta ad-set status write could not be verified against the exact identity and requested state.",
+					);
+				}
+
+				return toolResult({
+					updated: true,
+					adset: {
+						id: verified.id,
+						name: verified.name,
+						campaign_id: verified.campaign_id,
+						previous_status: current.status,
+						status: verified.status,
+						effective_status: verified.effective_status,
+					},
+					parent_campaign: {
+						id: campaign.id,
+						name: campaign.name,
+						status: campaign.status,
+						effective_status: campaign.effective_status,
+					},
+					unchanged_fields: [
+						"name",
+						"campaign",
+						"budget",
+						"targeting",
+						"optimisation",
+						"promoted_object",
+						"creative",
+					],
 				});
 			} catch (error) {
 				return toolError(error);
