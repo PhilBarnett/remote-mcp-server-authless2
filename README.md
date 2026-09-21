@@ -351,3 +351,10 @@ bridge roles are independently verified before a manifest is accepted.
 ### Environment-aware WAPF pricing grid
 
 `manage_wapf_pricing_grid` inspects, previews or applies a complete parameter-driven base grid, per-fabric grids and one-dimensional option surcharges on an explicitly selected `live` or `staging` WooCommerce environment. Inspect is read-only and returns compact product, WAPF metadata, field and choice identities. Apply requires the exact preview plan hash and `CONFIRM APPLY WAPF PRICING GRID`, is limited to draft/hidden products, verifies the regular price and complete WAPF field-group hash after the atomic product update, and restores both values if verification fails. The tool contains no product IDs, labels, slugs or prices.
+
+
+### Staging Blindmotion plugin deployment
+
+- `manage_staging_blindmotion_plugin_deployment` consolidates inspection and guarded deployment for reviewed Blindmotion plugins on `staging-online.blindmotion.com.au`. The `inspect` action is read-only. The `deploy` action requires exact current-version state, a SHA-256 locked ZIP, the fixed slug/main-file/name identity and `CONFIRM DEPLOY BLINDMOTION PLUGIN`. The WordPress bridge validates the archive, uses a transaction lock, preserves a temporary rollback copy, activates the plugin and verifies the final version and active state. It cannot target live, fetch arbitrary URLs or install unlisted third-party plugins.
+
+This single tool replaces the former Visualizer-only deployment tool without increasing the MCP tool count. The initial allowlist contains the deployment bridge itself, Measurement Guarantee, Motor Selection Guide, Product Promotion Bridge, WAPF Pricing Bridge, Visualizer and the future consolidated Blindmotion CRO Suite.
