@@ -10421,7 +10421,6 @@ function createServer() {
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
 		const afterHash = await genericWapfHashOf(updatedValue);
 		const planHash = await genericWapfHashOf({
-			environment,
 			product_id: args.product_id,
 			expected_product_name: args.expected_product_name,
 			new_product_name: args.new_product_name,
@@ -11697,6 +11696,7 @@ function createServer() {
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
 		const afterHash = await genericWapfHashOf(updatedValue);
 		const planHash = await genericWapfHashOf({
+			environment,
 			product_id: args.product_id,
 			product_name: args.expected_product_name,
 			before_field_group_sha256: beforeHash,
