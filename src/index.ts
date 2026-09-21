@@ -3320,6 +3320,130 @@ function safeOrderAttribution(order: any) {
 	};
 }
 
+function plainOrderLineMetaText(value: unknown) {
+	if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+		return "";
+	}
+
+	return String(value)
+		.replace(/<[^>]*>/g, " ")
+		.replace(/&nbsp;|&#160;/gi, " ")
+		.replace(/&amp;/gi, "&")
+		.replace(/&quot;|&#34;/gi, '"')
+		.replace(/&#39;|&apos;/gi, "'")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function safeOrderLineOptionValue(value: unknown) {
+	if (Array.isArray(value)) {
+		const parts = value
+			.map((part) => plainOrderLineMetaText(part))
+			.filter(Boolean);
+		return parts.length ? parts.join(", ").slice(0, 500) : null;
+	}
+
+	const text = plainOrderLineMetaText(value);
+	return text ? text.slice(0, 500) : null;
+}
+
+function safeOrderLineProductOptions(item: any) {
+	const options: Array<{ label: string; value: string }> = [];
+
+	for (const meta of Array.isArray(item?.meta_data) ? item.meta_data : []) {
+		const rawKey = plainOrderLineMetaText(meta?.key);
+		if (!rawKey || rawKey.startsWith("_")) continue;
+
+		const label = plainOrderLineMetaText(meta?.display_key ?? rawKey).slice(0, 120);
+		const value =
+			safeOrderLineOptionValue(meta?.display_value) ??
+			safeOrderLineOptionValue(meta?.value);
+		if (!label || value === null) continue;
+
+		options.push({ label, value });
+		if (options.length >= 100) break;
+	}
+
+	return options;
+}
+
+function parseOrderDimensionMm(value: unknown) {
+	if (typeof value === "number") {
+		return Number.isFinite(value) && value > 0 && value <= 20000 ? value : null;
+	}
+
+	const text = plainOrderLineMetaText(value);
+	if (!text || text.length > 40) return null;
+	const match = text
+		.replace(/,/g, "")
+		.match(/^(\d+(?:\.\d+)?)\s*(?:mm|millimet(?:er|re)s?)?$/i);
+	if (!match) return null;
+
+	const measurement = Number(match[1]);
+	return Number.isFinite(measurement) && measurement > 0 && measurement <= 20000
+		? measurement
+		: null;
+}
+
+function orderDimensionKey(
+	label: unknown,
+): "width_mm" | "drop_mm" | null {
+	const normalized = plainOrderLineMetaText(label)
+		.toLowerCase()
+		.replace(/\b(?:mm|millimet(?:er|re)s?)\b/g, " ")
+		.replace(/[^a-z0-9]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+
+	if (
+		["width", "blind width", "finished width", "overall width", "opening width", "product width"].includes(
+			normalized,
+		)
+	) {
+		return "width_mm";
+	}
+
+	if (
+		[
+			"drop",
+			"blind drop",
+			"finished drop",
+			"overall drop",
+			"height",
+			"blind height",
+			"finished height",
+			"overall height",
+			"opening height",
+		].includes(normalized)
+	) {
+		return "drop_mm";
+	}
+
+	return null;
+}
+
+function safeOrderLineDimensions(item: any) {
+	const dimensions: { width_mm: number | null; drop_mm: number | null } = {
+		width_mm: null,
+		drop_mm: null,
+	};
+
+	for (const meta of Array.isArray(item?.meta_data) ? item.meta_data : []) {
+		const rawKey = plainOrderLineMetaText(meta?.key);
+		if (!rawKey || rawKey.startsWith("_")) continue;
+
+		const key = orderDimensionKey(meta?.display_key ?? rawKey);
+		if (!key || dimensions[key] !== null) continue;
+
+		const measurement =
+			parseOrderDimensionMm(meta?.display_value) ??
+			parseOrderDimensionMm(meta?.value);
+		if (measurement !== null) dimensions[key] = measurement;
+	}
+
+	return dimensions;
+}
+
 function safeOrder(order: any) {
 	return {
 		id: order.id,
@@ -3344,6 +3468,18 @@ function safeOrder(order: any) {
 		coupon_lines: order.coupon_lines?.map((coupon: any) => ({
 			code: coupon.code,
 			discount: coupon.discount,
+		})),
+	};
+}
+
+function safeOrderWithLineItemConfiguration(order: any) {
+	const sanitizedOrder = safeOrder(order);
+	return {
+		...sanitizedOrder,
+		line_items: sanitizedOrder.line_items?.map((item: any, index: number) => ({
+			...item,
+			product_options: safeOrderLineProductOptions(order.line_items?.[index]),
+			dimensions: safeOrderLineDimensions(order.line_items?.[index]),
 		})),
 	};
 }
@@ -5836,7 +5972,7 @@ function createServer() {
 		"get_order",
 		{
 			description:
-				"Investigate one Blindmotion WooCommerce order by order ID without exposing billing or shipping PII.",
+				"Investigate one Blindmotion WooCommerce order by order ID, including sanitized customer-facing product options and normalized dimensions, without exposing billing, shipping or private item metadata.",
 			inputSchema: z.object({
 				order_id: z.number().int().positive(),
 			}),
@@ -5848,7 +5984,7 @@ function createServer() {
 				const order = await response.json<any>();
 
 				return toolResult({
-					...safeOrder(order),
+					...safeOrderWithLineItemConfiguration(order),
 					date_paid: order.date_paid,
 					date_completed: order.date_completed,
 					transaction_id: order.transaction_id,
