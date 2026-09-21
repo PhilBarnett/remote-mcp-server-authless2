@@ -11819,9 +11819,10 @@ function createServer() {
 		return { product, wapf, beforeHash, afterHash, planHash, updatedValue, baseFormula };
 	}
 
-	const wapfPricingGridManager = wapfPricingGridBase.extend({
+	const wapfPricingGridManager = wapfPricingGridBase.partial().extend({
+		product_id: z.number().int().positive(),
 		environment: z.enum(["live", "staging"]),
-		action: z.enum(["preview", "apply"]),
+		action: z.enum(["inspect", "preview", "apply"]),
 		expected_plan_sha256: genericWapfHash.optional(),
 		confirmation: z.string().optional(),
 	});
@@ -11829,12 +11830,67 @@ function createServer() {
 	server.registerTool(
 		"manage_wapf_pricing_grid",
 		{
-			description: "Preview or apply one complete parameter-driven WAPF price grid on the caller-selected live or staging site. The guarded apply is restricted to draft/hidden products, hash-locks the existing product and complete WAPF field group, writes the regular price and WAPF pricing atomically, verifies the result, and rolls both back on failure.",
+			description: "Inspect, preview or apply one complete parameter-driven WAPF price grid on the caller-selected live or staging site. Inspect is read-only and returns the exact product, WAPF metadata, field and choice identities required to build a guarded plan. Apply is restricted to draft/hidden products, hash-locks the existing product and complete WAPF field group, writes the regular price and WAPF pricing atomically, verifies the result, and rolls both back on failure.",
 			inputSchema: wapfPricingGridManager,
 		},
 		async (args) => {
 			try {
-				const plan = await buildWapfPricingGridPlan(args, args.environment);
+				if (args.action === "inspect") {
+					const product = await (
+						await productImageWcFetch(args.environment, "products/" + args.product_id)
+					).json<any>();
+					if (product.id !== args.product_id) {
+						throw new Error("WooCommerce returned a different pricing-grid product.");
+					}
+					const wapf = genericWapf(product);
+					const fieldGroupHash = await genericWapfHashOf(wapf.meta.value);
+					const fields = Array.isArray(wapf.group?.fields) ? wapf.group.fields : [];
+					const compactPricingAmount = (value: unknown) => {
+						const amount = String(value ?? "");
+						if (amount.length <= 120) return amount;
+						return "[formula " + amount.length + " characters]";
+					};
+					return toolResult({
+						environment: args.environment,
+						product_id: product.id,
+						product_name: product.name,
+						status: product.status,
+						catalog_visibility: product.catalog_visibility,
+						regular_price: Number(product.regular_price),
+						meta_data_id: wapf.meta.id,
+						field_group_sha256: fieldGroupHash,
+						field_count: fields.length,
+						fields: fields.map((field: any) => {
+							const choices = Array.isArray(field?.options?.choices)
+								? field.options.choices
+								: [];
+							return {
+								id: String(field?.id ?? ""),
+								label: String(field?.label ?? ""),
+								type: String(field?.type ?? ""),
+								pricing: field?.pricing
+									? {
+											enabled: field.pricing.enabled ?? null,
+											type: field.pricing.type ?? null,
+											amount: compactPricingAmount(field.pricing.amount),
+										}
+									: null,
+								choices: choices.map((choice: any) => ({
+									slug: String(choice?.slug ?? ""),
+									label: String(choice?.label ?? ""),
+									pricing_type: choice?.pricing_type ?? null,
+									pricing_amount: compactPricingAmount(choice?.pricing_amount),
+									has_image: Boolean(choice?.image),
+								})),
+							};
+						}),
+						read_only: true,
+						write_performed: false,
+					});
+				}
+
+				const pricingArgs = wapfPricingGridBase.parse(args);
+				const plan = await buildWapfPricingGridPlan(pricingArgs, args.environment);
 				const summary = {
 					environment: args.environment,
 					product_id: plan.product.id,
@@ -11845,16 +11901,16 @@ function createServer() {
 					after_field_group_sha256: plan.afterHash,
 					plan_sha256: plan.planHash,
 					regular_price_before: Number(plan.product.regular_price),
-					regular_price_after: args.new_regular_price,
-					width_breakpoints: args.width_breakpoints,
-					drop_breakpoints: args.drop_breakpoints,
-					base_grid_rows: args.base_price_grid.length,
-					base_grid_columns: args.base_price_grid[0]?.length ?? 0,
-					fabric_choices_priced: args.fabric_groups.map((group) => ({
+					regular_price_after: pricingArgs.new_regular_price,
+					width_breakpoints: pricingArgs.width_breakpoints,
+					drop_breakpoints: pricingArgs.drop_breakpoints,
+					base_grid_rows: pricingArgs.base_price_grid.length,
+					base_grid_columns: pricingArgs.base_price_grid[0]?.length ?? 0,
+					fabric_choices_priced: pricingArgs.fabric_groups.map((group) => ({
 						slug: group.choice_slug,
 						label: group.expected_choice_label,
 					})),
-					option_surcharges: args.option_surcharges.map((surcharge) => ({
+					option_surcharges: pricingArgs.option_surcharges.map((surcharge) => ({
 						field_id: surcharge.field_id,
 						field_label: surcharge.expected_field_label,
 						choice_slug: surcharge.choice_slug,
@@ -11876,8 +11932,8 @@ function createServer() {
 					throw new Error("Pricing-grid plan changed after preview.");
 				}
 				try {
-					await productImageWcWrite(args.environment, "products/" + args.product_id, {
-						regular_price: pricingNumber(args.new_regular_price),
+					await productImageWcWrite(args.environment, "products/" + pricingArgs.product_id, {
+						regular_price: pricingNumber(pricingArgs.new_regular_price),
 						meta_data: [{
 							id: plan.wapf.meta.id,
 							key: "_wapf_fieldgroup",
@@ -11885,18 +11941,18 @@ function createServer() {
 						}],
 					});
 					const verified = await (
-						await productImageWcFetch(args.environment, "products/" + args.product_id)
+						await productImageWcFetch(args.environment, "products/" + pricingArgs.product_id)
 					).json<any>();
 					const verifiedWapf = genericWapf(verified);
 					const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
 					if (
-						verified.id !== args.product_id ||
-						verified.name !== args.expected_product_name ||
+						verified.id !== pricingArgs.product_id ||
+						verified.name !== pricingArgs.expected_product_name ||
 						verified.status !== "draft" ||
 						verified.catalog_visibility !== "hidden" ||
-						verifiedWapf.meta.id !== args.expected_meta_data_id ||
+						verifiedWapf.meta.id !== pricingArgs.expected_meta_data_id ||
 						verifiedHash !== plan.afterHash ||
-						Number(verified.regular_price) !== args.new_regular_price
+						Number(verified.regular_price) !== pricingArgs.new_regular_price
 					) {
 						throw new Error("Post-write pricing-grid verification failed.");
 					}
@@ -11908,7 +11964,7 @@ function createServer() {
 					});
 				} catch (writeError) {
 					try {
-						await productImageWcWrite(args.environment, "products/" + args.product_id, {
+						await productImageWcWrite(args.environment, "products/" + pricingArgs.product_id, {
 							regular_price: String(plan.product.regular_price),
 							meta_data: [{
 								id: plan.wapf.meta.id,
@@ -11917,16 +11973,16 @@ function createServer() {
 							}],
 						});
 						const rolledBack = await (
-							await productImageWcFetch(args.environment, "products/" + args.product_id)
+							await productImageWcFetch(args.environment, "products/" + pricingArgs.product_id)
 						).json<any>();
 						const rolledBackWapf = genericWapf(rolledBack);
 						const rolledBackHash = await genericWapfHashOf(rolledBackWapf.meta.value);
 						if (
-							rolledBack.id !== args.product_id ||
-							rolledBack.name !== args.expected_product_name ||
-							rolledBackWapf.meta.id !== args.expected_meta_data_id ||
+							rolledBack.id !== pricingArgs.product_id ||
+							rolledBack.name !== pricingArgs.expected_product_name ||
+							rolledBackWapf.meta.id !== pricingArgs.expected_meta_data_id ||
 							rolledBackHash !== plan.beforeHash ||
-							Number(rolledBack.regular_price) !== args.expected_regular_price
+							Number(rolledBack.regular_price) !== pricingArgs.expected_regular_price
 						) {
 							throw new Error("Rollback verification failed.");
 						}
