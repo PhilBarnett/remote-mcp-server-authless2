@@ -541,6 +541,46 @@ async function buildFabricSamplePlan(source: any, destination: any, input: Fabri
 	};
 }
 
+const STAGING_PLUGIN_DEPLOYMENT_CONFIRMATION = "CONFIRM DEPLOY BLINDMOTION PLUGIN";
+const STAGING_PLUGIN_SLUG_SCHEMA = z.enum([
+	"blindmotion-plugin-deployment-bridge",
+	"blindmotion-measurement-guarantee",
+	"blindmotion-motor-selection-guide",
+	"blindmotion-product-promotion-bridge",
+	"blindmotion-wapf-pricing-bridge",
+	"blindmotion-cro-suite",
+]);
+type StagingPluginSlug = z.infer<typeof STAGING_PLUGIN_SLUG_SCHEMA>;
+const STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST: Record<
+	StagingPluginSlug,
+	{ mainFile: string; pluginName: string }
+> = {
+	"blindmotion-plugin-deployment-bridge": {
+		mainFile: "blindmotion-plugin-deployment-bridge/blindmotion-plugin-deployment-bridge.php",
+		pluginName: "Blindmotion Plugin Deployment Bridge",
+	},
+	"blindmotion-measurement-guarantee": {
+		mainFile: "blindmotion-measurement-guarantee/blindmotion-measurement-guarantee.php",
+		pluginName: "Blindmotion Measurement Guarantee",
+	},
+	"blindmotion-motor-selection-guide": {
+		mainFile: "blindmotion-motor-selection-guide/blindmotion-motor-selection-guide.php",
+		pluginName: "Blindmotion Motor Selection Guide",
+	},
+	"blindmotion-product-promotion-bridge": {
+		mainFile: "blindmotion-product-promotion-bridge/blindmotion-product-promotion-bridge.php",
+		pluginName: "Blindmotion Product Promotion Bridge",
+	},
+	"blindmotion-wapf-pricing-bridge": {
+		mainFile: "blindmotion-wapf-pricing-bridge/blindmotion-wapf-pricing-bridge.php",
+		pluginName: "Blindmotion WAPF Pricing Bridge",
+	},
+	"blindmotion-cro-suite": {
+		mainFile: "blindmotion-cro-suite/blindmotion-cro-suite.php",
+		pluginName: "Blindmotion CRO Suite",
+	},
+};
+
 const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
 const VISUALIZER_PLUGIN_SLUG = "blindmotion-visualizer";
 const VISUALIZER_PLUGIN_MAIN_FILE = "blindmotion-visualizer/blindmotion-visualizer.php";
@@ -687,6 +727,31 @@ function stagingProductImageAccess() {
 		baseUrl: site.origin,
 		auth: `Basic ${btoa(`${workerEnv.WP_STAGING_USERNAME}:${workerEnv.WP_STAGING_APPLICATION_PASSWORD}`)}`,
 	};
+}
+
+async function stagingPluginDeploymentRequest(body: unknown) {
+	const access = stagingProductImageAccess();
+	const response = await fetch(
+		access.baseUrl + "/wp-json/blindmotion-mcp/v1/plugin-deployment",
+		{
+			method: "POST",
+			headers: {
+				Authorization: access.auth,
+				Accept: "application/json",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify(body),
+		},
+	);
+	if (!response.ok) {
+		throw new Error(
+			"Staging plugin deployment bridge failed: " +
+				response.status +
+				" " +
+				(await response.text()),
+		);
+	}
+	return response.json<any>();
 }
 
 async function productImageWcFetch(environment: ProductImageEnvironment, path: string) {
@@ -5009,6 +5074,148 @@ function createServer() {
 					search_terms,
 					templates,
 					write_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_staging_blindmotion_plugin_deployment",
+		{
+			description:
+				"Read the installed version and active state of one reviewed Blindmotion plugin through the exact staging-only deployment bridge. Performs no writes and cannot inspect arbitrary plugins.",
+			inputSchema: z.object({
+				plugin_slug: STAGING_PLUGIN_SLUG_SCHEMA,
+			}),
+		},
+		async ({ plugin_slug }) => {
+			try {
+				const expected = STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST[plugin_slug];
+				const inspected = await stagingPluginDeploymentRequest({
+					action: "inspect",
+					plugin_slug,
+				});
+				if (
+					inspected.environment !== "staging" ||
+					inspected.host !== "staging-online.blindmotion.com.au" ||
+					inspected.plugin_slug !== plugin_slug ||
+					inspected.main_file !== expected.mainFile ||
+					inspected.plugin_name !== expected.pluginName ||
+					inspected.write_performed !== false
+				) {
+					throw new Error("Staging deployment inspection failed environment or plugin identity verification.");
+				}
+				return toolResult({
+					read_only: true,
+					environment: inspected.environment,
+					host: inspected.host,
+					plugin_slug: inspected.plugin_slug,
+					main_file: inspected.main_file,
+					plugin_name: inspected.plugin_name,
+					installed: inspected.installed === true,
+					version: inspected.version ?? null,
+					active: inspected.active === true,
+					write_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"install_update_staging_blindmotion_plugin_guarded",
+		{
+			description:
+				"Install or update one reviewed allowlisted Blindmotion WordPress plugin on the exact staging origin. Hash-locks ZIP bytes, verifies the current version through a read-only preflight, validates the fixed plugin identity, activates, verifies and relies on transactional rollback. Cannot target live or arbitrary plugins.",
+			inputSchema: z.object({
+				plugin_slug: STAGING_PLUGIN_SLUG_SCHEMA,
+				target_version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/),
+				expected_current_version: z
+					.string()
+					.regex(/^(?:NONE|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/),
+				archive_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+				plugin_zip_base64: z.string().min(100).max(14_000_000),
+				confirmation: z.literal(STAGING_PLUGIN_DEPLOYMENT_CONFIRMATION),
+			}),
+		},
+		async ({
+			plugin_slug,
+			target_version,
+			expected_current_version,
+			archive_sha256,
+			plugin_zip_base64,
+		}) => {
+			try {
+				const expected = STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST[plugin_slug];
+				const bytes = decodeBase64(plugin_zip_base64);
+				if (bytes.length < 64 || bytes.length > 10_000_000) {
+					throw new Error("Plugin ZIP must decode to between 64 bytes and 10 MB.");
+				}
+				if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+					throw new Error("Plugin package is not a ZIP archive.");
+				}
+				const calculatedSha256 = await sha256Hex(bytes);
+				if (calculatedSha256 !== archive_sha256) {
+					throw new Error("Plugin ZIP SHA-256 does not match the confirmed digest.");
+				}
+
+				const inspected = await stagingPluginDeploymentRequest({
+					action: "inspect",
+					plugin_slug,
+				});
+				const inspectedVersion = inspected.installed === true ? String(inspected.version ?? "") : "NONE";
+				if (
+					inspected.environment !== "staging" ||
+					inspected.host !== "staging-online.blindmotion.com.au" ||
+					inspected.plugin_slug !== plugin_slug ||
+					inspected.main_file !== expected.mainFile ||
+					inspected.plugin_name !== expected.pluginName ||
+					inspected.write_performed !== false ||
+					inspectedVersion !== expected_current_version
+				) {
+					throw new Error("Staging plugin deployment preflight state or identity changed.");
+				}
+
+				const verified = await stagingPluginDeploymentRequest({
+					action: expected_current_version === "NONE" ? "install" : "update",
+					plugin_slug,
+					main_file: expected.mainFile,
+					target_version,
+					expected_current_version,
+					archive_sha256,
+					archive_base64: plugin_zip_base64,
+					activate: true,
+					confirmation: STAGING_PLUGIN_DEPLOYMENT_CONFIRMATION,
+				});
+				if (
+					verified.environment !== "staging" ||
+					verified.host !== "staging-online.blindmotion.com.au" ||
+					verified.plugin_slug !== plugin_slug ||
+					verified.main_file !== expected.mainFile ||
+					verified.plugin_name !== expected.pluginName ||
+					verified.version !== target_version ||
+					verified.archive_sha256 !== archive_sha256 ||
+					verified.active !== true ||
+					verified.write_performed !== true ||
+					verified.transactional_rollback_protected !== true
+				) {
+					throw new Error("Staging plugin deployment response failed final verification.");
+				}
+				return toolResult({
+					completed: true,
+					environment: verified.environment,
+					host: verified.host,
+					plugin_slug: verified.plugin_slug,
+					main_file: verified.main_file,
+					plugin_name: verified.plugin_name,
+					previous_version: verified.previous_version ?? null,
+					version: verified.version,
+					archive_sha256: verified.archive_sha256,
+					active: verified.active,
+					transactional_rollback_protected: true,
 				});
 			} catch (error) {
 				return toolError(error);
