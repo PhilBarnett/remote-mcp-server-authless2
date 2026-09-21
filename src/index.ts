@@ -3444,7 +3444,7 @@ function safeOrderLineDimensions(item: any) {
 	return dimensions;
 }
 
-function safeOrder(order: any, includeLineItemConfiguration = false) {
+function safeOrder(order: any) {
 	return {
 		id: order.id,
 		date_created: order.date_created,
@@ -3464,16 +3464,22 @@ function safeOrder(order: any, includeLineItemConfiguration = false) {
 			quantity: item.quantity,
 			subtotal: item.subtotal,
 			total: item.total,
-			...(includeLineItemConfiguration
-				? {
-					product_options: safeOrderLineProductOptions(item),
-					dimensions: safeOrderLineDimensions(item),
-				}
-				: {}),
 		})),
 		coupon_lines: order.coupon_lines?.map((coupon: any) => ({
 			code: coupon.code,
 			discount: coupon.discount,
+		})),
+	};
+}
+
+function safeOrderWithLineItemConfiguration(order: any) {
+	const sanitizedOrder = safeOrder(order);
+	return {
+		...sanitizedOrder,
+		line_items: sanitizedOrder.line_items?.map((item: any, index: number) => ({
+			...item,
+			product_options: safeOrderLineProductOptions(order.line_items?.[index]),
+			dimensions: safeOrderLineDimensions(order.line_items?.[index]),
 		})),
 	};
 }
@@ -5978,7 +5984,7 @@ function createServer() {
 				const order = await response.json<any>();
 
 				return toolResult({
-					...safeOrder(order, true),
+					...safeOrderWithLineItemConfiguration(order),
 					date_paid: order.date_paid,
 					date_completed: order.date_completed,
 					transaction_id: order.transaction_id,
