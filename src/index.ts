@@ -4084,6 +4084,327 @@ function createServer() {
 	 * 2. Query Orders
 	 */
 
+
+	server.registerTool(
+		"get_sample_to_purchase_cohort",
+		{
+			description:
+				"Measure all-product Fabric Sample to genuine-purchase conversion using privacy-safe first-party WooCommerce matching. Customer identifiers are used only inside the Worker; no customer PII or reusable identity key is returned.",
+			inputSchema: z.object({
+				start_date: z.string().date(),
+				end_date: z.string().date(),
+				as_of_date: z.string().date().optional(),
+				windows_days: z
+					.array(z.number().int().min(7).max(365))
+					.min(1)
+					.max(8)
+					.default([30, 60, 90]),
+			}),
+		},
+		async ({ start_date, end_date, as_of_date, windows_days }) => {
+			try {
+				const asOfDate = as_of_date ?? new Date().toISOString().slice(0, 10);
+				const startMs = cohortDateMs(start_date);
+				const endMs = cohortDateMs(end_date);
+				const asOfMs = cohortDateMs(asOfDate);
+				if (startMs === null || endMs === null || asOfMs === null) {
+					throw new Error("Invalid cohort date supplied.");
+				}
+				if (startMs < cohortDateMs(COMMERCIAL_START_DATE)!) {
+					throw new Error(
+						"Cohort start_date cannot be before the commercial data start date.",
+					);
+				}
+				if (startMs > endMs) throw new Error("start_date must be on or before end_date.");
+				if (endMs > asOfMs) throw new Error("end_date cannot be after as_of_date.");
+				if ((asOfMs - startMs) / 86_400_000 > 730) {
+					throw new Error("Cohort analysis is capped at 730 days per request.");
+				}
+
+				const windows = [...new Set(windows_days)].sort((a, b) => a - b);
+				const orders = await getAllOrders(start_date, asOfDate);
+				const sampleOrders = orders
+					.filter((order) => {
+						const orderMs = cohortDateMs(order?.date_created);
+						const lineItems = Array.isArray(order?.line_items)
+							? order.line_items
+							: [];
+						return (
+							orderMs !== null &&
+							orderMs >= startMs &&
+							orderMs <= endMs &&
+							GENUINE_STATUSES.has(String(order?.status ?? "")) &&
+							lineItems.length > 0 &&
+							lineItems.every((item: any) => isSampleLineItem(item))
+						);
+					})
+					.sort(
+						(a, b) =>
+							Number(cohortTimestampMs(a?.date_created)) -
+							Number(cohortTimestampMs(b?.date_created)),
+					);
+				const purchaseOrders = orders.filter((order) => {
+					if (!isGenuineCommercialOrder(order)) return false;
+					const lineItems = Array.isArray(order?.line_items)
+						? order.line_items
+						: [];
+					return !(
+						lineItems.length > 0 &&
+						lineItems.every((item: any) => isSampleLineItem(item))
+					);
+				});
+
+				type CohortCustomer = {
+					emails: Set<string>;
+					phones: Set<string>;
+					customer_ids: Set<number>;
+					matchable: boolean;
+					first_sample_order_id: number;
+					first_sample_date: string;
+					first_sample_timestamp_ms: number;
+					sample_order_ids: number[];
+				};
+
+				const customers: CohortCustomer[] = [];
+				for (const order of sampleOrders) {
+					const email = normaliseCohortEmail(order?.billing?.email);
+					const phone = normaliseCohortPhone(order?.billing?.phone);
+					const customerId =
+						Number(order?.customer_id ?? 0) > 0 ? Number(order.customer_id) : null;
+					const timestampMs =
+						cohortTimestampMs(order?.date_created) ??
+						cohortDateMs(order?.date_created)!;
+					const matchingIndexes = customers
+						.map((customer, index) => ({ customer, index }))
+						.filter(({ customer }) => {
+							if (email && customer.emails.has(email)) return true;
+							if (phone && customer.phones.has(phone)) return true;
+							if (customerId && customer.customer_ids.has(customerId)) return true;
+							return false;
+						})
+						.map(({ index }) => index);
+
+					if (!matchingIndexes.length) {
+						customers.push({
+							emails: new Set(email ? [email] : []),
+							phones: new Set(phone ? [phone] : []),
+							customer_ids: new Set(customerId ? [customerId] : []),
+							matchable: Boolean(email || phone || customerId),
+							first_sample_order_id: Number(order.id),
+							first_sample_date: String(order.date_created).slice(0, 10),
+							first_sample_timestamp_ms: timestampMs,
+							sample_order_ids: [Number(order.id)],
+						});
+						continue;
+					}
+
+					const primaryIndex = matchingIndexes[0];
+					const primary = customers[primaryIndex];
+					if (email) primary.emails.add(email);
+					if (phone) primary.phones.add(phone);
+					if (customerId) primary.customer_ids.add(customerId);
+					primary.sample_order_ids.push(Number(order.id));
+
+					for (const mergeIndex of matchingIndexes.slice(1).sort((a, b) => b - a)) {
+						const duplicate = customers[mergeIndex];
+						for (const value of duplicate.emails) primary.emails.add(value);
+						for (const value of duplicate.phones) primary.phones.add(value);
+						for (const value of duplicate.customer_ids) primary.customer_ids.add(value);
+						primary.sample_order_ids.push(...duplicate.sample_order_ids);
+						if (duplicate.first_sample_timestamp_ms < primary.first_sample_timestamp_ms) {
+							primary.first_sample_order_id = duplicate.first_sample_order_id;
+							primary.first_sample_date = duplicate.first_sample_date;
+							primary.first_sample_timestamp_ms =
+								duplicate.first_sample_timestamp_ms;
+						}
+						customers.splice(mergeIndex, 1);
+					}
+				}
+
+				const matchableCustomers = customers.filter((customer) => customer.matchable);
+
+				function purchaseMatchMethod(customer: CohortCustomer, order: any) {
+					const purchaseEmail = normaliseCohortEmail(order?.billing?.email);
+					if (purchaseEmail && customer.emails.has(purchaseEmail)) return "email" as const;
+					const purchasePhone = normaliseCohortPhone(order?.billing?.phone);
+					if (purchasePhone && customer.phones.has(purchasePhone)) return "phone" as const;
+					const purchaseCustomerId = Number(order?.customer_id ?? 0);
+					if (
+						purchaseCustomerId > 0 &&
+						customer.customer_ids.has(purchaseCustomerId)
+					) {
+						return "customer_id" as const;
+					}
+					return null;
+				}
+
+				function refundTotal(order: any) {
+					return (Array.isArray(order?.refunds) ? order.refunds : []).reduce(
+						(total: number, refund: any) =>
+							total + Math.abs(Number(refund?.total ?? 0)),
+						0,
+					);
+				}
+
+				const windowResults = windows.map((windowDays) => {
+					const matured = matchableCustomers.filter(
+						(customer) =>
+							cohortDateMs(customer.first_sample_date)! +
+								windowDays * 86_400_000 <=
+							asOfMs,
+					);
+					const conversions: any[] = [];
+
+					for (const customer of matured) {
+						const sampleMs = cohortDateMs(customer.first_sample_date)!;
+						const windowEndMs = sampleMs + windowDays * 86_400_000;
+						const matched = purchaseOrders
+							.map((order) => ({
+								order,
+								match_method: purchaseMatchMethod(customer, order),
+							}))
+							.filter(({ order, match_method }) => {
+								if (!match_method) return false;
+								const purchaseMs = cohortDateMs(order?.date_created);
+								const purchaseTimestampMs = cohortTimestampMs(order?.date_created);
+								return (
+									purchaseMs !== null &&
+									purchaseTimestampMs !== null &&
+									purchaseTimestampMs > customer.first_sample_timestamp_ms &&
+									purchaseMs <= windowEndMs
+								);
+							})
+							.sort(
+								(a, b) =>
+									Number(cohortTimestampMs(a.order?.date_created)) -
+									Number(cohortTimestampMs(b.order?.date_created)),
+							);
+						if (!matched.length) continue;
+
+						const first = matched[0];
+						const grossRevenue = matched.reduce(
+							(total, result) => total + Number(result.order?.total ?? 0),
+							0,
+						);
+						const refunds = matched.reduce(
+							(total, result) => total + refundTotal(result.order),
+							0,
+						);
+						conversions.push({
+							first_sample_order_id: customer.first_sample_order_id,
+							sample_order_ids: [...new Set(customer.sample_order_ids)].sort(
+								(a, b) => a - b,
+							),
+							first_sample_date: customer.first_sample_date,
+							match_method: first.match_method,
+							first_purchase_order_id: Number(first.order.id),
+							first_purchase_date: String(first.order.date_created).slice(0, 10),
+							days_to_first_purchase: cohortDaysBetween(
+								customer.first_sample_date,
+								first.order.date_created,
+							),
+							purchase_order_ids: matched.map((result) =>
+								Number(result.order.id),
+							),
+							gross_revenue_aud: Number(grossRevenue.toFixed(2)),
+							refunds_aud: Number(refunds.toFixed(2)),
+							net_revenue_aud: Number((grossRevenue - refunds).toFixed(2)),
+						});
+					}
+
+					const grossRevenue = conversions.reduce(
+						(total, conversion) => total + conversion.gross_revenue_aud,
+						0,
+					);
+					const refunds = conversions.reduce(
+						(total, conversion) => total + conversion.refunds_aud,
+						0,
+					);
+					const netRevenue = grossRevenue - refunds;
+					const maturedCount = matured.length;
+					const convertedCount = conversions.length;
+					const matchMethodCounts = conversions.reduce(
+						(counts, conversion) => {
+							counts[conversion.match_method] =
+								(counts[conversion.match_method] ?? 0) + 1;
+							return counts;
+						},
+						{} as Record<string, number>,
+					);
+
+					return {
+						window_days: windowDays,
+						matured_matchable_sample_customers: maturedCount,
+						converted_customers: convertedCount,
+						conversion_rate: maturedCount ? convertedCount / maturedCount : null,
+						match_methods: matchMethodCounts,
+						purchase_order_count: conversions.reduce(
+							(total, conversion) => total + conversion.purchase_order_ids.length,
+							0,
+						),
+						gross_revenue_aud: Number(grossRevenue.toFixed(2)),
+						refunds_aud: Number(refunds.toFixed(2)),
+						net_revenue_aud: Number(netRevenue.toFixed(2)),
+						average_net_revenue_per_converted_customer_aud: convertedCount
+							? Number((netRevenue / convertedCount).toFixed(2))
+							: null,
+						median_net_revenue_per_converted_customer_aud: cohortMedian(
+							conversions.map((conversion) => conversion.net_revenue_aud),
+						),
+						median_days_to_first_purchase: cohortMedian(
+							conversions
+								.map((conversion) => conversion.days_to_first_purchase)
+								.filter((value): value is number => typeof value === "number"),
+						),
+						expected_net_revenue_per_matured_sample_customer_aud: maturedCount
+							? Number((netRevenue / maturedCount).toFixed(2))
+							: null,
+						matches: conversions,
+					};
+				});
+
+				return toolResult({
+					cohort: {
+						start_date,
+						end_date,
+						as_of_date: asOfDate,
+						commercial_start_date: COMMERCIAL_START_DATE,
+					},
+					sample_order_count: sampleOrders.length,
+					unique_sample_customers: customers.length,
+					matchable_sample_customers: matchableCustomers.length,
+					unmatchable_sample_customers:
+						customers.length - matchableCustomers.length,
+					identity_coverage_rate: customers.length
+						? matchableCustomers.length / customers.length
+						: null,
+					windows: windowResults,
+					privacy: {
+						billing_email_returned: false,
+						billing_phone_returned: false,
+						customer_id_returned: false,
+						reusable_customer_key_returned: false,
+						matching_performed_inside_worker: true,
+						match_priority: ["email", "phone", "customer_id"],
+					},
+					methodology: {
+						sample_definition:
+							"Commercial-status order whose every line item is identified as a sample.",
+						purchase_definition:
+							"Later commercial-status WooCommerce order with total greater than A$20 that is not sample-only.",
+						denominator:
+							"Unique matchable sample customers mature enough to have completed each requested conversion window.",
+						refunds:
+							"WooCommerce refund records are deducted from attributed cohort revenue.",
+					},
+					read_only: true,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	server.registerTool(
 		"get_zipgrip_sample_to_purchase_cohort",
 		{
