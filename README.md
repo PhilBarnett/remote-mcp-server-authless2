@@ -325,3 +325,8 @@ requires the separate Cloudflare bindings `WC_STAGING_SITE`,
 `WP_STAGING_USERNAME` and `WP_STAGING_APPLICATION_PASSWORD`. Site origins and
 bridge roles are independently verified before a manifest is accepted.
 
+
+
+### Environment-aware WAPF pricing grid
+
+`manage_wapf_pricing_grid` previews or applies a complete parameter-driven base grid, per-fabric grids and one-dimensional option surcharges on an explicitly selected `live` or `staging` WooCommerce environment. Apply requires the exact preview plan hash and `CONFIRM APPLY WAPF PRICING GRID`, is limited to draft/hidden products, verifies the regular price and complete WAPF field-group hash after the atomic product update, and restores both values if verification fails. The tool contains no product IDs, labels, slugs or prices.
