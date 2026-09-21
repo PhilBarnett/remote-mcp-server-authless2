@@ -18,6 +18,27 @@ npm create cloudflare@latest -- my-mcp-server --template=cloudflare/ai/demos/rem
 
 To add your own [tools](https://developers.cloudflare.com/agents/model-context-protocol/protocol/tools/) to the MCP server, register each tool on the `McpServer` created in the `createServer()` function in `src/index.ts` using `server.registerTool(...)`.
 
+## Privacy-safe WooCommerce cohort reporting
+
+`get_sample_to_purchase_cohort` measures all-product or ZipGrip Fabric Sample to
+qualifying-purchase conversion for caller-selected cohort dates and 7–365 day windows.
+Use `product_scope: "all"` for the email scorecard or `product_scope: "zipgrip"` for
+the narrower historical analysis. It
+matches normalized billing email, phone and registered WooCommerce customer ID only
+inside the Worker. The response contains aggregate cohort performance and
+non-identifying WooCommerce order IDs, but never returns billing email, billing phone,
+customer ID or a reusable customer key.
+
+A sample order must contain one or more line items and every line item must be
+identified as a sample. A qualifying purchase is a later commercial-status order over
+A$20 that is not sample-only. The tool reports match coverage, matured and converted customers, conversion
+rate, time to first purchase, purchase counts, gross revenue, refunds, net revenue and
+revenue per matured sample customer. The analysis is read-only, respects the
+1 July 2024 commercial-data boundary and is capped at 730 days per request.
+
+This scoped tool replaces the former ZipGrip-only cohort tool while retaining its
+analysis through `product_scope: "zipgrip"`; this keeps the MCP tool count unchanged.
+
 ## Reusable guarded product Performance Max builder
 
 The reusable Google Ads workflow removes product-specific campaign code while
