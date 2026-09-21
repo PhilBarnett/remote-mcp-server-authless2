@@ -11618,10 +11618,16 @@ function createServer() {
 		return formula;
 	}
 
-	async function buildWapfPricingGridPlan(args: z.infer<typeof wapfPricingGridBase>, productOverride?: any) {
+	async function buildWapfPricingGridPlan(
+		args: z.infer<typeof wapfPricingGridBase>,
+		environment: ProductImageEnvironment,
+		productOverride?: any,
+	) {
 		validatePricingAxis(args.width_breakpoints, "Width breakpoints");
 		validatePricingAxis(args.drop_breakpoints, "Drop breakpoints");
-		const product = productOverride ?? await (await wcFetch("products/" + args.product_id)).json<any>();
+		const product = productOverride ?? await (
+			await productImageWcFetch(environment, "products/" + args.product_id)
+		).json<any>();
 		if (product.id !== args.product_id || product.name !== args.expected_product_name) {
 			throw new Error("WooCommerce product identity does not match the requested pricing target.");
 		}
@@ -11690,6 +11696,7 @@ function createServer() {
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
 		const afterHash = await genericWapfHashOf(updatedValue);
 		const planHash = await genericWapfHashOf({
+			environment,
 			product_id: args.product_id,
 			product_name: args.expected_product_name,
 			before_field_group_sha256: beforeHash,
@@ -11707,9 +11714,135 @@ function createServer() {
 		return { product, wapf, beforeHash, afterHash, planHash, updatedValue, baseFormula };
 	}
 
-	// Keep the legacy plan implementation available for source compatibility, but do not register its superseded tools.
-	void wapfPricingGridConfirmation;
-	void buildWapfPricingGridPlan;
+	const wapfPricingGridManager = wapfPricingGridBase.extend({
+		environment: z.enum(["live", "staging"]),
+		action: z.enum(["preview", "apply"]),
+		expected_plan_sha256: genericWapfHash.optional(),
+		confirmation: z.string().optional(),
+	});
+
+	server.registerTool(
+		"manage_wapf_pricing_grid",
+		{
+			description: "Preview or apply one complete parameter-driven WAPF price grid on the caller-selected live or staging site. The guarded apply is restricted to draft/hidden products, hash-locks the existing product and complete WAPF field group, writes the regular price and WAPF pricing atomically, verifies the result, and rolls both back on failure.",
+			inputSchema: wapfPricingGridManager,
+		},
+		async (args) => {
+			try {
+				const plan = await buildWapfPricingGridPlan(args, args.environment);
+				const summary = {
+					environment: args.environment,
+					product_id: plan.product.id,
+					product_name: plan.product.name,
+					status: plan.product.status,
+					catalog_visibility: plan.product.catalog_visibility,
+					before_field_group_sha256: plan.beforeHash,
+					after_field_group_sha256: plan.afterHash,
+					plan_sha256: plan.planHash,
+					regular_price_before: Number(plan.product.regular_price),
+					regular_price_after: args.new_regular_price,
+					width_breakpoints: args.width_breakpoints,
+					drop_breakpoints: args.drop_breakpoints,
+					base_grid_rows: args.base_price_grid.length,
+					base_grid_columns: args.base_price_grid[0]?.length ?? 0,
+					fabric_choices_priced: args.fabric_groups.map((group) => ({
+						slug: group.choice_slug,
+						label: group.expected_choice_label,
+					})),
+					option_surcharges: args.option_surcharges.map((surcharge) => ({
+						field_id: surcharge.field_id,
+						field_label: surcharge.expected_field_label,
+						choice_slug: surcharge.choice_slug,
+						choice_label: surcharge.expected_choice_label,
+					})),
+				};
+				if (args.action === "preview") {
+					return toolResult({
+						...summary,
+						preview_only: true,
+						write_performed: false,
+						required_confirmation: wapfPricingGridConfirmation,
+					});
+				}
+				if (args.confirmation !== wapfPricingGridConfirmation) {
+					throw new Error("Exact confirmation required: " + wapfPricingGridConfirmation);
+				}
+				if (!args.expected_plan_sha256 || args.expected_plan_sha256 !== plan.planHash) {
+					throw new Error("Pricing-grid plan changed after preview.");
+				}
+				try {
+					await productImageWcWrite(args.environment, "products/" + args.product_id, {
+						regular_price: pricingNumber(args.new_regular_price),
+						meta_data: [{
+							id: plan.wapf.meta.id,
+							key: "_wapf_fieldgroup",
+							value: plan.updatedValue,
+						}],
+					});
+					const verified = await (
+						await productImageWcFetch(args.environment, "products/" + args.product_id)
+					).json<any>();
+					const verifiedWapf = genericWapf(verified);
+					const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+					if (
+						verified.id !== args.product_id ||
+						verified.name !== args.expected_product_name ||
+						verified.status !== "draft" ||
+						verified.catalog_visibility !== "hidden" ||
+						verifiedWapf.meta.id !== args.expected_meta_data_id ||
+						verifiedHash !== plan.afterHash ||
+						Number(verified.regular_price) !== args.new_regular_price
+					) {
+						throw new Error("Post-write pricing-grid verification failed.");
+					}
+					return toolResult({
+						...summary,
+						preview_only: false,
+						write_performed: true,
+						verified: true,
+					});
+				} catch (writeError) {
+					try {
+						await productImageWcWrite(args.environment, "products/" + args.product_id, {
+							regular_price: String(plan.product.regular_price),
+							meta_data: [{
+								id: plan.wapf.meta.id,
+								key: "_wapf_fieldgroup",
+								value: plan.wapf.meta.value,
+							}],
+						});
+						const rolledBack = await (
+							await productImageWcFetch(args.environment, "products/" + args.product_id)
+						).json<any>();
+						const rolledBackWapf = genericWapf(rolledBack);
+						const rolledBackHash = await genericWapfHashOf(rolledBackWapf.meta.value);
+						if (
+							rolledBack.id !== args.product_id ||
+							rolledBack.name !== args.expected_product_name ||
+							rolledBackWapf.meta.id !== args.expected_meta_data_id ||
+							rolledBackHash !== plan.beforeHash ||
+							Number(rolledBack.regular_price) !== args.expected_regular_price
+						) {
+							throw new Error("Rollback verification failed.");
+						}
+					} catch (rollbackError) {
+						throw new Error(
+							"Pricing-grid update failed and rollback was incomplete: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)) +
+							" | " +
+							(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)),
+						);
+					}
+					throw new Error(
+						"Pricing-grid update failed; original price and WAPF field group were restored: " +
+						(writeError instanceof Error ? writeError.message : String(writeError)),
+					);
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
 
 	const wapfStorageKeyPattern = /(?:blindmotion-mcp|wapf|advanced_product_fields|acf.*option|lookup.*table|global.*price)/i;
 
