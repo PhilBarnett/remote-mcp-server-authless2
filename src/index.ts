@@ -9963,6 +9963,344 @@ function createServer() {
 		},
 	);
 
+	/* Generic, hash-locked updates to selected WAPF field pricing formulas. */
+	const wapfPricingFormulaConfirmation = "CONFIRM APPLY WAPF PRICING FORMULAS";
+	const wapfPricingFormulaValue = z.union([
+		z.string().max(4000),
+		z.number().finite(),
+	]);
+	const wapfPricingFormulaUpdate = z.object({
+		field_id: z.string().trim().min(1).max(120),
+		expected_field_label: z.string().trim().min(1).max(300),
+		expected_field_type: z.string().trim().min(1).max(100),
+		expected_pricing_type: z.enum(["none", "fixed", "fx"]),
+		expected_pricing_amount: wapfPricingFormulaValue,
+		expected_pricing_enabled: z.boolean(),
+		new_pricing_type: z.enum(["none", "fixed", "fx"]),
+		new_pricing_amount: wapfPricingFormulaValue,
+		new_pricing_enabled: z.boolean(),
+	});
+	const wapfPricingFormulaProduct = z.object({
+		product_id: genericWapfId,
+		expected_product_name: z.string().trim().min(1).max(500),
+		expected_status: z.enum(["publish", "draft", "private", "pending"]),
+		expected_catalog_visibility: z.enum(["visible", "catalog", "search", "hidden"]),
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		fields: z.array(wapfPricingFormulaUpdate).min(1).max(30),
+	});
+	const wapfPricingFormulaGlobal = z.object({
+		name: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
+		expected_label: z.string().trim().min(1).max(200),
+		expected_field_key: z.string().trim().min(1).max(200),
+		expected_value: z.number().finite(),
+		expected_value_sha256: genericWapfHash,
+	});
+	const wapfPricingFormulaBase = z.object({
+		products: z.array(wapfPricingFormulaProduct).min(1).max(10),
+		acf_field_group_id: genericWapfId,
+		expected_acf_field_group_title: z.string().trim().min(1).max(200),
+		expected_acf_field_group_post_name: z.string().trim().min(1).max(200),
+		global_prices: z.array(wapfPricingFormulaGlobal).min(1).max(20),
+	});
+	type WapfPricingFormulaArgs = z.infer<typeof wapfPricingFormulaBase>;
+
+	function wapfPricingFormulaValueMatches(left: unknown, right: string | number) {
+		return typeof left === typeof right && left === right;
+	}
+
+	async function buildWapfPricingFormulaPlan(args: WapfPricingFormulaArgs) {
+		const productIds = args.products.map((product) => product.product_id);
+		if (new Set(productIds).size !== productIds.length) {
+			throw new Error("Duplicate product IDs are not allowed in a pricing-formula plan.");
+		}
+		const globalNames = args.global_prices.map((globalPrice) => globalPrice.name);
+		if (new Set(globalNames).size !== globalNames.length) {
+			throw new Error("Duplicate Global Price names are not allowed.");
+		}
+		const detailQuery = new URLSearchParams({
+			lookup_names: "",
+			acf_field_group_id: String(args.acf_field_group_id),
+			expected_acf_field_group_title: args.expected_acf_field_group_title,
+		});
+		const pricingDetails = await authenticatedWpRest(
+			"blindmotion-mcp/v1/wapf-pricing-details?" + detailQuery.toString(),
+		);
+		if (
+			pricingDetails?.read_only !== true ||
+			pricingDetails?.unrelated_values_returned !== false ||
+			pricingDetails?.write_performed !== false ||
+			pricingDetails?.acf_field_group?.id !== args.acf_field_group_id ||
+			pricingDetails?.acf_field_group?.title !== args.expected_acf_field_group_title ||
+			pricingDetails?.acf_field_group?.post_name !== args.expected_acf_field_group_post_name
+		) {
+			throw new Error("Global Price inspection failed exact identity or read-only verification.");
+		}
+		const globalFields = pricingDetails.acf_field_group?.fields;
+		if (!Array.isArray(globalFields)) {
+			throw new Error("Global Price fields are unavailable.");
+		}
+		const verifiedGlobals = args.global_prices.map((expected) => {
+			const matches = globalFields.filter((field: any) => String(field?.name) === expected.name);
+			if (matches.length !== 1) {
+				throw new Error("Expected exactly one Global Price named " + expected.name + ".");
+			}
+			const field = matches[0];
+			if (
+				String(field?.label) !== expected.expected_label ||
+				String(field?.key) !== expected.expected_field_key ||
+				field?.type !== "number" ||
+				Number(field?.value) !== expected.expected_value ||
+				String(field?.value_sha256) !== expected.expected_value_sha256
+			) {
+				throw new Error("Global Price identity or value changed: " + expected.name + ".");
+			}
+			return {
+				name: expected.name,
+				label: expected.expected_label,
+				field_key: expected.expected_field_key,
+				value: expected.expected_value,
+				value_sha256: expected.expected_value_sha256,
+			};
+		});
+
+		const products = [];
+		for (const requested of args.products) {
+			const product = await (await wcFetch("products/" + requested.product_id)).json<any>();
+			if (
+				product.id !== requested.product_id ||
+				product.name !== requested.expected_product_name ||
+				product.status !== requested.expected_status ||
+				product.catalog_visibility !== requested.expected_catalog_visibility
+			) {
+				throw new Error("Product identity or publication state changed: " + requested.product_id + ".");
+			}
+			const wapf = genericWapf(product);
+			const beforeHash = await genericWapfHashOf(wapf.meta.value);
+			if (
+				wapf.meta.id !== requested.expected_meta_data_id ||
+				beforeHash !== requested.expected_field_group_sha256
+			) {
+				throw new Error("WAPF field group changed after inspection: " + requested.product_id + ".");
+			}
+			const requestedFieldIds = requested.fields.map((field) => field.field_id);
+			if (new Set(requestedFieldIds).size !== requestedFieldIds.length) {
+				throw new Error("Duplicate field IDs for product " + requested.product_id + ".");
+			}
+			const updatedGroup = structuredClone(wapf.group);
+			const updates = requested.fields.map((update) => {
+				const matches = updatedGroup.fields.filter(
+					(field: any) => genericWapfFieldId(field) === update.field_id,
+				);
+				if (matches.length !== 1) {
+					throw new Error("Selected pricing field is missing or ambiguous: " + update.field_id + ".");
+				}
+				const field = matches[0];
+				if (
+					wapfFieldLabel(field) !== update.expected_field_label ||
+					String(field?.type ?? "") !== update.expected_field_type ||
+					String(field?.pricing?.type ?? "") !== update.expected_pricing_type ||
+					!wapfPricingFormulaValueMatches(
+						field?.pricing?.amount,
+						update.expected_pricing_amount,
+					) ||
+					Boolean(field?.pricing?.enabled) !== update.expected_pricing_enabled
+				) {
+					throw new Error("Selected pricing field changed after inspection: " + update.field_id + ".");
+				}
+				field.pricing = {
+					...field.pricing,
+					type: update.new_pricing_type,
+					amount: update.new_pricing_amount,
+					enabled: update.new_pricing_enabled,
+				};
+				return {
+					field_id: update.field_id,
+					field_label: update.expected_field_label,
+					field_type: update.expected_field_type,
+					before: {
+						type: update.expected_pricing_type,
+						amount: update.expected_pricing_amount,
+						enabled: update.expected_pricing_enabled,
+					},
+					after: {
+						type: update.new_pricing_type,
+						amount: update.new_pricing_amount,
+						enabled: update.new_pricing_enabled,
+					},
+				};
+			});
+			const updatedValue =
+				typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+			const afterHash = await genericWapfHashOf(updatedValue);
+			products.push({
+				product: {
+					id: product.id,
+					name: product.name,
+					status: product.status,
+					catalog_visibility: product.catalog_visibility,
+				},
+				meta_data_id: wapf.meta.id,
+				before_field_group_sha256: beforeHash,
+				after_field_group_sha256: afterHash,
+				updates,
+				originalValue: wapf.meta.value,
+				updatedValue,
+			});
+		}
+		const planCore = {
+			acf_field_group: {
+				id: args.acf_field_group_id,
+				title: args.expected_acf_field_group_title,
+				post_name: args.expected_acf_field_group_post_name,
+			},
+			global_prices: verifiedGlobals,
+			products: products.map((item) => ({
+				product: item.product,
+				meta_data_id: item.meta_data_id,
+				before_field_group_sha256: item.before_field_group_sha256,
+				after_field_group_sha256: item.after_field_group_sha256,
+				updates: item.updates,
+			})),
+		};
+		return {
+			planCore,
+			planHash: await genericWapfHashOf(planCore),
+			products,
+		};
+	}
+
+	server.registerTool(
+		"preview_wapf_pricing_formula_updates",
+		{
+			description:
+				"Preview exact caller-selected WAPF pricing-formula changes across live or draft products. Revalidates product identities, publication states, complete WAPF hashes, current field pricing and named Global Prices; performs no writes.",
+			inputSchema: wapfPricingFormulaBase,
+		},
+		async (args) => {
+			try {
+				const plan = await buildWapfPricingFormulaPlan(args);
+				return toolResult({
+					preview_only: true,
+					plan: plan.planCore,
+					plan_sha256: plan.planHash,
+					write_performed: false,
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"apply_wapf_pricing_formula_updates_guarded",
+		{
+			description:
+				"Apply one exact previewed WAPF pricing-formula plan across live or draft products. Revalidates Global Prices and every product, field, formula and hash; changes only selected pricing objects, verifies all writes and rolls back every changed product on failure.",
+			inputSchema: wapfPricingFormulaBase.extend({
+				expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal(wapfPricingFormulaConfirmation),
+			}),
+		},
+		async (args) => {
+			try {
+				const plan = await buildWapfPricingFormulaPlan(args);
+				if (plan.planHash !== args.expected_plan_sha256) {
+					throw new Error("Pricing-formula plan changed after preview; no write performed.");
+				}
+				const written: typeof plan.products = [];
+				try {
+					for (const item of plan.products) {
+						await wcWrite("products/" + item.product.id, {
+							meta_data: [{
+								id: item.meta_data_id,
+								key: "_wapf_fieldgroup",
+								value: item.updatedValue,
+							}],
+						});
+						written.push(item);
+						const verified = await (
+							await wcFetch("products/" + item.product.id)
+						).json<any>();
+						const verifiedWapf = genericWapf(verified);
+						const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+						if (
+							verified.id !== item.product.id ||
+							verified.name !== item.product.name ||
+							verified.status !== item.product.status ||
+							verified.catalog_visibility !== item.product.catalog_visibility ||
+							verifiedWapf.meta.id !== item.meta_data_id ||
+							verifiedHash !== item.after_field_group_sha256
+						) {
+							throw new Error("Post-write verification failed for product " + item.product.id + ".");
+						}
+					}
+					return toolResult({
+						applied: true,
+						verified: true,
+						plan_sha256: plan.planHash,
+						products: plan.planCore.products,
+						global_prices: plan.planCore.global_prices,
+						write_performed: true,
+						rollback_performed: false,
+						untouched: [
+							"product status",
+							"catalog visibility",
+							"non-WAPF metadata",
+							"unselected WAPF fields",
+							"images",
+							"descriptions",
+							"categories",
+						],
+					});
+				} catch (writeError) {
+					const rollbackErrors: string[] = [];
+					for (const item of [...written].reverse()) {
+						try {
+							await wcWrite("products/" + item.product.id, {
+								meta_data: [{
+									id: item.meta_data_id,
+									key: "_wapf_fieldgroup",
+									value: item.originalValue,
+								}],
+							});
+							const rolledBack = await (
+								await wcFetch("products/" + item.product.id)
+							).json<any>();
+							const rolledBackWapf = genericWapf(rolledBack);
+							const rolledBackHash = await genericWapfHashOf(rolledBackWapf.meta.value);
+							if (
+								rolledBackWapf.meta.id !== item.meta_data_id ||
+								rolledBackHash !== item.before_field_group_sha256
+							) {
+								throw new Error("Rollback verification hash mismatch.");
+							}
+						} catch (rollbackError) {
+							rollbackErrors.push(
+								item.product.id + ": " +
+									(rollbackError instanceof Error
+										? rollbackError.message
+										: String(rollbackError)),
+							);
+						}
+					}
+					if (rollbackErrors.length) {
+						throw new Error(
+							"Pricing-formula update failed and rollback was incomplete: " +
+								rollbackErrors.join(" | "),
+						);
+					}
+					throw new Error(
+						"Pricing-formula update failed; exact rollback succeeded: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)),
+					);
+				}
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	server.registerTool(
 		"copy_wapf_product_option_fields_guarded",
 		{
