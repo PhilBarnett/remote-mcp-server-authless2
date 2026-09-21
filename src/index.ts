@@ -549,6 +549,7 @@ const STAGING_PLUGIN_SLUG_SCHEMA = z.enum([
 	"blindmotion-product-promotion-bridge",
 	"blindmotion-wapf-pricing-bridge",
 	"blindmotion-cro-suite",
+	"blindmotion-visualizer",
 ]);
 type StagingPluginSlug = z.infer<typeof STAGING_PLUGIN_SLUG_SCHEMA>;
 const STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST: Record<
@@ -579,11 +580,11 @@ const STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST: Record<
 		mainFile: "blindmotion-cro-suite/blindmotion-cro-suite.php",
 		pluginName: "Blindmotion CRO Suite",
 	},
+	"blindmotion-visualizer": {
+		mainFile: "blindmotion-visualizer/blindmotion-visualizer.php",
+		pluginName: "Blindmotion Visualizer",
+	},
 };
-
-const VISUALIZER_PLUGIN_CONFIRMATION = "CONFIRM INSTALL BLINDMOTION VISUALIZER";
-const VISUALIZER_PLUGIN_SLUG = "blindmotion-visualizer";
-const VISUALIZER_PLUGIN_MAIN_FILE = "blindmotion-visualizer/blindmotion-visualizer.php";
 
 function decodeBasicHtmlEntities(value: string) {
 	return value
@@ -5082,75 +5083,61 @@ function createServer() {
 	);
 
 	server.registerTool(
-		"inspect_staging_blindmotion_plugin_deployment",
+		"manage_staging_blindmotion_plugin_deployment",
 		{
 			description:
-				"Read the installed version and active state of one reviewed Blindmotion plugin through the exact staging-only deployment bridge. Performs no writes and cannot inspect arbitrary plugins.",
-			inputSchema: z.object({
-				plugin_slug: STAGING_PLUGIN_SLUG_SCHEMA,
-			}),
+				"Inspect, install or update one reviewed allowlisted Blindmotion WordPress plugin on the exact staging origin. Inspection is read-only. Deployment hash-locks ZIP bytes, verifies current version and fixed identity, activates and verifies with transactional rollback. Cannot target live or arbitrary plugins.",
+			inputSchema: z.discriminatedUnion("action", [
+				z.object({
+					action: z.literal("inspect"),
+					plugin_slug: STAGING_PLUGIN_SLUG_SCHEMA,
+				}),
+				z.object({
+					action: z.literal("deploy"),
+					plugin_slug: STAGING_PLUGIN_SLUG_SCHEMA,
+					target_version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/),
+					expected_current_version: z
+						.string()
+						.regex(/^(?:NONE|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/),
+					archive_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+					plugin_zip_base64: z.string().min(100).max(14_000_000),
+					confirmation: z.literal(STAGING_PLUGIN_DEPLOYMENT_CONFIRMATION),
+				}),
+			]),
 		},
-		async ({ plugin_slug }) => {
+		async (input) => {
 			try {
-				const expected = STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST[plugin_slug];
-				const inspected = await stagingPluginDeploymentRequest({
-					action: "inspect",
-					plugin_slug,
-				});
-				if (
-					inspected.environment !== "staging" ||
-					inspected.host !== "staging-online.blindmotion.com.au" ||
-					inspected.plugin_slug !== plugin_slug ||
-					inspected.main_file !== expected.mainFile ||
-					inspected.plugin_name !== expected.pluginName ||
-					inspected.write_performed !== false
-				) {
-					throw new Error("Staging deployment inspection failed environment or plugin identity verification.");
+				const expected = STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST[input.plugin_slug];
+				if (input.action === "inspect") {
+					const inspected = await stagingPluginDeploymentRequest({
+						action: "inspect",
+						plugin_slug: input.plugin_slug,
+					});
+					if (
+						inspected.environment !== "staging" ||
+						inspected.host !== "staging-online.blindmotion.com.au" ||
+						inspected.plugin_slug !== input.plugin_slug ||
+						inspected.main_file !== expected.mainFile ||
+						inspected.plugin_name !== expected.pluginName ||
+						inspected.write_performed !== false
+					) {
+						throw new Error("Staging deployment inspection failed environment or plugin identity verification.");
+					}
+					return toolResult({
+						read_only: true,
+						environment: inspected.environment,
+						host: inspected.host,
+						plugin_slug: inspected.plugin_slug,
+						main_file: inspected.main_file,
+						plugin_name: inspected.plugin_name,
+						installed: inspected.installed === true,
+						version: inspected.version ?? null,
+						active: inspected.active === true,
+						write_performed: false,
+					});
 				}
-				return toolResult({
-					read_only: true,
-					environment: inspected.environment,
-					host: inspected.host,
-					plugin_slug: inspected.plugin_slug,
-					main_file: inspected.main_file,
-					plugin_name: inspected.plugin_name,
-					installed: inspected.installed === true,
-					version: inspected.version ?? null,
-					active: inspected.active === true,
-					write_performed: false,
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
 
-	server.registerTool(
-		"install_update_staging_blindmotion_plugin_guarded",
-		{
-			description:
-				"Install or update one reviewed allowlisted Blindmotion WordPress plugin on the exact staging origin. Hash-locks ZIP bytes, verifies the current version through a read-only preflight, validates the fixed plugin identity, activates, verifies and relies on transactional rollback. Cannot target live or arbitrary plugins.",
-			inputSchema: z.object({
-				plugin_slug: STAGING_PLUGIN_SLUG_SCHEMA,
-				target_version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/),
-				expected_current_version: z
-					.string()
-					.regex(/^(?:NONE|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/),
-				archive_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				plugin_zip_base64: z.string().min(100).max(14_000_000),
-				confirmation: z.literal(STAGING_PLUGIN_DEPLOYMENT_CONFIRMATION),
-			}),
-		},
-		async ({
-			plugin_slug,
-			target_version,
-			expected_current_version,
-			archive_sha256,
-			plugin_zip_base64,
-		}) => {
-			try {
-				const expected = STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST[plugin_slug];
-				const bytes = decodeBase64(plugin_zip_base64);
+				const bytes = decodeBase64(input.plugin_zip_base64);
 				if (bytes.length < 64 || bytes.length > 10_000_000) {
 					throw new Error("Plugin ZIP must decode to between 64 bytes and 10 MB.");
 				}
@@ -5158,46 +5145,46 @@ function createServer() {
 					throw new Error("Plugin package is not a ZIP archive.");
 				}
 				const calculatedSha256 = await sha256Hex(bytes);
-				if (calculatedSha256 !== archive_sha256) {
+				if (calculatedSha256 !== input.archive_sha256) {
 					throw new Error("Plugin ZIP SHA-256 does not match the confirmed digest.");
 				}
 
 				const inspected = await stagingPluginDeploymentRequest({
 					action: "inspect",
-					plugin_slug,
+					plugin_slug: input.plugin_slug,
 				});
 				const inspectedVersion = inspected.installed === true ? String(inspected.version ?? "") : "NONE";
 				if (
 					inspected.environment !== "staging" ||
 					inspected.host !== "staging-online.blindmotion.com.au" ||
-					inspected.plugin_slug !== plugin_slug ||
+					inspected.plugin_slug !== input.plugin_slug ||
 					inspected.main_file !== expected.mainFile ||
 					inspected.plugin_name !== expected.pluginName ||
 					inspected.write_performed !== false ||
-					inspectedVersion !== expected_current_version
+					inspectedVersion !== input.expected_current_version
 				) {
 					throw new Error("Staging plugin deployment preflight state or identity changed.");
 				}
 
 				const verified = await stagingPluginDeploymentRequest({
-					action: expected_current_version === "NONE" ? "install" : "update",
-					plugin_slug,
+					action: input.expected_current_version === "NONE" ? "install" : "update",
+					plugin_slug: input.plugin_slug,
 					main_file: expected.mainFile,
-					target_version,
-					expected_current_version,
-					archive_sha256,
-					archive_base64: plugin_zip_base64,
+					target_version: input.target_version,
+					expected_current_version: input.expected_current_version,
+					archive_sha256: input.archive_sha256,
+					archive_base64: input.plugin_zip_base64,
 					activate: true,
 					confirmation: STAGING_PLUGIN_DEPLOYMENT_CONFIRMATION,
 				});
 				if (
 					verified.environment !== "staging" ||
 					verified.host !== "staging-online.blindmotion.com.au" ||
-					verified.plugin_slug !== plugin_slug ||
+					verified.plugin_slug !== input.plugin_slug ||
 					verified.main_file !== expected.mainFile ||
 					verified.plugin_name !== expected.pluginName ||
-					verified.version !== target_version ||
-					verified.archive_sha256 !== archive_sha256 ||
+					verified.version !== input.target_version ||
+					verified.archive_sha256 !== input.archive_sha256 ||
 					verified.active !== true ||
 					verified.write_performed !== true ||
 					verified.transactional_rollback_protected !== true
@@ -5216,72 +5203,6 @@ function createServer() {
 					archive_sha256: verified.archive_sha256,
 					active: verified.active,
 					transactional_rollback_protected: true,
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"install_update_blindmotion_visualizer_plugin_guarded",
-		{
-			description:
-				"Install or update only the isolated blindmotion-visualizer WordPress plugin through the locked Blindmotion WordPress bridge. Validates a ZIP signature, exact SHA-256 digest, semantic version, fixed slug/main file and expected installed version; cannot write another plugin.",
-			inputSchema: z.object({
-				target_version: z.string().regex(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/),
-				expected_current_version: z
-					.string()
-					.regex(/^(?:NONE|\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/),
-				archive_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				plugin_zip_base64: z.string().min(100).max(8_000_000),
-				confirmation: z.literal(VISUALIZER_PLUGIN_CONFIRMATION),
-			}),
-		},
-		async ({ target_version, expected_current_version, archive_sha256, plugin_zip_base64 }) => {
-			try {
-				const bytes = decodeBase64(plugin_zip_base64);
-				if (bytes.length < 64 || bytes.length > 6_000_000) {
-					throw new Error("Visualizer ZIP must decode to between 64 bytes and 6 MB.");
-				}
-				if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
-					throw new Error("Visualizer package is not a ZIP archive.");
-				}
-				const calculatedSha256 = await sha256Hex(bytes);
-				if (calculatedSha256 !== archive_sha256) {
-					throw new Error("Visualizer ZIP SHA-256 does not match the confirmed digest.");
-				}
-				const bridgeResponse = await wpMcpWrite("visualizer-plugin", {
-					action: expected_current_version === "NONE" ? "install" : "update",
-					plugin_slug: VISUALIZER_PLUGIN_SLUG,
-					main_file: VISUALIZER_PLUGIN_MAIN_FILE,
-					target_version,
-					expected_current_version,
-					archive_sha256,
-					archive_base64: plugin_zip_base64,
-					activate: true,
-				});
-				const verified = await bridgeResponse.json<any>();
-				if (
-					verified.plugin_slug !== VISUALIZER_PLUGIN_SLUG ||
-					verified.main_file !== VISUALIZER_PLUGIN_MAIN_FILE ||
-					verified.version !== target_version ||
-					verified.archive_sha256 !== archive_sha256 ||
-					verified.active !== true
-				) {
-					throw new Error(
-						"WordPress bridge response failed visualizer identity/version/digest verification.",
-					);
-				}
-				return toolResult({
-					completed: true,
-					plugin_slug: verified.plugin_slug,
-					main_file: verified.main_file,
-					previous_version: verified.previous_version ?? null,
-					version: verified.version,
-					archive_sha256: verified.archive_sha256,
-					active: verified.active,
-					rollback_available: verified.rollback_available === true,
 				});
 			} catch (error) {
 				return toolError(error);
