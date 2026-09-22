@@ -11834,6 +11834,16 @@ function createServer() {
 			drop_breakpoints: pricingAxis,
 			values: z.array(z.number().nonnegative()).min(2).max(50),
 		})).max(20).default([]),
+		fixed_choice_prices: z.array(z.object({
+			field_id: z.string().min(1),
+			expected_field_label: z.string().min(1),
+			choice_slug: z.string().min(1),
+			expected_choice_label: z.string().min(1),
+			expected_pricing_type: z.enum(["none", "fixed", "fx"]),
+			expected_pricing_amount: z.string().trim().min(1).max(200),
+			new_pricing_type: z.enum(["fixed", "fx"]),
+			new_pricing_amount: z.string().trim().regex(/^\\d+(?:\\.\\d+)?(?:\\*\\[qty\\])?$/),
+		})).max(20).default([]),
 	});
 
 	function pricingNumber(value: number) {
@@ -11951,6 +11961,30 @@ function createServer() {
 				args.drop_field_id, surcharge.drop_breakpoints, surcharge.values,
 			);
 		}
+		const seenFixedPriceChoices = new Set<string>();
+		for (const update of args.fixed_choice_prices) {
+			const identity = update.field_id + ":" + update.choice_slug;
+			if (seenFixedPriceChoices.has(identity)) {
+				throw new Error("Duplicate fixed choice-price target: " + update.expected_choice_label + ".");
+			}
+			seenFixedPriceChoices.add(identity);
+			const field = exactField(update.field_id, update.expected_field_label);
+			const choices = field.options?.choices;
+			if (!Array.isArray(choices)) throw new Error("Fixed choice-price field choices are missing.");
+			const matches = choices.filter((choice: any) => String(choice.slug) === update.choice_slug);
+			if (matches.length !== 1 || String(matches[0].label) !== update.expected_choice_label) {
+				throw new Error("Expected fixed choice-price identity not found: " + update.expected_choice_label + ".");
+			}
+			const choice = matches[0];
+			if (
+				String(choice.pricing_type ?? "none") !== update.expected_pricing_type ||
+				String(choice.pricing_amount ?? "0").trim() !== update.expected_pricing_amount
+			) {
+				throw new Error("Current choice pricing changed after review: " + update.expected_choice_label + ".");
+			}
+			choice.pricing_type = update.new_pricing_type;
+			choice.pricing_amount = update.new_pricing_amount;
+		}
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
 		const afterHash = await genericWapfHashOf(updatedValue);
 		const planHash = await genericWapfHashOf({
@@ -11968,6 +12002,7 @@ function createServer() {
 			fabric_selector_field_id: args.fabric_selector_field_id,
 			fabric_groups: args.fabric_groups,
 			option_surcharges: args.option_surcharges,
+			fixed_choice_prices: args.fixed_choice_prices,
 		});
 		return { product, wapf, beforeHash, afterHash, planHash, updatedValue, baseFormula };
 	}
@@ -11983,7 +12018,7 @@ function createServer() {
 	server.registerTool(
 		"manage_wapf_pricing_grid",
 		{
-			description: "Inspect, preview or apply one complete parameter-driven WAPF price grid on the caller-selected live or staging site. Inspect is read-only and returns the exact product, WAPF metadata, field and choice identities required to build a guarded plan. Apply is restricted to draft/hidden products, hash-locks the existing product and complete WAPF field group, writes the regular price and WAPF pricing atomically, verifies the result, and rolls both back on failure.",
+			description: "Inspect, preview or apply one complete parameter-driven WAPF price grid plus optional exact fixed choice-price updates on the caller-selected live or staging site. Inspect is read-only and returns the exact product, WAPF metadata, field and choice identities required to build a guarded plan. Apply is restricted to draft/hidden products, hash-locks the existing product and complete WAPF field group, writes the regular price and WAPF pricing atomically, verifies the result, and rolls both back on failure.",
 			inputSchema: wapfPricingGridManager,
 		},
 		async (args) => {
@@ -12068,6 +12103,16 @@ function createServer() {
 						field_label: surcharge.expected_field_label,
 						choice_slug: surcharge.choice_slug,
 						choice_label: surcharge.expected_choice_label,
+					})),
+					fixed_choice_prices: pricingArgs.fixed_choice_prices.map((update) => ({
+						field_id: update.field_id,
+						field_label: update.expected_field_label,
+						choice_slug: update.choice_slug,
+						choice_label: update.expected_choice_label,
+						pricing_type_before: update.expected_pricing_type,
+						pricing_amount_before: update.expected_pricing_amount,
+						pricing_type_after: update.new_pricing_type,
+						pricing_amount_after: update.new_pricing_amount,
 					})),
 				};
 				if (args.action === "preview") {
