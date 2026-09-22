@@ -11842,7 +11842,7 @@ function createServer() {
 			expected_pricing_type: z.enum(["none", "fixed", "fx"]),
 			expected_pricing_amount: z.string().trim().min(1).max(200),
 			new_pricing_type: z.enum(["fixed", "fx"]),
-			new_pricing_amount: z.string().trim().regex(/^\\d+(?:\\.\\d+)?(?:\\*\\[qty\\])?$/),
+			new_pricing_amount: z.string().trim().regex(/^\d+(?:\.\d+)?(?:\*\[qty\])?$/),
 		})).max(20).default([]),
 	});
 
