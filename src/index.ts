@@ -730,8 +730,33 @@ function stagingProductImageAccess() {
 	};
 }
 
+function stagingPluginDeploymentAccess() {
+	const workerEnv = env as unknown as Record<string, string | undefined>;
+	if (
+		!workerEnv.WC_STAGING_SITE ||
+		!workerEnv.WP_STAGING_DEPLOYMENT_USERNAME ||
+		!workerEnv.WP_STAGING_DEPLOYMENT_APPLICATION_PASSWORD
+	) {
+		throw new Error("Dedicated staging plugin-deployment access is not configured in Cloudflare.");
+	}
+	const site = new URL(workerEnv.WC_STAGING_SITE);
+	if (
+		site.protocol !== "https:" ||
+		site.hostname !== "staging-online.blindmotion.com.au" ||
+		(site.pathname !== "/" && site.pathname !== "") ||
+		site.search !== "" ||
+		site.hash !== ""
+	) {
+		throw new Error("Staging plugin-deployment site must be the exact approved HTTPS origin.");
+	}
+	return {
+		baseUrl: site.origin,
+		auth: `Basic ${btoa(`${workerEnv.WP_STAGING_DEPLOYMENT_USERNAME}:${workerEnv.WP_STAGING_DEPLOYMENT_APPLICATION_PASSWORD}`)}`,
+	};
+}
+
 async function stagingPluginDeploymentRequest(body: unknown) {
-	const access = stagingProductImageAccess();
+	const access = stagingPluginDeploymentAccess();
 	const response = await fetch(
 		access.baseUrl + "/wp-json/blindmotion-mcp/v1/plugin-deployment",
 		{
