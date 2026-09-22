@@ -317,7 +317,9 @@ async function assertSalesAdsetForCreation(adsetId: string) {
 		"adset",
 		"campaign_id,status,effective_status,destination_type,optimization_goal,promoted_object,targeting,daily_budget,lifetime_budget",
 	);
-	if (adset.status !== "PAUSED") throw new Error("Website-sales ad creation requires a PAUSED parent ad set.");
+	if (!["ACTIVE", "PAUSED"].includes(String(adset.status))) {
+		throw new Error("Website-sales ad creation requires an ACTIVE or PAUSED parent ad set.");
+	}
 	if (adset.destination_type !== "WEBSITE" || adset.optimization_goal !== "OFFSITE_CONVERSIONS") {
 		throw new Error("Parent ad set is not a WEBSITE / OFFSITE_CONVERSIONS sales ad set.");
 	}
@@ -326,8 +328,11 @@ async function assertSalesAdsetForCreation(adsetId: string) {
 		"campaign",
 		"status,effective_status,objective,daily_budget,lifetime_budget",
 	);
-	if (campaign.status !== "PAUSED" || campaign.objective !== "OUTCOME_SALES") {
-		throw new Error("Parent campaign must be a PAUSED OUTCOME_SALES campaign.");
+	if (
+		!["ACTIVE", "PAUSED"].includes(String(campaign.status)) ||
+		campaign.objective !== "OUTCOME_SALES"
+	) {
+		throw new Error("Parent campaign must be an ACTIVE or PAUSED OUTCOME_SALES campaign.");
 	}
 	return { adset, campaign };
 }
@@ -1003,7 +1008,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"create_meta_website_sales_video_ad_paused",
 		{
 			description:
-				"Create one PAUSED website-sales video ad from an explicitly validated owned Meta video. Parent campaign/ad set must be PAUSED OUTCOME_SALES / WEBSITE. Supports same-site UTM tracking and cannot activate delivery.",
+				"Create one PAUSED website-sales video ad from an explicitly validated owned Meta video. Parent campaign/ad set may be ACTIVE or PAUSED but must be OUTCOME_SALES / WEBSITE. Supports same-site UTM tracking and cannot activate delivery.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				video_id: z.string().regex(/^\d+$/),
