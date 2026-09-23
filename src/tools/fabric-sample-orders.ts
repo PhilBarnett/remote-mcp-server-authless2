@@ -6,6 +6,11 @@ const FABRIC_SAMPLE_ORDER_CONFIRMATION = "CONFIRM CREATE FABRIC SAMPLE ORDER";
 const REQUEST_META_KEY = "_blindmotion_mcp_sample_request_id";
 const WAPF_META_KEY = "_wapf_meta";
 
+function sampleOrderCreationEnabled() {
+	// Deliberately fail closed until the WAPF importer payload is parity tested.
+	return false;
+}
+
 type WooRequest = (
 	path: string,
 	params?: Record<string, string | number | undefined>,
@@ -188,7 +193,9 @@ export function registerFabricSampleOrderTool(
 				// WooCommerce REST line-item display meta does not create WAPF\u2019s hidden
 				// _wapf_meta. iDempiere requires it to map selections. Fail before any
 				// read or write until a parity-tested WAPF payload builder is installed.
-				throw new Error("Fabric Sample API creation is temporarily disabled: the iDempiere importer requires validated _wapf_meta. No order was created.");
+				if (!sampleOrderCreationEnabled()) {
+					throw new Error("Fabric Sample API creation is temporarily disabled: the iDempiere importer requires validated _wapf_meta. No order was created.");
+				}
 				const fieldLabels = selections.map((selection) => selection.field_label);
 				if (new Set(fieldLabels).size !== fieldLabels.length) {
 					throw new Error("Each WAPF field_label may appear only once per sample order.");
