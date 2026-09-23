@@ -11799,10 +11799,303 @@ function createServer() {
 		return { product, wapf, beforeHash, afterHash, planHash, updatedValue, baseFormula };
 	}
 
+	/* Guarded staging-only addition of a fabric family to Everyday Roller Blinds.
+	 * The operation clones reviewed selector choices, colour-field templates and
+	 * every applicable lookup-variable rule from caller-selected reference
+	 * choices. Supplier images are fingerprinted during preview, uploaded only
+	 * during apply, and the complete WAPF field group is hash locked and rolled
+	 * back on any verification failure. */
+	const everydayFabricAdditionConfirmation = "CONFIRM ADD EVERYDAY FABRIC TO STAGING";
+	const everydayFabricRole = z.enum(["blockout", "light_filter", "sheer"]);
+	const everydayFabricColour = z.object({
+		label: z.string().trim().min(1).max(200),
+		slug: wapfVisualChoiceSlug,
+		source_url: z.string().url(),
+		filename: wapfVisualFilename,
+	});
+	const everydayFabricFamily = z.object({
+		role: everydayFabricRole,
+		selector_field_id: wapfVisualFieldId,
+		expected_selector_label: z.string().trim().min(1).max(300),
+		reference_choice_slug: wapfVisualChoiceSlug,
+		expected_reference_choice_label: z.string().trim().min(1).max(300),
+		new_choice_slug: wapfVisualChoiceSlug,
+		new_choice_label: z.string().trim().min(1).max(300),
+		colour_template_field_id: wapfVisualFieldId,
+		expected_colour_template_label: z.string().trim().min(1).max(300),
+		new_colour_field_id: wapfVisualFieldId,
+		new_colour_field_label: z.string().trim().min(1).max(300),
+		colours: z.array(everydayFabricColour).min(1).max(20),
+	});
+	const everydayFabricAdditionBase = z.object({
+		product_id: genericWapfId,
+		expected_product_name: z.string().trim().min(1).max(500),
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		families: z.array(everydayFabricFamily).length(3),
+	});
+	type EverydayFabricAdditionInput = z.infer<typeof everydayFabricAdditionBase>;
+	type EverydayFabricFamilyInput = z.infer<typeof everydayFabricFamily>;
+	type EverydayLockedColour = z.infer<typeof everydayFabricColour> & {
+		expected_sha256: string;
+		mime_type: string;
+		byte_length: number;
+	};
+
+	function deepReplaceExactString(value: any, from: string, to: string): any {
+		if (typeof value === "string") return value === from ? to : value;
+		if (Array.isArray(value)) return value.map((item) => deepReplaceExactString(item, from, to));
+		if (!value || typeof value !== "object") return value;
+		return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+			key,
+			deepReplaceExactString(item, from, to),
+		]));
+	}
+
+	function jsonContains(value: any, needle: string) {
+		return JSON.stringify(value).includes(JSON.stringify(needle));
+	}
+
+	function cloneEverydayVariableRules(
+		value: any,
+		selectorFieldId: string,
+		referenceSlug: string,
+		newSlug: string,
+	): number {
+		let cloned = 0;
+		const visit = (node: any): void => {
+			if (Array.isArray(node)) {
+				for (const item of [...node]) visit(item);
+				const additions: any[] = [];
+				for (const item of node) {
+					if (!item || typeof item !== "object") continue;
+					const matches =
+						jsonContains(item, selectorFieldId) &&
+						jsonContains(item, referenceSlug) &&
+						JSON.stringify(item).includes("lookuptable(");
+					if (!matches) continue;
+					const nestedMatch = Object.values(item).some((child) =>
+						child && typeof child === "object" &&
+						jsonContains(child, selectorFieldId) &&
+						jsonContains(child, referenceSlug) &&
+						JSON.stringify(child).includes("lookuptable("),
+					);
+					if (nestedMatch) continue;
+					const copy = deepReplaceExactString(structuredClone(item), referenceSlug, newSlug);
+					if (!node.some((existing) => JSON.stringify(existing) === JSON.stringify(copy)) &&
+						!additions.some((existing) => JSON.stringify(existing) === JSON.stringify(copy))) {
+						additions.push(copy);
+						cloned += 1;
+					}
+				}
+				node.push(...additions);
+				return;
+			}
+			if (node && typeof node === "object") {
+				for (const child of Object.values(node)) visit(child);
+			}
+		};
+		visit(value);
+		return cloned;
+	}
+
+	async function lockEverydayColours(families: EverydayFabricFamilyInput[]) {
+		const locked = new Map<string, EverydayLockedColour>();
+		for (const colour of families.flatMap((family) => family.colours)) {
+			const key = colour.source_url + "|" + colour.filename.toLocaleLowerCase();
+			if (locked.has(key)) continue;
+			const { response } = await fetchPublicResource(colour.source_url, "image/jpeg,image/png,image/webp");
+			const mimeType = String(response.headers.get("content-type") ?? "").split(";")[0].trim().toLocaleLowerCase();
+			const bytes = new Uint8Array(await response.arrayBuffer());
+			if (!["image/jpeg", "image/png", "image/webp"].includes(mimeType) || !bytes.length ||
+				bytes.length > 6_000_000 || !hasExpectedImageSignature(bytes, mimeType)) {
+				throw new Error("Invalid Fairlight colour image: " + colour.source_url + ".");
+			}
+			const extension = colour.filename.split(".").pop()?.toLocaleLowerCase() ?? "";
+			const allowed: Record<string, string[]> = {
+				"image/jpeg": ["jpg", "jpeg"], "image/png": ["png"], "image/webp": ["webp"],
+			};
+			if (!allowed[mimeType]?.includes(extension)) {
+				throw new Error("Fairlight image filename and MIME type disagree.");
+			}
+			locked.set(key, {
+				...colour,
+				expected_sha256: await sha256Hex(bytes),
+				mime_type: mimeType,
+				byte_length: bytes.length,
+			});
+		}
+		return locked;
+	}
+
+	async function resolveEverydayColourMedia(
+		locked: Map<string, EverydayLockedColour>,
+		upload: boolean,
+	) {
+		const resolved = new Map<string, { attachment: number | null; source_url: string }>();
+		for (const [key, colour] of locked) {
+			const { response, finalUrl } = await fetchPublicResource(colour.source_url, "image/jpeg,image/png,image/webp");
+			const bytes = new Uint8Array(await response.arrayBuffer());
+			const mimeType = String(response.headers.get("content-type") ?? "").split(";")[0].trim().toLocaleLowerCase();
+			if (mimeType !== colour.mime_type || bytes.length !== colour.byte_length ||
+				await sha256Hex(bytes) !== colour.expected_sha256) {
+				throw new Error("Fairlight image changed after preview: " + colour.source_url + ".");
+			}
+			let attachment: number | null = null;
+			let sourceUrl = finalUrl.toString();
+			if (upload) {
+				const slug = safeSlug(colour.filename.replace(/\.[^.]+$/, ""));
+				const candidates = await (
+					await productImageWpFetch("staging", "media?slug=" + encodeURIComponent(slug) + "&per_page=100&context=edit")
+				).json<any[]>();
+				if (candidates.length > 1) throw new Error("Multiple staging attachments use slug " + slug + ".");
+				if (candidates.length === 1) {
+					const candidate = candidates[0];
+					const loaded = await fetchPublicResource(String(candidate.source_url), "image/jpeg,image/png,image/webp");
+					const existingBytes = new Uint8Array(await loaded.response.arrayBuffer());
+					if (await sha256Hex(existingBytes) !== colour.expected_sha256) {
+						throw new Error("Existing staging attachment has different bytes: " + slug + ".");
+					}
+					attachment = Number(candidate.id);
+					sourceUrl = String(candidate.source_url);
+				} else {
+					const uploaded = await productImageWpUploadMedia("staging", colour.filename, mimeType, bytes);
+					attachment = Number(uploaded.id);
+					sourceUrl = String(uploaded.source_url ?? "");
+				}
+				if (!Number.isInteger(attachment) || attachment! < 1 || !sourceUrl.startsWith("https://")) {
+					throw new Error("Staging did not return a valid Fairlight attachment.");
+				}
+			}
+			resolved.set(key, { attachment, source_url: sourceUrl });
+		}
+		return resolved;
+	}
+
+	async function buildEverydayFabricAdditionPlan(
+		args: EverydayFabricAdditionInput,
+		upload = false,
+		suppliedProduct?: any,
+	) {
+		const product = suppliedProduct ?? await (await productImageWcFetch("staging", "products/" + args.product_id)).json<any>();
+		if (product.id !== args.product_id || product.name !== args.expected_product_name ||
+			product.status !== "draft" || product.catalog_visibility !== "hidden") {
+			throw new Error("Everyday product identity or draft/hidden state changed.");
+		}
+		const wapf = genericWapf(product);
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		if (wapf.meta.id !== args.expected_meta_data_id || beforeHash !== args.expected_field_group_sha256) {
+			throw new Error("Everyday WAPF field group changed after review.");
+		}
+		if (new Set(args.families.map((family) => family.role)).size !== 3 ||
+			!["blockout", "light_filter", "sheer"].every((role) => args.families.some((family) => family.role === role))) {
+			throw new Error("Exactly one blockout, light-filter and sheer family is required.");
+		}
+		const allNewIds = args.families.flatMap((family) => [family.new_colour_field_id]);
+		const allNewSlugs = args.families.flatMap((family) => [
+			family.new_choice_slug,
+			...family.colours.map((colour) => colour.slug),
+		]);
+		if (new Set(allNewIds).size !== allNewIds.length || new Set(allNewSlugs).size !== allNewSlugs.length) {
+			throw new Error("New Fairlight field IDs and choice slugs must be unique.");
+		}
+		const existingIds = new Set(wapf.group.fields.map((field: any) => genericWapfFieldId(field)));
+		if (allNewIds.some((id) => existingIds.has(id))) throw new Error("A requested Fairlight field ID already exists.");
+		const lockedColours = await lockEverydayColours(args.families);
+		const media = await resolveEverydayColourMedia(lockedColours, upload);
+		const updatedGroup = structuredClone(wapf.group);
+		const variableRuleCounts: Record<string, number> = {};
+		for (const family of args.families) {
+			const selectorMatches = updatedGroup.fields.filter((field: any) =>
+				genericWapfFieldId(field) === family.selector_field_id &&
+				wapfFieldLabel(field) === family.expected_selector_label);
+			const templateMatches = updatedGroup.fields.filter((field: any) =>
+				genericWapfFieldId(field) === family.colour_template_field_id &&
+				wapfFieldLabel(field) === family.expected_colour_template_label);
+			if (selectorMatches.length !== 1 || templateMatches.length !== 1) {
+				throw new Error("A Fairlight selector or colour template identity changed.");
+			}
+			const selector = selectorMatches[0];
+			const choices = selector?.options?.choices;
+			if (!Array.isArray(choices)) throw new Error("Fairlight selector choices are missing.");
+			const references = choices.filter((choice: any) =>
+				String(choice?.slug ?? "") === family.reference_choice_slug &&
+				String(choice?.label ?? "") === family.expected_reference_choice_label);
+			if (references.length !== 1 || choices.some((choice: any) => String(choice?.slug ?? "") === family.new_choice_slug)) {
+				throw new Error("Fairlight selector reference changed or the new choice already exists.");
+			}
+			const firstColour = family.colours[0];
+			const firstMedia = media.get(firstColour.source_url + "|" + firstColour.filename.toLocaleLowerCase())!;
+			choices.push({
+				...structuredClone(references[0]),
+				label: family.new_choice_label,
+				slug: family.new_choice_slug,
+				image: firstMedia.source_url,
+				attachment: firstMedia.attachment,
+			});
+			const templateField = templateMatches[0];
+			const templateChoice = structuredClone(templateField?.options?.choices?.[0] ?? {});
+			const newField = structuredClone(templateField);
+			newField.id = family.new_colour_field_id;
+			newField.label = family.new_colour_field_label;
+			newField.options = {
+				...(newField.options ?? {}),
+				choices: family.colours.map((colour) => {
+					const selected = media.get(colour.source_url + "|" + colour.filename.toLocaleLowerCase())!;
+					return {
+						...structuredClone(templateChoice),
+						label: colour.label,
+						slug: colour.slug,
+						pricing_type: "none",
+						pricing_amount: 0,
+						image: selected.source_url,
+						attachment: selected.attachment,
+					};
+				}),
+			};
+			newField.conditionals = [{ rules: [{
+				condition: "==",
+				value: family.new_choice_slug,
+				field: family.selector_field_id,
+				generated: false,
+			}] }];
+			delete newField.conditions;
+			delete newField.rules;
+			const templateIndex = updatedGroup.fields.indexOf(templateField);
+			updatedGroup.fields.splice(templateIndex + 1, 0, newField);
+			const clonedRules = cloneEverydayVariableRules(
+				updatedGroup,
+				family.selector_field_id,
+				family.reference_choice_slug,
+				family.new_choice_slug,
+			);
+			if (clonedRules < 1) throw new Error("No applicable lookup-variable pricing rule was found for " + family.role + ".");
+			variableRuleCounts[family.role] = clonedRules;
+		}
+		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+		const afterHash = upload ? await genericWapfHashOf(updatedValue) : null;
+		const manifest = args.families.map((family) => ({
+			...family,
+			colours: family.colours.map((colour) => {
+				const locked = lockedColours.get(colour.source_url + "|" + colour.filename.toLocaleLowerCase())!;
+				return { ...colour, expected_sha256: locked.expected_sha256, mime_type: locked.mime_type, byte_length: locked.byte_length };
+			}),
+		}));
+		const planHash = await genericWapfHashOf({
+			product_id: args.product_id,
+			product_name: args.expected_product_name,
+			before_field_group_sha256: beforeHash,
+			families: manifest,
+			variable_rule_counts: variableRuleCounts,
+		});
+		return { product, wapf, beforeHash, afterHash, updatedGroup, updatedValue, planHash, manifest, variableRuleCounts };
+	}
+
 	const wapfPricingGridManager = wapfPricingGridBase.partial().extend({
 		product_id: z.number().int().positive(),
 		environment: z.enum(["live", "staging"]),
-		action: z.enum(["inspect", "preview", "apply"]),
+		action: z.enum(["inspect", "preview", "apply", "preview_fabric_addition", "apply_fabric_addition"]),
+		families: z.array(everydayFabricFamily).length(3).optional(),
 		expected_plan_sha256: genericWapfHash.optional(),
 		confirmation: z.string().optional(),
 	});
@@ -11810,11 +12103,74 @@ function createServer() {
 	server.registerTool(
 		"manage_wapf_pricing_grid",
 		{
-			description: "Inspect, preview or apply one complete parameter-driven WAPF price grid plus optional exact fixed choice-price updates on the caller-selected live or staging site. Inspect is read-only and returns the exact product, WAPF metadata, field and choice identities required to build a guarded plan. Apply is restricted to draft/hidden products, hash-locks the existing product and complete WAPF field group, writes the regular price and WAPF pricing atomically, verifies the result, and rolls both back on failure.",
+			description: "Inspect, preview or apply a complete parameter-driven WAPF price grid on live or staging, or preview/apply a staging-only three-variant fabric-family addition. Fabric addition clones reviewed colour fields, selector choices and lookup-variable pricing mappings, fingerprints supplier images, verifies the draft/hidden write and rolls back on failure. The tool cannot publish.",
 			inputSchema: wapfPricingGridManager,
 		},
 		async (args) => {
 			try {
+				if (args.action === "preview_fabric_addition" || args.action === "apply_fabric_addition") {
+					if (args.environment !== "staging") throw new Error("Fabric addition is restricted to staging.");
+					const fabricArgs = everydayFabricAdditionBase.parse(args);
+					if (args.action === "preview_fabric_addition") {
+						const plan = await buildEverydayFabricAdditionPlan(fabricArgs);
+						return toolResult({
+							preview_only: true, write_performed: false,
+							product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
+							before_field_group_sha256: plan.beforeHash, plan_sha256: plan.planHash,
+							families: plan.manifest, variable_rule_counts: plan.variableRuleCounts,
+							resulting_field_count: plan.updatedGroup.fields.length,
+							required_confirmation: everydayFabricAdditionConfirmation,
+						});
+					}
+					if (args.confirmation !== everydayFabricAdditionConfirmation) {
+						throw new Error("Exact confirmation required: " + everydayFabricAdditionConfirmation);
+					}
+					const product = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+					const preview = await buildEverydayFabricAdditionPlan(fabricArgs, false, product);
+					if (!args.expected_plan_sha256 || preview.planHash !== args.expected_plan_sha256) {
+						throw new Error("The Everyday fabric plan changed after preview.");
+					}
+					const plan = await buildEverydayFabricAdditionPlan(fabricArgs, true, product);
+					if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) {
+						throw new Error("The Everyday fabric plan changed while resolving staging media.");
+					}
+					try {
+						await productImageWcWrite("staging", "products/" + fabricArgs.product_id, {
+							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
+						});
+						const verified = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+						const verifiedWapf = genericWapf(verified);
+						const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+						if (verified.id !== fabricArgs.product_id || verified.name !== fabricArgs.expected_product_name ||
+							verified.status !== "draft" || verified.catalog_visibility !== "hidden" ||
+							verifiedWapf.meta.id !== fabricArgs.expected_meta_data_id ||
+							verifiedHash !== plan.afterHash ||
+							verifiedWapf.group.fields.length !== plan.updatedGroup.fields.length) {
+							throw new Error("Post-write Everyday fabric verification failed.");
+						}
+						return toolResult({
+							updated: true, verified: true, write_performed: true,
+							product_id: verified.id, before_field_group_sha256: plan.beforeHash,
+							after_field_group_sha256: verifiedHash, field_count: verifiedWapf.group.fields.length,
+							families: plan.manifest.map((family) => ({
+								role: family.role, selector_choice: family.new_choice_label,
+								colour_field: family.new_colour_field_label, colour_count: family.colours.length,
+							})),
+							variable_rule_counts: plan.variableRuleCounts, rollback_performed: false,
+							untouched: ["live site", "publication state", "product identity", "regular price", "non-WAPF product data"],
+						});
+					} catch (writeError) {
+						await productImageWcWrite("staging", "products/" + fabricArgs.product_id, {
+							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }],
+						});
+						const rolledBack = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+						if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
+							throw new Error("Everyday fabric update failed and exact rollback verification also failed.");
+						}
+						throw new Error("Everyday fabric update failed; exact rollback succeeded: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)));
+					}
+				}
 				if (args.action === "inspect") {
 					const product = await (
 						await productImageWcFetch(args.environment, "products/" + args.product_id)
