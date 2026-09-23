@@ -13,7 +13,7 @@ type PromotionSite = {
 };
 
 const PROMOTION_PLUGIN_SLUG = "blindmotion-product-promotion-bridge";
-const PROMOTION_PLUGIN_VERSION = "0.4.5";
+const PROMOTION_PLUGIN_VERSIONS = new Set(["0.4.4", "0.4.5"]);
 const BOOTSTRAP_CONFIRMATION = "CONFIRM BOOTSTRAP LIVE PRODUCT TO STAGING";
 const IDENTITY_CONFIRMATION = "CONFIRM ASSIGN PROMOTION IDENTITY";
 const MEDIA_CONFIRMATION = "CONFIRM PREPARE BOOTSTRAP MEDIA";
@@ -105,7 +105,7 @@ async function promotionRequest(
 function assertPlugin(payload: any) {
 	if (
 		payload?.plugin?.slug !== PROMOTION_PLUGIN_SLUG ||
-		payload?.plugin?.version !== PROMOTION_PLUGIN_VERSION
+		!PROMOTION_PLUGIN_VERSIONS.has(payload?.plugin?.version)
 	) {
 		throw new Error("Product promotion bridge identity or version did not match.");
 	}
