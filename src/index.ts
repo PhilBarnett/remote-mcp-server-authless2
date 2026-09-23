@@ -11799,13 +11799,14 @@ function createServer() {
 		return { product, wapf, beforeHash, afterHash, planHash, updatedValue, baseFormula };
 	}
 
-	/* Guarded staging-only addition of a fabric family to Everyday Roller Blinds.
+	/* Guarded staging-only addition of one to three fabric families.
 	 * The operation clones reviewed selector choices, colour-field templates and
-	 * every applicable lookup-variable rule from caller-selected reference
-	 * choices. Supplier images are fingerprinted during preview, uploaded only
-	 * during apply, and the complete WAPF field group is hash locked and rolled
-	 * back on any verification failure. */
+	 * either direct choice pricing or applicable lookup-variable rules from
+	 * caller-selected references. Supplier images are fingerprinted during
+	 * preview, uploaded only during apply, and the complete WAPF field group is
+	 * hash locked and rolled back on any verification failure. */
 	const everydayFabricAdditionConfirmation = "CONFIRM ADD EVERYDAY FABRIC TO STAGING";
+	const singleFabricAdditionConfirmation = "CONFIRM ADD FABRIC TO STAGING";
 	const everydayFabricRole = z.enum(["blockout", "light_filter", "sheer"]);
 	const everydayFabricColour = z.object({
 		label: z.string().trim().min(1).max(200),
@@ -11825,6 +11826,8 @@ function createServer() {
 		expected_colour_template_label: z.string().trim().min(1).max(300),
 		new_colour_field_id: wapfVisualFieldId,
 		new_colour_field_label: z.string().trim().min(1).max(300),
+		pricing_clone_mode: z.enum(["lookup_variable_rules", "direct_choice_pricing"])
+			.default("lookup_variable_rules"),
 		colours: z.array(everydayFabricColour).min(1).max(20),
 	});
 	const everydayFabricAdditionBase = z.object({
@@ -11832,7 +11835,7 @@ function createServer() {
 		expected_product_name: z.string().trim().min(1).max(500),
 		expected_meta_data_id: genericWapfId,
 		expected_field_group_sha256: genericWapfHash,
-		families: z.array(everydayFabricFamily).length(3),
+		families: z.array(everydayFabricFamily).min(1).max(3),
 	});
 	type EverydayFabricAdditionInput = z.infer<typeof everydayFabricAdditionBase>;
 	type EverydayFabricFamilyInput = z.infer<typeof everydayFabricFamily>;
@@ -11999,9 +12002,9 @@ function createServer() {
 		if (wapf.meta.id !== args.expected_meta_data_id || beforeHash !== args.expected_field_group_sha256) {
 			throw new Error("Everyday WAPF field group changed after review.");
 		}
-		if (new Set(args.families.map((family) => family.role)).size !== 3 ||
-			!["blockout", "light_filter", "sheer"].every((role) => args.families.some((family) => family.role === role))) {
-			throw new Error("Exactly one blockout, light-filter and sheer family is required.");
+		const requestedRoles = args.families.map((family) => family.role);
+		if (new Set(requestedRoles).size !== requestedRoles.length) {
+			throw new Error("Each requested fabric family must use a unique role.");
 		}
 		const allNewIds = args.families.flatMap((family) => [family.new_colour_field_id]);
 		const allNewSlugs = args.families.flatMap((family) => [
@@ -12035,6 +12038,11 @@ function createServer() {
 				String(choice?.label ?? "") === family.expected_reference_choice_label);
 			if (references.length !== 1 || choices.some((choice: any) => String(choice?.slug ?? "") === family.new_choice_slug)) {
 				throw new Error("Fairlight selector reference changed or the new choice already exists.");
+			}
+			if (family.pricing_clone_mode === "direct_choice_pricing" &&
+				(String(references[0]?.pricing_type ?? "") !== "fx" ||
+				 !String(references[0]?.pricing_amount ?? "").trim())) {
+				throw new Error("The direct-pricing reference choice is not an active formula.");
 			}
 			const firstColour = family.colours[0];
 			const firstMedia = media.get(firstColour.source_url + "|" + firstColour.filename.toLocaleLowerCase())!;
@@ -12075,13 +12083,17 @@ function createServer() {
 			delete newField.rules;
 			const templateIndex = updatedGroup.fields.indexOf(templateField);
 			updatedGroup.fields.splice(templateIndex + 1, 0, newField);
-			const clonedRules = cloneEverydayVariableRules(
-				updatedGroup,
-				family.selector_field_id,
-				family.reference_choice_slug,
-				family.new_choice_slug,
-			);
-			if (clonedRules < 1) throw new Error("No applicable lookup-variable pricing rule was found for " + family.role + ".");
+			const clonedRules = family.pricing_clone_mode === "lookup_variable_rules"
+				? cloneEverydayVariableRules(
+					updatedGroup,
+					family.selector_field_id,
+					family.reference_choice_slug,
+					family.new_choice_slug,
+				)
+				: 0;
+			if (family.pricing_clone_mode === "lookup_variable_rules" && clonedRules < 1) {
+				throw new Error("No applicable lookup-variable pricing rule was found for " + family.role + ".");
+			}
 			variableRuleCounts[family.role] = clonedRules;
 		}
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
@@ -12107,7 +12119,7 @@ function createServer() {
 		product_id: z.number().int().positive(),
 		environment: z.enum(["live", "staging"]),
 		action: z.enum(["inspect", "preview", "apply", "preview_fabric_addition", "apply_fabric_addition"]),
-		families: z.array(everydayFabricFamily).length(3).optional(),
+		families: z.array(everydayFabricFamily).min(1).max(3).optional(),
 		expected_plan_sha256: genericWapfHash.optional(),
 		confirmation: z.string().optional(),
 	});
@@ -12115,7 +12127,7 @@ function createServer() {
 	server.registerTool(
 		"manage_wapf_pricing_grid",
 		{
-			description: "Inspect, preview or apply a complete parameter-driven WAPF price grid on live or staging, or preview/apply a staging-only three-variant fabric-family addition. Fabric addition clones reviewed colour fields, selector choices and lookup-variable pricing mappings, fingerprints supplier images, verifies the draft/hidden write and rolls back on failure. The tool cannot publish.",
+			description: "Inspect, preview or apply a complete parameter-driven WAPF price grid on live or staging, or preview/apply a staging-only one-to-three-family fabric addition. Fabric addition clones reviewed colour fields, selector choices and either direct-choice pricing or lookup-variable mappings, fingerprints supplier images, verifies the draft/hidden write and rolls back on failure. The tool cannot publish.",
 			inputSchema: wapfPricingGridManager,
 		},
 		async (args) => {
@@ -12131,11 +12143,16 @@ function createServer() {
 							before_field_group_sha256: plan.beforeHash, plan_sha256: plan.planHash,
 							families: plan.manifest, variable_rule_counts: plan.variableRuleCounts,
 							resulting_field_count: plan.updatedGroup.fields.length,
-							required_confirmation: everydayFabricAdditionConfirmation,
+							required_confirmation: fabricArgs.families.length === 3
+								? everydayFabricAdditionConfirmation
+								: singleFabricAdditionConfirmation,
 						});
 					}
-					if (args.confirmation !== everydayFabricAdditionConfirmation) {
-						throw new Error("Exact confirmation required: " + everydayFabricAdditionConfirmation);
+					const requiredFabricConfirmation = fabricArgs.families.length === 3
+						? everydayFabricAdditionConfirmation
+						: singleFabricAdditionConfirmation;
+					if (args.confirmation !== requiredFabricConfirmation) {
+						throw new Error("Exact confirmation required: " + requiredFabricConfirmation);
 					}
 					const product = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
 					if (!args.expected_plan_sha256) {
