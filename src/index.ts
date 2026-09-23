@@ -12103,99 +12103,11 @@ function createServer() {
 		return { product, wapf, beforeHash, afterHash, updatedGroup, updatedValue, planHash, manifest, variableRuleCounts };
 	}
 
-	server.registerTool(
-		"preview_everyday_fabric_addition",
-		{
-			description: "Preview adding one three-variant fabric family to the draft/hidden Everyday Roller Blinds staging product. Clones reviewed colour fields, selector choices and their existing lookup-variable pricing mappings; fingerprints all supplier images and performs no writes.",
-			inputSchema: everydayFabricAdditionBase,
-		},
-		async (args) => {
-			try {
-				const plan = await buildEverydayFabricAdditionPlan(args);
-				return toolResult({
-					preview_only: true,
-					write_performed: false,
-					product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
-					before_field_group_sha256: plan.beforeHash,
-					plan_sha256: plan.planHash,
-					families: plan.manifest,
-					variable_rule_counts: plan.variableRuleCounts,
-					resulting_field_count: plan.updatedGroup.fields.length,
-					required_confirmation: everydayFabricAdditionConfirmation,
-				});
-			} catch (error) { return toolError(error); }
-		},
-	);
-
-	server.registerTool(
-		"apply_everyday_fabric_addition_guarded",
-		{
-			description: "Apply one exact previewed three-variant fabric-family addition to the draft/hidden Everyday Roller Blinds staging product. Revalidates product and WAPF hashes plus supplier image bytes, uploads missing staging media, writes only the WAPF field group, verifies the result and restores the original group on failure. Cannot publish or target live.",
-			inputSchema: everydayFabricAdditionBase.extend({
-				expected_plan_sha256: genericWapfHash,
-				confirmation: z.literal(everydayFabricAdditionConfirmation),
-			}),
-		},
-		async (args) => {
-			try {
-				const product = await (await productImageWcFetch("staging", "products/" + args.product_id)).json<any>();
-				const preview = await buildEverydayFabricAdditionPlan(args, false, product);
-				if (preview.planHash !== args.expected_plan_sha256) throw new Error("The Everyday fabric plan changed after preview.");
-				const plan = await buildEverydayFabricAdditionPlan(args, true, product);
-				if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) {
-					throw new Error("The Everyday fabric plan changed while resolving staging media.");
-				}
-				try {
-					await productImageWcWrite("staging", "products/" + args.product_id, {
-						meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
-					});
-					const verified = await (await productImageWcFetch("staging", "products/" + args.product_id)).json<any>();
-					const verifiedWapf = genericWapf(verified);
-					const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
-					if (verified.id !== args.product_id || verified.name !== args.expected_product_name ||
-						verified.status !== "draft" || verified.catalog_visibility !== "hidden" ||
-						verifiedWapf.meta.id !== args.expected_meta_data_id ||
-						verifiedHash !== plan.afterHash ||
-						verifiedWapf.group.fields.length !== plan.updatedGroup.fields.length) {
-						throw new Error("Post-write Everyday Fairlight verification failed.");
-					}
-					return toolResult({
-						updated: true,
-						verified: true,
-						write_performed: true,
-						product_id: verified.id,
-						before_field_group_sha256: plan.beforeHash,
-						after_field_group_sha256: verifiedHash,
-						field_count: verifiedWapf.group.fields.length,
-						families: plan.manifest.map((family) => ({
-							role: family.role,
-							selector_choice: family.new_choice_label,
-							colour_field: family.new_colour_field_label,
-							colour_count: family.colours.length,
-						})),
-						variable_rule_counts: plan.variableRuleCounts,
-						rollback_performed: false,
-						untouched: ["live site", "publication state", "product identity", "regular price", "non-WAPF product data"],
-					});
-				} catch (writeError) {
-					await productImageWcWrite("staging", "products/" + args.product_id, {
-						meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }],
-					});
-					const rolledBack = await (await productImageWcFetch("staging", "products/" + args.product_id)).json<any>();
-					if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
-						throw new Error("Everyday fabric update failed and exact rollback verification also failed.");
-					}
-					throw new Error("Everyday fabric update failed; exact rollback succeeded: " +
-						(writeError instanceof Error ? writeError.message : String(writeError)));
-				}
-			} catch (error) { return toolError(error); }
-		},
-	);
-
 	const wapfPricingGridManager = wapfPricingGridBase.partial().extend({
 		product_id: z.number().int().positive(),
 		environment: z.enum(["live", "staging"]),
-		action: z.enum(["inspect", "preview", "apply"]),
+		action: z.enum(["inspect", "preview", "apply", "preview_fabric_addition", "apply_fabric_addition"]),
+		families: z.array(everydayFabricFamily).length(3).optional(),
 		expected_plan_sha256: genericWapfHash.optional(),
 		confirmation: z.string().optional(),
 	});
@@ -12203,11 +12115,74 @@ function createServer() {
 	server.registerTool(
 		"manage_wapf_pricing_grid",
 		{
-			description: "Inspect, preview or apply one complete parameter-driven WAPF price grid plus optional exact fixed choice-price updates on the caller-selected live or staging site. Inspect is read-only and returns the exact product, WAPF metadata, field and choice identities required to build a guarded plan. Apply is restricted to draft/hidden products, hash-locks the existing product and complete WAPF field group, writes the regular price and WAPF pricing atomically, verifies the result, and rolls both back on failure.",
+			description: "Inspect, preview or apply a complete parameter-driven WAPF price grid on live or staging, or preview/apply a staging-only three-variant fabric-family addition. Fabric addition clones reviewed colour fields, selector choices and lookup-variable pricing mappings, fingerprints supplier images, verifies the draft/hidden write and rolls back on failure. The tool cannot publish.",
 			inputSchema: wapfPricingGridManager,
 		},
 		async (args) => {
 			try {
+				if (args.action === "preview_fabric_addition" || args.action === "apply_fabric_addition") {
+					if (args.environment !== "staging") throw new Error("Fabric addition is restricted to staging.");
+					const fabricArgs = everydayFabricAdditionBase.parse(args);
+					if (args.action === "preview_fabric_addition") {
+						const plan = await buildEverydayFabricAdditionPlan(fabricArgs);
+						return toolResult({
+							preview_only: true, write_performed: false,
+							product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
+							before_field_group_sha256: plan.beforeHash, plan_sha256: plan.planHash,
+							families: plan.manifest, variable_rule_counts: plan.variableRuleCounts,
+							resulting_field_count: plan.updatedGroup.fields.length,
+							required_confirmation: everydayFabricAdditionConfirmation,
+						});
+					}
+					if (args.confirmation !== everydayFabricAdditionConfirmation) {
+						throw new Error("Exact confirmation required: " + everydayFabricAdditionConfirmation);
+					}
+					const product = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+					const preview = await buildEverydayFabricAdditionPlan(fabricArgs, false, product);
+					if (!args.expected_plan_sha256 || preview.planHash !== args.expected_plan_sha256) {
+						throw new Error("The Everyday fabric plan changed after preview.");
+					}
+					const plan = await buildEverydayFabricAdditionPlan(fabricArgs, true, product);
+					if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) {
+						throw new Error("The Everyday fabric plan changed while resolving staging media.");
+					}
+					try {
+						await productImageWcWrite("staging", "products/" + fabricArgs.product_id, {
+							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
+						});
+						const verified = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+						const verifiedWapf = genericWapf(verified);
+						const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+						if (verified.id !== fabricArgs.product_id || verified.name !== fabricArgs.expected_product_name ||
+							verified.status !== "draft" || verified.catalog_visibility !== "hidden" ||
+							verifiedWapf.meta.id !== fabricArgs.expected_meta_data_id ||
+							verifiedHash !== plan.afterHash ||
+							verifiedWapf.group.fields.length !== plan.updatedGroup.fields.length) {
+							throw new Error("Post-write Everyday fabric verification failed.");
+						}
+						return toolResult({
+							updated: true, verified: true, write_performed: true,
+							product_id: verified.id, before_field_group_sha256: plan.beforeHash,
+							after_field_group_sha256: verifiedHash, field_count: verifiedWapf.group.fields.length,
+							families: plan.manifest.map((family) => ({
+								role: family.role, selector_choice: family.new_choice_label,
+								colour_field: family.new_colour_field_label, colour_count: family.colours.length,
+							})),
+							variable_rule_counts: plan.variableRuleCounts, rollback_performed: false,
+							untouched: ["live site", "publication state", "product identity", "regular price", "non-WAPF product data"],
+						});
+					} catch (writeError) {
+						await productImageWcWrite("staging", "products/" + fabricArgs.product_id, {
+							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }],
+						});
+						const rolledBack = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+						if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
+							throw new Error("Everyday fabric update failed and exact rollback verification also failed.");
+						}
+						throw new Error("Everyday fabric update failed; exact rollback succeeded: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)));
+					}
+				}
 				if (args.action === "inspect") {
 					const product = await (
 						await productImageWcFetch(args.environment, "products/" + args.product_id)
@@ -13042,4 +13017,3 @@ export default {
 		return handler(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;
-
