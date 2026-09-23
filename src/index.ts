@@ -6230,30 +6230,18 @@ function createServer() {
 		"get_order",
 		{
 			description:
-				"Investigate one Blindmotion WooCommerce order by order ID, including sanitized customer-facing product options and normalized dimensions, without exposing billing or shipping. A temporary WAPF diagnostic is available only for orders 9803 and 9809.",
+				"Investigate one Blindmotion WooCommerce order by order ID, including sanitized customer-facing product options and normalized dimensions, without exposing billing, shipping or private item metadata.",
 			inputSchema: z.object({
 				order_id: z.number().int().positive(),
-				inspect_sample_wapf: z.boolean().optional(),
 			}),
 		},
-		async ({ order_id, inspect_sample_wapf }) => {
+		async ({ order_id }) => {
 			try {
 				const response = await wcFetch(`orders/${order_id}`);
 
 				const order = await response.json<any>();
-				if (inspect_sample_wapf && ![9803, 9809].includes(order_id)) {
-					throw new Error("WAPF inspection is restricted to orders 9803 and 9809.");
-				}
-				const wapfDiagnostic = inspect_sample_wapf ? (order.line_items ?? []).map((line: any) => {
-					if (Number(line.product_id) !== 128) throw new Error("Expected Fabric Sample product 128.");
-					return (line.meta_data ?? [])
-						.filter((meta: any) => meta.key === "_wapf_meta")
-						.map((meta: any) => meta.value);
-				}) : undefined;
-
 				return toolResult({
 					...safeOrderWithLineItemConfiguration(order),
-					...(inspect_sample_wapf ? { fabric_sample_wapf_meta: wapfDiagnostic } : {}),
 					date_paid: order.date_paid,
 					date_completed: order.date_completed,
 					transaction_id: order.transaction_id,
