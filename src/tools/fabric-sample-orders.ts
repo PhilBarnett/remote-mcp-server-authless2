@@ -4,6 +4,7 @@ import { z } from "zod";
 const FABRIC_SAMPLE_PRODUCT_ID = 128;
 const FABRIC_SAMPLE_ORDER_CONFIRMATION = "CONFIRM CREATE FABRIC SAMPLE ORDER";
 const REQUEST_META_KEY = "_blindmotion_mcp_sample_request_id";
+const WAPF_META_KEY = "_wapf_meta";
 
 type WooRequest = (
 	path: string,
@@ -137,6 +138,37 @@ export function registerFabricSampleOrderTool(
 	});
 
 	server.registerTool(
+		"inspect_fabric_sample_order_wapf_meta",
+		{
+			description: "Read only: compare WAPF line-item metadata for exactly one Fabric Sample order, excluding customer and address data.",
+			inputSchema: z.object({ order_id: z.number().int().positive() }),
+		},
+		async ({ order_id }) => {
+			try {
+				const response = await dependencies.wcFetch(`orders/${order_id}`);
+				if (!response.ok) throw new Error(`WooCommerce returned HTTP ${response.status}.`);
+				const order = await response.json<any>();
+				const lineItems = order?.line_items ?? [];
+				if (lineItems.length !== 1 || Number(lineItems[0]?.product_id) !== FABRIC_SAMPLE_PRODUCT_ID) {
+					throw new Error("Order must contain exactly one Fabric Sample line item.");
+				}
+				return result({
+					order_id,
+					status: order.status,
+					wapf_meta: (lineItems[0].meta_data ?? [])
+						.filter((meta: any) => String(meta?.key) === WAPF_META_KEY)
+						.map((meta: any) => meta.value),
+					visible_options: (lineItems[0].meta_data ?? [])
+						.filter((meta: any) => !String(meta?.key ?? "").startsWith("_"))
+						.map((meta: any) => ({ label: meta.key, value: meta.value })),
+				});
+			} catch (error) {
+				return errorResult(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"create_fabric_sample_order_guarded",
 		{
 			description: `Create one zero-dollar guest Fabric Sample order in live Blindmotion WooCommerce after validating product 128, every requested WAPF field and choice, the Australian delivery address, and an idempotency key. Does not create an account or opt the customer into marketing. Returns no customer PII. Requires exact confirmation: ${FABRIC_SAMPLE_ORDER_CONFIRMATION}`,
@@ -153,6 +185,10 @@ export function registerFabricSampleOrderTool(
 		},
 		async ({ expected_product_name, request_id, customer, selections }) => {
 			try {
+				// WooCommerce REST line-item display meta does not create WAPF\u2019s hidden
+				// _wapf_meta. iDempiere requires it to map selections. Fail before any
+				// read or write until a parity-tested WAPF payload builder is installed.
+				throw new Error("Fabric Sample API creation is temporarily disabled: the iDempiere importer requires validated _wapf_meta. No order was created.");
 				const fieldLabels = selections.map((selection) => selection.field_label);
 				if (new Set(fieldLabels).size !== fieldLabels.length) {
 					throw new Error("Each WAPF field_label may appear only once per sample order.");
