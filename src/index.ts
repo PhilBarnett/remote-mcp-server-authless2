@@ -9559,6 +9559,349 @@ function createServer() {
 		return unique;
 	}
 
+
+	/* Guarded zero-priced WAPF choice append for existing image-swatch fields.
+	 * Supports live or staging products with caller-locked identity/state/hash.
+	 * It uploads one shared swatch, changes only selected choice arrays, verifies
+	 * every product, and rolls back all product writes on any failure. */
+	const wapfChoiceAppendConfirmation = "CONFIRM APPEND WAPF CHOICE";
+	const wapfChoiceAppendField = z.object({
+		field_id: z.string().trim().min(1).max(120),
+		expected_field_label: z.string().trim().min(1).max(300),
+		choice_label: z.string().trim().min(1).max(200),
+		choice_slug: z.string().regex(/^[a-zA-Z0-9_-]{3,80}$/),
+	});
+	const wapfChoiceAppendProduct = z.object({
+		product_id: genericWapfId,
+		expected_product_name: z.string().trim().min(1).max(500),
+		expected_status: z.enum(["publish", "draft", "private", "pending"]),
+		expected_catalog_visibility: z.enum(["visible", "catalog", "search", "hidden"]),
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		fields: z.array(wapfChoiceAppendField).min(1).max(10),
+	});
+	const wapfChoiceAppendBase = z.object({
+		environment: z.enum(["live", "staging"]).default("live"),
+		products: z.array(wapfChoiceAppendProduct).min(1).max(10),
+		swatch_filename: z.string().regex(/^[A-Za-z0-9._-]+$/),
+		swatch_mime_type: z.enum(["image/jpeg", "image/png", "image/webp"]),
+		swatch_base64: z.string().min(4).max(2_000_000),
+		expected_swatch_sha256: genericWapfHash,
+	});
+	type WapfChoiceAppendInput = z.infer<typeof wapfChoiceAppendBase>;
+
+	async function buildWapfChoiceAppendPlan(args: WapfChoiceAppendInput) {
+		const bytes = decodeBase64(args.swatch_base64);
+		if (!bytes.length || bytes.length > 1_500_000) {
+			throw new Error("Choice swatch must decode to between 1 byte and 1.5 MB.");
+		}
+		if (!hasExpectedImageSignature(bytes, args.swatch_mime_type)) {
+			throw new Error("Choice swatch bytes do not match the declared MIME type.");
+		}
+		const swatchHash = await sha256Hex(bytes);
+		if (swatchHash !== args.expected_swatch_sha256) {
+			throw new Error("Choice swatch bytes do not match expected_swatch_sha256.");
+		}
+		const productIds = args.products.map((item) => item.product_id);
+		if (new Set(productIds).size !== productIds.length) {
+			throw new Error("Each product may appear only once in a choice-append batch.");
+		}
+		const products = [];
+		for (const selected of args.products) {
+			const product = await (await productImageWcFetch(
+				args.environment as ProductImageEnvironment,
+				"products/" + selected.product_id,
+			)).json<any>();
+			if (
+				product.id !== selected.product_id ||
+				product.name !== selected.expected_product_name ||
+				product.status !== selected.expected_status ||
+				product.catalog_visibility !== selected.expected_catalog_visibility
+			) {
+				throw new Error("Product identity/state changed for " + selected.product_id + "; no write performed.");
+			}
+			const wapf = genericWapf(product);
+			if (Number(wapf.meta.id) !== selected.expected_meta_data_id) {
+				throw new Error("WAPF metadata identity changed for product " + selected.product_id + ".");
+			}
+			const beforeHash = await genericWapfHashOf(wapf.meta.value);
+			if (beforeHash !== selected.expected_field_group_sha256) {
+				throw new Error("WAPF field group changed for product " + selected.product_id + "; re-inspect first.");
+			}
+			const selectedFieldIds = selected.fields.map((field) => field.field_id);
+			if (new Set(selectedFieldIds).size !== selectedFieldIds.length) {
+				throw new Error("Each target field may appear only once per product.");
+			}
+			const targets = selected.fields.map((requested) => {
+				const matches = wapf.group.fields.filter(
+					(field: any) => genericWapfFieldId(field) === requested.field_id,
+				);
+				if (matches.length !== 1) {
+					throw new Error("Target WAPF field is missing or ambiguous: " + requested.field_id + ".");
+				}
+				const field = matches[0];
+				if (wapfFieldLabel(field) !== requested.expected_field_label) {
+					throw new Error("Target WAPF field label changed: " + requested.field_id + ".");
+				}
+				if (!["image-swatch", "multi-image-swatch"].includes(String(field?.type ?? ""))) {
+					throw new Error("Target WAPF field is not an image swatch: " + requested.field_id + ".");
+				}
+				const choices = field?.options?.choices;
+				if (!Array.isArray(choices)) {
+					throw new Error("Target WAPF field choices are not readable: " + requested.field_id + ".");
+				}
+				if (choices.some((choice: any) =>
+					String(choice?.slug ?? "") === requested.choice_slug ||
+					String(choice?.label ?? "").trim().toLocaleLowerCase() ===
+						requested.choice_label.trim().toLocaleLowerCase()
+				)) {
+					throw new Error("The requested choice already exists in field " + requested.field_id + ".");
+				}
+				return { requested, field };
+			});
+			products.push({ selected, product, wapf, beforeHash, targets });
+		}
+		const planHash = await genericWapfHashOf({
+			environment: args.environment,
+			products: args.products,
+			swatch: {
+				filename: args.swatch_filename,
+				mime_type: args.swatch_mime_type,
+				sha256: swatchHash,
+				byte_length: bytes.length,
+			},
+		});
+		return { bytes, swatchHash, products, planHash };
+	}
+
+
+	server.registerTool(
+		"manage_wapf_choice_append",
+		{
+			description:
+				"Preview or apply appending one zero-priced image-swatch choice to explicitly selected WAPF fields on hash-locked live or staging products. Apply uploads one shared swatch, changes only selected choice arrays, verifies every product and rolls back all product writes on failure. Media is never deleted.",
+			inputSchema: wapfChoiceAppendBase.extend({
+				action: z.enum(["preview", "apply"]),
+				expected_plan_sha256: genericWapfHash.optional(),
+				confirmation: z.string().optional(),
+			}).superRefine((value, ctx) => {
+				if (
+					value.action === "apply" &&
+					value.expected_plan_sha256 === undefined
+				) {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						path: ["expected_plan_sha256"],
+						message: "Apply requires expected_plan_sha256 from preview.",
+					});
+				}
+				if (
+					value.action === "apply" &&
+					value.confirmation !== wapfChoiceAppendConfirmation
+				) {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						path: ["confirmation"],
+						message:
+							"Apply confirmation must exactly equal: " +
+							wapfChoiceAppendConfirmation,
+					});
+				}
+			}),
+		},
+		async (args) => {
+			if (args.action === "preview") {
+				try {
+					const plan = await buildWapfChoiceAppendPlan(args);
+					return toolResult({
+						write_performed: false,
+						environment: args.environment,
+						plan_sha256: plan.planHash,
+						swatch: {
+							filename: args.swatch_filename,
+							mime_type: args.swatch_mime_type,
+							sha256: plan.swatchHash,
+							byte_length: plan.bytes.length,
+						},
+						products: plan.products.map((item) => ({
+							product_id: item.product.id,
+							product_name: item.product.name,
+							status: item.product.status,
+							catalog_visibility: item.product.catalog_visibility,
+							before_field_group_sha256: item.beforeHash,
+							fields: item.targets.map(({ requested }: any) => ({
+								field_id: requested.field_id,
+								field_label: requested.expected_field_label,
+								choice_label: requested.choice_label,
+								choice_slug: requested.choice_slug,
+								pricing_type: "none",
+								pricing_amount: 0,
+							})),
+						})),
+					});
+				} catch (error) {
+					return toolError(error);
+				}
+			}
+
+			const environment = args.environment as ProductImageEnvironment;
+			let uploaded: any;
+			const written: Array<any> = [];
+			try {
+				const plan = await buildWapfChoiceAppendPlan(args);
+				if (plan.planHash !== args.expected_plan_sha256) {
+					throw new Error("The WAPF choice-append plan changed after preview; refusing write.");
+				}
+				uploaded = await productImageWpUploadMedia(
+					environment,
+					args.swatch_filename,
+					args.swatch_mime_type,
+					plan.bytes,
+				);
+				if (
+					!uploaded?.id ||
+					typeof uploaded.source_url !== "string" ||
+					!/^image\/(jpeg|png|webp)$/i.test(uploaded.mime_type ?? "")
+				) {
+					throw new Error("Uploaded choice swatch is not a supported WordPress image.");
+				}
+				const results = [];
+				for (const item of plan.products) {
+					const updatedGroup = structuredClone(item.wapf.group);
+					for (const target of item.targets) {
+						const field = updatedGroup.fields.find(
+							(candidate: any) =>
+								genericWapfFieldId(candidate) === target.requested.field_id,
+						);
+						field.options.choices.push({
+							label: target.requested.choice_label,
+							slug: target.requested.choice_slug,
+							pricing_type: "none",
+							pricing_amount: 0,
+							image: uploaded.source_url,
+							attachment: Number(uploaded.id),
+							options: [],
+						});
+					}
+					const updatedValue =
+						typeof item.wapf.meta.value === "string"
+							? JSON.stringify(updatedGroup)
+							: updatedGroup;
+					const afterHash = await genericWapfHashOf(updatedValue);
+					await productImageWcWrite(environment, "products/" + item.product.id, {
+						meta_data: [{
+							id: item.wapf.meta.id,
+							key: "_wapf_fieldgroup",
+							value: updatedValue,
+						}],
+					});
+					written.push(item);
+					const verified = await (await productImageWcFetch(
+						environment,
+						"products/" + item.product.id,
+					)).json<any>();
+					const verifiedWapf = genericWapf(verified);
+					const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+					if (
+						verified.id !== item.product.id ||
+						verified.name !== item.product.name ||
+						verified.status !== item.product.status ||
+						verified.catalog_visibility !== item.product.catalog_visibility ||
+						verifiedHash !== afterHash
+					) {
+						throw new Error("Post-write verification failed for product " + item.product.id + ".");
+					}
+					for (const target of item.targets) {
+						const verifiedField = verifiedWapf.group.fields.find(
+							(field: any) => genericWapfFieldId(field) === target.requested.field_id,
+						);
+						const added = (verifiedField?.options?.choices ?? []).filter(
+							(choice: any) =>
+								String(choice?.slug ?? "") === target.requested.choice_slug &&
+								String(choice?.label ?? "") === target.requested.choice_label &&
+								String(choice?.pricing_type ?? "none") === "none" &&
+								Number(choice?.pricing_amount ?? 0) === 0 &&
+								Number(choice?.attachment ?? 0) === Number(uploaded.id) &&
+								normaliseImageUrl(String(choice?.image ?? "")) ===
+									normaliseImageUrl(uploaded.source_url),
+						);
+						if (added.length !== 1) {
+							throw new Error("Appended choice verification failed for field " + target.requested.field_id + ".");
+						}
+					}
+					results.push({
+						product_id: verified.id,
+						product_name: verified.name,
+						before_field_group_sha256: item.beforeHash,
+						after_field_group_sha256: verifiedHash,
+						updated_field_ids: item.targets.map(
+							(target: any) => target.requested.field_id,
+						),
+					});
+				}
+				return toolResult({
+					updated: true,
+					environment,
+					choice_count_added: plan.products.reduce(
+						(total, item) => total + item.targets.length,
+						0,
+					),
+					swatch_attachment: {
+						attachment_id: Number(uploaded.id),
+						source_url: uploaded.source_url,
+						filename: uploaded.slug || args.swatch_filename,
+						mime_type: uploaded.mime_type,
+					},
+					products: results,
+					untouched: [
+						"product identity/state",
+						"existing choices and pricing",
+						"field conditions",
+						"unselected WAPF fields",
+						"non-WAPF product data",
+					],
+					original_media_deleted: false,
+				});
+			} catch (error) {
+				const rollbackFailures: string[] = [];
+				for (const item of written.reverse()) {
+					try {
+						await productImageWcWrite(environment, "products/" + item.product.id, {
+							meta_data: [{
+								id: item.wapf.meta.id,
+								key: "_wapf_fieldgroup",
+								value: item.wapf.meta.value,
+							}],
+						});
+						const rolledBack = await (await productImageWcFetch(
+							environment,
+							"products/" + item.product.id,
+						)).json<any>();
+						const rollbackHash = await genericWapfHashOf(genericWapf(rolledBack).meta.value);
+						if (rollbackHash !== item.beforeHash) {
+							throw new Error("rollback hash mismatch");
+						}
+					} catch (rollbackError) {
+						rollbackFailures.push(
+							item.product.id + ": " +
+							(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)),
+						);
+					}
+				}
+				if (rollbackFailures.length) {
+					return toolError(new Error(
+						"WAPF choice append failed and rollback was incomplete: " +
+						rollbackFailures.join("; "),
+					));
+				}
+				return toolError(new Error(
+					"WAPF choice append failed; all product writes were rolled back. " +
+					(error instanceof Error ? error.message : String(error)),
+				));
+			}
+		},
+	);
+
 	const wapfImageDeliveryConfirmation = "CONFIRM APPLY WAPF IMAGE DELIVERY OPTIMISATION";
 	const wapfImageDeliveryField = z.object({
 		field_id: z.string().trim().min(1).max(120),
@@ -10598,71 +10941,8 @@ function createServer() {
 	 * so a failed product write never has to re-upload the approved images. */
 	const wapfVisualConfirmation = "CONFIRM APPLY WAPF IMAGE SWATCHES";
 	const wapfVisualFilename = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/);
-	const wapfVisualMime = z.enum(["image/jpeg", "image/png", "image/webp"]);
 	const wapfVisualFieldId = z.string().trim().min(1).max(100);
 	const wapfVisualChoiceSlug = z.string().trim().min(1).max(100);
-
-	server.registerTool(
-		"upload_wapf_choice_visual_guarded",
-		{
-			description:
-				"Upload one approved image for an exact choice of an explicitly identified draft/hidden WooCommerce product. Verifies the unchanged WAPF hash and image digest. Uploads media only; never changes product options or deletes attachments.",
-			inputSchema: z.object({
-				product_id: genericWapfId,
-				expected_product_name: z.string().trim().min(1).max(500),
-				expected_field_group_sha256: genericWapfHash,
-				field_id: wapfVisualFieldId,
-				choice_slug: wapfVisualChoiceSlug,
-				filename: wapfVisualFilename,
-				mime_type: wapfVisualMime,
-				image_base64: z.string().min(4).max(5_000_000),
-				expected_image_sha256: genericWapfHash,
-				confirmation: z.literal(wapfVisualConfirmation),
-			}),
-		},
-		async (args) => {
-			try {
-				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
-				if (product.id !== args.product_id || product.name !== args.expected_product_name ||
-					product.status !== "draft" || product.catalog_visibility !== "hidden") {
-					throw new Error("Product identity or draft/hidden state changed; no media uploaded.");
-				}
-				const wapf = genericWapf(product);
-				if (await genericWapfHashOf(wapf.meta.value) !== args.expected_field_group_sha256) {
-					throw new Error("The WAPF field group changed after inspection; no media uploaded.");
-				}
-				const fields = wapf.group.fields.filter((field: any) => genericWapfFieldId(field) === args.field_id);
-				if (fields.length !== 1 || fields[0].type !== "radio") throw new Error("Expected exactly one radio field with this ID.");
-				const choices = fields[0].options?.choices;
-				const matching = Array.isArray(choices) ? choices.filter((choice: any) => String(choice?.slug) === args.choice_slug) : [];
-				if (matching.length !== 1 || matching[0]?.image || matching[0]?.attachment) {
-					throw new Error("The target choice is missing, ambiguous or already has an image.");
-				}
-				const extensions: Record<string, string[]> = {
-					"image/jpeg": ["jpg", "jpeg"], "image/png": ["png"], "image/webp": ["webp"],
-				};
-				const extension = args.filename.split(".").pop()?.toLowerCase() ?? "";
-				if (!extensions[args.mime_type].includes(extension)) throw new Error("Filename extension and MIME type disagree.");
-				const bytes = decodeBase64(args.image_base64);
-				if (!bytes.length || bytes.length > 3_500_000 || !hasExpectedImageSignature(bytes, args.mime_type) ||
-					await sha256Hex(bytes) !== args.expected_image_sha256) {
-					throw new Error("Image bytes, type, size or reviewed SHA-256 do not match; no media uploaded.");
-				}
-				const media = await wpUploadMedia(args.filename, args.mime_type, bytes);
-				if (!Number.isInteger(media.id) || media.id < 1 || media.mime_type !== args.mime_type ||
-					typeof media.source_url !== "string" || !media.source_url.startsWith("https://")) {
-					throw new Error("Upload returned an invalid media attachment; inspect WordPress before retrying.");
-				}
-				return toolResult({ uploaded: true, product_id: args.product_id, field_id: args.field_id,
-					choice_slug: args.choice_slug, attachment_id: media.id,
-					filename: String(media.media_details?.file ?? media.source_url).split("/").pop(),
-					source_url: media.source_url, image_sha256: args.expected_image_sha256,
-					product_modified: false });
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
 
 	server.registerTool(
 		"apply_wapf_image_swatches_guarded",
