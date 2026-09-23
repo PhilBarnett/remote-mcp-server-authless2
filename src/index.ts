@@ -9761,7 +9761,7 @@ function createServer() {
 				if (
 					!uploaded?.id ||
 					typeof uploaded.source_url !== "string" ||
-					!/^image\\/(jpeg|png|webp)$/i.test(uploaded.mime_type ?? "")
+					!/^image\/(jpeg|png|webp)$/i.test(uploaded.mime_type ?? "")
 				) {
 					throw new Error("Uploaded choice swatch is not a supported WordPress image.");
 				}
