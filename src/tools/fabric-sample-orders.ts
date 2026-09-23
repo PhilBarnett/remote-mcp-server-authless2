@@ -5,12 +5,6 @@ const FABRIC_SAMPLE_PRODUCT_ID = 128;
 const FABRIC_SAMPLE_ORDER_CONFIRMATION = "CONFIRM CREATE FABRIC SAMPLE ORDER";
 const REQUEST_META_KEY = "_blindmotion_mcp_sample_request_id";
 
-function sampleOrderCreationEnabled() {
-	// Order 9810 did not import; keep live creation disabled until the exact
-	// iDempiere failure is diagnosed and an end-to-end test succeeds.
-	return false;
-}
-
 type WooRequest = (
 	path: string,
 	params?: Record<string, string | number | undefined>,
@@ -208,9 +202,6 @@ export function registerFabricSampleOrderTool(
 		},
 		async ({ expected_product_name, request_id, customer, selections }) => {
 			try {
-				if (!sampleOrderCreationEnabled()) {
-					throw new Error("Fabric Sample API creation is disabled while order 9810 import failure is investigated. No order was created.");
-				}
 				const fieldLabels = selections.map((selection) => selection.field_label);
 				if (new Set(fieldLabels).size !== fieldLabels.length) {
 					throw new Error("Each WAPF field_label may appear only once per sample order.");
