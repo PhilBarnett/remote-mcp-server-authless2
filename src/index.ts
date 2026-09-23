@@ -10941,7 +10941,6 @@ function createServer() {
 	 * so a failed product write never has to re-upload the approved images. */
 	const wapfVisualConfirmation = "CONFIRM APPLY WAPF IMAGE SWATCHES";
 	const wapfVisualFilename = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/);
-	const wapfVisualMime = z.enum(["image/jpeg", "image/png", "image/webp"]);
 	const wapfVisualFieldId = z.string().trim().min(1).max(100);
 	const wapfVisualChoiceSlug = z.string().trim().min(1).max(100);
 
