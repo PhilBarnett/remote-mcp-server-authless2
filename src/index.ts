@@ -11840,6 +11840,7 @@ function createServer() {
 		expected_sha256: string;
 		mime_type: string;
 		byte_length: number;
+		bytes: Uint8Array;
 	};
 
 	function deepReplaceExactString(value: any, from: string, to: string): any {
@@ -11923,6 +11924,7 @@ function createServer() {
 				expected_sha256: await sha256Hex(bytes),
 				mime_type: mimeType,
 				byte_length: bytes.length,
+				bytes,
 			});
 		}
 		return locked;
@@ -11933,35 +11935,45 @@ function createServer() {
 		upload: boolean,
 	) {
 		const resolved = new Map<string, { attachment: number | null; source_url: string }>();
-		for (const [key, colour] of locked) {
-			const { response, finalUrl } = await fetchPublicResource(colour.source_url, "image/jpeg,image/png,image/webp");
-			const bytes = new Uint8Array(await response.arrayBuffer());
-			const mimeType = String(response.headers.get("content-type") ?? "").split(";")[0].trim().toLocaleLowerCase();
-			if (mimeType !== colour.mime_type || bytes.length !== colour.byte_length ||
-				await sha256Hex(bytes) !== colour.expected_sha256) {
-				throw new Error("Fairlight image changed after preview: " + colour.source_url + ".");
+		const existingBySlug = new Map<string, any>();
+		if (upload) {
+			const candidates = await (
+				await productImageWpFetch(
+					"staging",
+					"media?search=" + encodeURIComponent("Fairlight") + "&per_page=100&context=edit",
+				)
+			).json<any[]>();
+			for (const candidate of candidates) {
+				const slug = String(candidate?.slug ?? "").toLocaleLowerCase();
+				if (!slug) continue;
+				if (existingBySlug.has(slug)) {
+					throw new Error("Multiple staging attachments use Fairlight slug " + slug + ".");
+				}
+				existingBySlug.set(slug, candidate);
 			}
+		}
+		for (const [key, colour] of locked) {
 			let attachment: number | null = null;
-			let sourceUrl = finalUrl.toString();
+			let sourceUrl = colour.source_url;
 			if (upload) {
 				const slug = safeSlug(colour.filename.replace(/\.[^.]+$/, ""));
-				const candidates = await (
-					await productImageWpFetch("staging", "media?slug=" + encodeURIComponent(slug) + "&per_page=100&context=edit")
-				).json<any[]>();
-				if (candidates.length > 1) throw new Error("Multiple staging attachments use slug " + slug + ".");
-				if (candidates.length === 1) {
-					const candidate = candidates[0];
-					const loaded = await fetchPublicResource(String(candidate.source_url), "image/jpeg,image/png,image/webp");
+				const candidate = existingBySlug.get(slug.toLocaleLowerCase());
+				if (candidate) {
+					const existingUrl = String(candidate.source_url ?? "");
+					const loaded = await fetchPublicResource(existingUrl, "image/jpeg,image/png,image/webp");
 					const existingBytes = new Uint8Array(await loaded.response.arrayBuffer());
 					if (await sha256Hex(existingBytes) !== colour.expected_sha256) {
 						throw new Error("Existing staging attachment has different bytes: " + slug + ".");
 					}
 					attachment = Number(candidate.id);
-					sourceUrl = String(candidate.source_url);
+					sourceUrl = existingUrl;
 				} else {
-					const uploaded = await productImageWpUploadMedia("staging", colour.filename, mimeType, bytes);
+					const uploaded = await productImageWpUploadMedia(
+						"staging", colour.filename, colour.mime_type, colour.bytes,
+					);
 					attachment = Number(uploaded.id);
 					sourceUrl = String(uploaded.source_url ?? "");
+					existingBySlug.set(slug.toLocaleLowerCase(), uploaded);
 				}
 				if (!Number.isInteger(attachment) || attachment! < 1 || !sourceUrl.startsWith("https://")) {
 					throw new Error("Staging did not return a valid Fairlight attachment.");
@@ -12126,9 +12138,8 @@ function createServer() {
 						throw new Error("Exact confirmation required: " + everydayFabricAdditionConfirmation);
 					}
 					const product = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
-					const preview = await buildEverydayFabricAdditionPlan(fabricArgs, false, product);
-					if (!args.expected_plan_sha256 || preview.planHash !== args.expected_plan_sha256) {
-						throw new Error("The Everyday fabric plan changed after preview.");
+					if (!args.expected_plan_sha256) {
+						throw new Error("The reviewed Everyday fabric plan hash is required.");
 					}
 					const plan = await buildEverydayFabricAdditionPlan(fabricArgs, true, product);
 					if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) {
