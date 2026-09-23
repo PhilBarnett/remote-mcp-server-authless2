@@ -9674,59 +9674,76 @@ function createServer() {
 		return { bytes, swatchHash, products, planHash };
 	}
 
-	server.registerTool(
-		"preview_wapf_choice_append",
-		{
-			description:
-				"Preview appending one zero-priced image-swatch choice to explicitly selected WAPF fields on hash-locked live or staging products. Validates product state, field identity, duplicate labels/slugs and swatch bytes; performs no writes.",
-			inputSchema: wapfChoiceAppendBase,
-		},
-		async (args) => {
-			try {
-				const plan = await buildWapfChoiceAppendPlan(args);
-				return toolResult({
-					write_performed: false,
-					environment: args.environment,
-					plan_sha256: plan.planHash,
-					swatch: {
-						filename: args.swatch_filename,
-						mime_type: args.swatch_mime_type,
-						sha256: plan.swatchHash,
-						byte_length: plan.bytes.length,
-					},
-					products: plan.products.map((item) => ({
-						product_id: item.product.id,
-						product_name: item.product.name,
-						status: item.product.status,
-						catalog_visibility: item.product.catalog_visibility,
-						before_field_group_sha256: item.beforeHash,
-						fields: item.targets.map(({ requested }: any) => ({
-							field_id: requested.field_id,
-							field_label: requested.expected_field_label,
-							choice_label: requested.choice_label,
-							choice_slug: requested.choice_slug,
-							pricing_type: "none",
-							pricing_amount: 0,
-						})),
-					})),
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
 
 	server.registerTool(
-		"apply_wapf_choice_append_guarded",
+		"manage_wapf_choice_append",
 		{
 			description:
-				"Apply one exact previewed zero-priced WAPF image-swatch choice append across hash-locked live or staging products. Uploads one shared swatch, changes only selected choice arrays, verifies every product and rolls back all product writes on failure. Media is never deleted.",
+				"Preview or apply appending one zero-priced image-swatch choice to explicitly selected WAPF fields on hash-locked live or staging products. Apply uploads one shared swatch, changes only selected choice arrays, verifies every product and rolls back all product writes on failure. Media is never deleted.",
 			inputSchema: wapfChoiceAppendBase.extend({
-				expected_plan_sha256: genericWapfHash,
-				confirmation: z.literal(wapfChoiceAppendConfirmation),
+				action: z.enum(["preview", "apply"]),
+				expected_plan_sha256: genericWapfHash.optional(),
+				confirmation: z.string().optional(),
+			}).superRefine((value, ctx) => {
+				if (
+					value.action === "apply" &&
+					value.expected_plan_sha256 === undefined
+				) {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						path: ["expected_plan_sha256"],
+						message: "Apply requires expected_plan_sha256 from preview.",
+					});
+				}
+				if (
+					value.action === "apply" &&
+					value.confirmation !== wapfChoiceAppendConfirmation
+				) {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						path: ["confirmation"],
+						message:
+							"Apply confirmation must exactly equal: " +
+							wapfChoiceAppendConfirmation,
+					});
+				}
 			}),
 		},
 		async (args) => {
+			if (args.action === "preview") {
+				try {
+					const plan = await buildWapfChoiceAppendPlan(args);
+					return toolResult({
+						write_performed: false,
+						environment: args.environment,
+						plan_sha256: plan.planHash,
+						swatch: {
+							filename: args.swatch_filename,
+							mime_type: args.swatch_mime_type,
+							sha256: plan.swatchHash,
+							byte_length: plan.bytes.length,
+						},
+						products: plan.products.map((item) => ({
+							product_id: item.product.id,
+							product_name: item.product.name,
+							status: item.product.status,
+							catalog_visibility: item.product.catalog_visibility,
+							before_field_group_sha256: item.beforeHash,
+							fields: item.targets.map(({ requested }: any) => ({
+								field_id: requested.field_id,
+								field_label: requested.expected_field_label,
+								choice_label: requested.choice_label,
+								choice_slug: requested.choice_slug,
+								pricing_type: "none",
+								pricing_amount: 0,
+							})),
+						})),
+					});
+				} catch (error) {
+					return toolError(error);
+				}
+			}
+
 			const environment = args.environment as ProductImageEnvironment;
 			let uploaded: any;
 			const written: Array<any> = [];
@@ -9744,7 +9761,7 @@ function createServer() {
 				if (
 					!uploaded?.id ||
 					typeof uploaded.source_url !== "string" ||
-					!/^image\/(jpeg|png|webp)$/i.test(uploaded.mime_type ?? "")
+					!/^image\\/(jpeg|png|webp)$/i.test(uploaded.mime_type ?? "")
 				) {
 					throw new Error("Uploaded choice swatch is not a supported WordPress image.");
 				}
