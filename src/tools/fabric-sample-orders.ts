@@ -4,7 +4,6 @@ import { z } from "zod";
 const FABRIC_SAMPLE_PRODUCT_ID = 128;
 const FABRIC_SAMPLE_ORDER_CONFIRMATION = "CONFIRM CREATE FABRIC SAMPLE ORDER";
 const REQUEST_META_KEY = "_blindmotion_mcp_sample_request_id";
-const WAPF_META_KEY = "_wapf_meta";
 
 function sampleOrderCreationEnabled() {
 	// Deliberately fail closed until the WAPF importer payload is parity tested.
@@ -141,37 +140,6 @@ export function registerFabricSampleOrderTool(
 		field_label: z.string().trim().min(1).max(120),
 		choice_labels: z.array(z.string().trim().min(1).max(120)).min(1).max(20),
 	});
-
-	server.registerTool(
-		"inspect_fabric_sample_order_wapf_meta",
-		{
-			description: "Read only: compare WAPF line-item metadata for exactly one Fabric Sample order, excluding customer and address data.",
-			inputSchema: z.object({ order_id: z.number().int().positive() }),
-		},
-		async ({ order_id }) => {
-			try {
-				const response = await dependencies.wcFetch(`orders/${order_id}`);
-				if (!response.ok) throw new Error(`WooCommerce returned HTTP ${response.status}.`);
-				const order = await response.json<any>();
-				const lineItems = order?.line_items ?? [];
-				if (lineItems.length !== 1 || Number(lineItems[0]?.product_id) !== FABRIC_SAMPLE_PRODUCT_ID) {
-					throw new Error("Order must contain exactly one Fabric Sample line item.");
-				}
-				return result({
-					order_id,
-					status: order.status,
-					wapf_meta: (lineItems[0].meta_data ?? [])
-						.filter((meta: any) => String(meta?.key) === WAPF_META_KEY)
-						.map((meta: any) => meta.value),
-					visible_options: (lineItems[0].meta_data ?? [])
-						.filter((meta: any) => !String(meta?.key ?? "").startsWith("_"))
-						.map((meta: any) => ({ label: meta.key, value: meta.value })),
-				});
-			} catch (error) {
-				return errorResult(error);
-			}
-		},
-	);
 
 	server.registerTool(
 		"create_fabric_sample_order_guarded",
