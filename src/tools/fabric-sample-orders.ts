@@ -140,7 +140,8 @@ function buildWapfMeta(
 	if (Object.keys(fields).length !== selections.length) {
 		throw new Error("Incomplete WAPF mapping; order creation stopped.");
 	}
-	return [{ fields, settings }];
+	// iDempiere reads _wapf_meta as a fields/settings object.
+	return { fields, settings };
 }
 
 function safeCreatedOrder(
