@@ -5,11 +5,6 @@ const FABRIC_SAMPLE_PRODUCT_ID = 128;
 const FABRIC_SAMPLE_ORDER_CONFIRMATION = "CONFIRM CREATE FABRIC SAMPLE ORDER";
 const REQUEST_META_KEY = "_blindmotion_mcp_sample_request_id";
 
-function sampleOrderCreationEnabled() {
-	// Deliberately fail closed until the WAPF importer payload is parity tested.
-	return false;
-}
-
 type WooRequest = (
 	path: string,
 	params?: Record<string, string | number | undefined>,
@@ -99,6 +94,55 @@ function validateSelections(
 	}
 }
 
+function buildWapfMeta(
+	product: any,
+	selections: Array<{ field_label: string; choice_labels: string[] }>,
+) {
+	const group = parseFieldGroup(product);
+	const fields: Record<string, any> = {};
+	const settings: Record<string, Array<{ field: string; hide: boolean }>> = {};
+	for (const selection of selections) {
+		const field = group.fields.find((candidate: any) => fieldLabel(candidate) === selection.field_label);
+		const id = String(field?.id ?? "");
+		const type = String(field?.type ?? "");
+		const choices = field?.options?.choices;
+		if (!id || !type || !Array.isArray(choices) || fields[id]) {
+			throw new Error(`Cannot construct WAPF mapping for ${selection.field_label}.`);
+		}
+		const isMulti = type.startsWith("multi-");
+		if (!isMulti && selection.choice_labels.length !== 1) {
+			throw new Error(`Field ${selection.field_label} accepts one choice.`);
+		}
+		const values = selection.choice_labels.map((label) => {
+			const choice = choices.find((candidate: any) => choiceLabel(candidate) === label);
+			const slug = String(choice?.slug ?? "");
+			const priceType = String(choice?.pricing_type ?? "none");
+			const price = Number(choice?.pricing_amount ?? 0);
+			if (!slug || !["none", "fixed"].includes(priceType) || !Number.isFinite(price) || price !== 0) {
+				throw new Error(`Cannot safely map zero-priced choice ${label}.`);
+			}
+			const value: Record<string, unknown> = { label, price: 0, price_type: priceType, slug };
+			if (priceType === "fixed") {
+				value.calc_price = 0;
+				value.pricing_hint = "(+&#36;0.00)";
+			}
+			return value;
+		});
+		const value = selection.choice_labels.join(", ");
+		fields[id] = {
+			id, type, label: selection.field_label, value, values,
+			...(values.length === 1 && values[0].price_type === "fixed"
+				? { display: `${value} <span class="wapf-pricing-hint">(+&#36;0.00)</span>` }
+				: {}),
+		};
+		settings[selection.field_label] = [{ field: id, hide: false }];
+	}
+	if (Object.keys(fields).length !== selections.length) {
+		throw new Error("Incomplete WAPF mapping; order creation stopped.");
+	}
+	return [{ fields, settings }];
+}
+
 function safeCreatedOrder(
 	order: any,
 	selections: Array<{ field_label: string; choice_labels: string[] }>,
@@ -158,12 +202,6 @@ export function registerFabricSampleOrderTool(
 		},
 		async ({ expected_product_name, request_id, customer, selections }) => {
 			try {
-				// WooCommerce REST line-item display meta does not create WAPF\u2019s hidden
-				// _wapf_meta. iDempiere requires it to map selections. Fail before any
-				// read or write until a parity-tested WAPF payload builder is installed.
-				if (!sampleOrderCreationEnabled()) {
-					throw new Error("Fabric Sample API creation is temporarily disabled: the iDempiere importer requires validated _wapf_meta. No order was created.");
-				}
 				const fieldLabels = selections.map((selection) => selection.field_label);
 				if (new Set(fieldLabels).size !== fieldLabels.length) {
 					throw new Error("Each WAPF field_label may appear only once per sample order.");
@@ -236,6 +274,7 @@ export function registerFabricSampleOrderTool(
 					);
 				}
 				validateSelections(product, selections);
+				const wapfMeta = buildWapfMeta(product, selections);
 
 				const address = {
 					...customer,
@@ -263,10 +302,13 @@ export function registerFabricSampleOrderTool(
 							quantity: 1,
 							subtotal: "0.00",
 							total: "0.00",
-							meta_data: selections.map((selection) => ({
+							meta_data: [
+							...selections.map((selection) => ({
 								key: selection.field_label,
 								value: selection.choice_labels.join(", "),
 							})),
+							{ key: "_wapf_meta", value: wapfMeta },
+						],
 						},
 					],
 					shipping_lines: [
@@ -292,7 +334,8 @@ export function registerFabricSampleOrderTool(
 					Number(verified?.total) !== 0 ||
 					verified?.line_items?.length !== 1 ||
 					Number(verified.line_items[0]?.product_id) !== FABRIC_SAMPLE_PRODUCT_ID ||
-					String(verifiedRequestId) !== request_id
+					String(verifiedRequestId) !== request_id ||
+					JSON.stringify((verified.line_items[0]?.meta_data ?? []).find((meta: any) => meta.key === "_wapf_meta")?.value) !== JSON.stringify(wapfMeta)
 				) {
 					throw new Error(
 						`Order ${created.id} was created but post-write verification failed; inspect it manually before retrying.`,
