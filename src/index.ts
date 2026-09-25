@@ -11875,6 +11875,25 @@ function createServer() {
 	);
 
 	const wapfPricingGridConfirmation = "CONFIRM APPLY WAPF PRICING GRID";
+	const wapfOptionLookupConfirmation = "CONFIRM APPLY WAPF OPTION LOOKUP";
+	const wapfOptionLookupBase = z.object({
+		product_id: z.number().int().positive(),
+		expected_product_name: z.string().min(1),
+		expected_meta_data_id: z.number().int().positive(),
+		expected_field_group_sha256: genericWapfHash,
+		width_field_id: z.string().min(1),
+		expected_width_field_label: z.string().min(1),
+		drop_field_id: z.string().min(1),
+		expected_drop_field_label: z.string().min(1),
+		option_surcharges: z.array(z.object({
+			field_id: z.string().min(1),
+			expected_field_label: z.string().min(1),
+			choice_slug: z.string().min(1),
+			expected_choice_label: z.string().min(1),
+			lookup_name: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
+			expected_lookup_sha256: genericWapfHash,
+		})).min(1).max(20),
+	});
 	const pricingAxis = z.array(z.number().int().positive()).min(2).max(50);
 	const pricingMatrix = z.array(z.array(z.number().nonnegative()).min(2).max(50)).min(2).max(50);
 	const wapfPricingGridBase = z.object({
@@ -12077,6 +12096,91 @@ function createServer() {
 			fixed_choice_prices: args.fixed_choice_prices,
 		});
 		return { product, wapf, beforeHash, afterHash, planHash, updatedValue, baseFormula };
+	}
+
+	async function buildWapfOptionLookupPlan(
+		args: z.infer<typeof wapfOptionLookupBase>,
+		environment: ProductImageEnvironment,
+		productOverride?: any,
+	) {
+		if (environment !== "staging") throw new Error("Option-lookup pricing updates are restricted to staging.");
+		const product = productOverride ?? await (
+			await productImageWcFetch(environment, "products/" + args.product_id)
+		).json<any>();
+		if (product.id !== args.product_id || product.name !== args.expected_product_name) {
+			throw new Error("WooCommerce product identity does not match the requested option-lookup target.");
+		}
+		const draftHidden = product.status === "draft" && product.catalog_visibility === "hidden";
+		const publishedStaging = product.status === "publish";
+		if (!draftHidden && !publishedStaging) {
+			throw new Error("Option-lookup pricing updates require a draft/hidden or published staging product.");
+		}
+		const wapf = genericWapf(product);
+		if (wapf.meta.id !== args.expected_meta_data_id) throw new Error("WAPF metadata identity changed.");
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		if (beforeHash !== args.expected_field_group_sha256) throw new Error("WAPF field group changed after review.");
+		const lookupNames = args.option_surcharges.map((item) => item.lookup_name);
+		if (new Set(lookupNames).size !== lookupNames.length) throw new Error("Duplicate option lookup names are not allowed.");
+		const detailQuery = new URLSearchParams({
+			lookup_names: lookupNames.join(","),
+			acf_field_group_id: "0",
+			expected_acf_field_group_title: "",
+		});
+		const pricingDetails = await authenticatedWpRest(
+			"blindmotion-mcp/v1/wapf-pricing-details?" + detailQuery.toString(),
+		);
+		if (
+			pricingDetails?.read_only !== true ||
+			pricingDetails?.unrelated_values_returned !== false ||
+			pricingDetails?.write_performed !== false ||
+			JSON.stringify(pricingDetails?.requested_lookup_names) !== JSON.stringify(lookupNames) ||
+			JSON.stringify(Object.keys(pricingDetails?.lookups ?? {})) !== JSON.stringify(lookupNames)
+		) {
+			throw new Error("Option lookup verification failed its exact-selection contract.");
+		}
+		const updatedGroup = structuredClone(wapf.group);
+		const fields = updatedGroup.fields as any[];
+		const exactField = (id: string, label: string) => {
+			const matches = fields.filter((field) => String(field.id) === id);
+			if (matches.length !== 1 || String(matches[0].label) !== label) {
+				throw new Error("Expected WAPF field identity not found: " + label + ".");
+			}
+			return matches[0];
+		};
+		const widthField = exactField(args.width_field_id, args.expected_width_field_label);
+		const dropField = exactField(args.drop_field_id, args.expected_drop_field_label);
+		if (widthField.type !== "number" || dropField.type !== "number") {
+			throw new Error("Width and drop lookup fields must both be number fields.");
+		}
+		for (const surcharge of args.option_surcharges) {
+			const lookup = pricingDetails.lookups?.[surcharge.lookup_name];
+			if (!lookup || lookup.value_sha256 !== surcharge.expected_lookup_sha256) {
+				throw new Error("Option lookup changed or is missing: " + surcharge.lookup_name + ".");
+			}
+			const field = exactField(surcharge.field_id, surcharge.expected_field_label);
+			const choices = field.options?.choices;
+			if (!Array.isArray(choices)) throw new Error("Option surcharge field choices are missing.");
+			const matches = choices.filter((choice: any) => String(choice.slug) === surcharge.choice_slug);
+			if (matches.length !== 1 || String(matches[0].label) !== surcharge.expected_choice_label) {
+				throw new Error("Expected surcharge choice identity not found: " + surcharge.expected_choice_label + ".");
+			}
+			matches[0].pricing_type = "fx";
+			matches[0].pricing_amount =
+				"lookuptable(" + surcharge.lookup_name + ";" + args.width_field_id + ";" +
+				args.drop_field_id + ")*[qty]";
+		}
+		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
+		const afterHash = await genericWapfHashOf(updatedValue);
+		const planHash = await genericWapfHashOf({
+			environment,
+			product_id: args.product_id,
+			product_name: args.expected_product_name,
+			before_field_group_sha256: beforeHash,
+			width_field_id: args.width_field_id,
+			drop_field_id: args.drop_field_id,
+			option_surcharges: args.option_surcharges,
+		});
+		return { product, wapf, beforeHash, afterHash, planHash, updatedValue };
 	}
 
 	/* Guarded staging-only addition of one to three fabric families.
@@ -12398,7 +12502,7 @@ function createServer() {
 	const wapfPricingGridManager = wapfPricingGridBase.partial().extend({
 		product_id: z.number().int().positive(),
 		environment: z.enum(["live", "staging"]),
-		action: z.enum(["inspect", "preview", "apply", "preview_fabric_addition", "apply_fabric_addition"]),
+		action: z.enum(["inspect", "preview", "apply", "preview_fabric_addition", "apply_fabric_addition", "preview_option_lookup", "apply_option_lookup"]),
 		families: z.array(everydayFabricFamily).min(1).max(3).optional(),
 		expected_plan_sha256: genericWapfHash.optional(),
 		confirmation: z.string().optional(),
@@ -12407,7 +12511,7 @@ function createServer() {
 	server.registerTool(
 		"manage_wapf_pricing_grid",
 		{
-			description: "Inspect, preview or apply a complete parameter-driven WAPF price grid on live or staging, or preview/apply a staging-only one-to-three-family fabric addition. Fabric addition clones reviewed colour fields, selector choices and either direct-choice pricing or lookup-variable mappings, fingerprints supplier images, verifies the draft/hidden write and rolls back on failure. The tool cannot publish.",
+			description: "Inspect, preview or apply a complete parameter-driven WAPF price grid, manage a staging-only option-price lookup reference, or preview/apply a staging-only one-to-three-family fabric addition. Option-lookup updates are hash-locked, verify the named lookup and change only explicitly selected choice pricing; fabric addition remains draft/hidden only. The tool cannot publish.",
 			inputSchema: wapfPricingGridManager,
 		},
 		async (args) => {
@@ -12531,6 +12635,97 @@ function createServer() {
 						read_only: true,
 						write_performed: false,
 					});
+				}
+
+				if (args.action === "preview_option_lookup" || args.action === "apply_option_lookup") {
+					const lookupArgs = wapfOptionLookupBase.parse(args);
+					const plan = await buildWapfOptionLookupPlan(lookupArgs, args.environment);
+					const summary = {
+						environment: args.environment,
+						product_id: plan.product.id,
+						product_name: plan.product.name,
+						status: plan.product.status,
+						catalog_visibility: plan.product.catalog_visibility,
+						before_field_group_sha256: plan.beforeHash,
+						after_field_group_sha256: plan.afterHash,
+						plan_sha256: plan.planHash,
+						option_surcharges: lookupArgs.option_surcharges,
+					};
+					if (args.action === "preview_option_lookup") {
+						return toolResult({
+							...summary,
+							preview_only: true,
+							write_performed: false,
+							required_confirmation: wapfOptionLookupConfirmation,
+						});
+					}
+					if (args.confirmation !== wapfOptionLookupConfirmation) {
+						throw new Error("Exact confirmation required: " + wapfOptionLookupConfirmation);
+					}
+					if (!args.expected_plan_sha256 || args.expected_plan_sha256 !== plan.planHash) {
+						throw new Error("Option-lookup plan changed after preview.");
+					}
+					try {
+						await productImageWcWrite("staging", "products/" + lookupArgs.product_id, {
+							meta_data: [{
+								id: plan.wapf.meta.id,
+								key: "_wapf_fieldgroup",
+								value: plan.updatedValue,
+							}],
+						});
+						const verified = await (
+							await productImageWcFetch("staging", "products/" + lookupArgs.product_id)
+						).json<any>();
+						const verifiedWapf = genericWapf(verified);
+						const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+						if (
+							verified.id !== lookupArgs.product_id ||
+							verified.name !== lookupArgs.expected_product_name ||
+							verified.status !== plan.product.status ||
+							verified.catalog_visibility !== plan.product.catalog_visibility ||
+							verifiedWapf.meta.id !== lookupArgs.expected_meta_data_id ||
+							verifiedHash !== plan.afterHash
+						) {
+							throw new Error("Post-write option-lookup verification failed.");
+						}
+						return toolResult({
+							...summary,
+							preview_only: false,
+							write_performed: true,
+							verified: true,
+						});
+					} catch (writeError) {
+						try {
+							await productImageWcWrite("staging", "products/" + lookupArgs.product_id, {
+								meta_data: [{
+									id: plan.wapf.meta.id,
+									key: "_wapf_fieldgroup",
+									value: plan.wapf.meta.value,
+								}],
+							});
+							const rolledBack = await (
+								await productImageWcFetch("staging", "products/" + lookupArgs.product_id)
+							).json<any>();
+							const rolledBackWapf = genericWapf(rolledBack);
+							if (
+								rolledBack.id !== lookupArgs.product_id ||
+								rolledBackWapf.meta.id !== lookupArgs.expected_meta_data_id ||
+								(await genericWapfHashOf(rolledBackWapf.meta.value)) !== plan.beforeHash
+							) {
+								throw new Error("Option-lookup rollback verification failed.");
+							}
+						} catch (rollbackError) {
+							throw new Error(
+								"Option-lookup update failed and rollback was incomplete: " +
+								(writeError instanceof Error ? writeError.message : String(writeError)) + " | " +
+								(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)),
+							);
+						}
+						throw new Error(
+							"Option-lookup update failed; original WAPF field group was restored: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)),
+						);
+					}
 				}
 
 				const pricingArgs = wapfPricingGridBase.parse(args);
