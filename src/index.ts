@@ -10381,6 +10381,20 @@ function createServer() {
 	});
 	type WapfLabelSelection = z.infer<typeof wapfLabelSelection>;
 
+	function wapfLabelCanonical(value: unknown): unknown {
+		if (Array.isArray(value)) return value.map(wapfLabelCanonical);
+		if (value && typeof value === "object") {
+			return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([key, child]) => [key, wapfLabelCanonical(child)]));
+		}
+		return value;
+	}
+	function wapfLabelSameGroup(left: unknown, right: unknown) {
+		return JSON.stringify(wapfLabelCanonical(parseWapfFieldGroup(left))) ===
+			JSON.stringify(wapfLabelCanonical(parseWapfFieldGroup(right)));
+	}
+
 	async function wapfLabelPlan(args: WapfLabelSelection) {
 		const product = await (await productImageWcFetch(args.environment, "products/" + args.product_id)).json<any>();
 		if (product.id !== args.product_id || product.name !== args.expected_product_name) {
@@ -10456,8 +10470,13 @@ function createServer() {
 							verified.status !== args.expected_status ||
 							verified.catalog_visibility !== args.expected_catalog_visibility ||
 							verifiedWapf.meta.id !== args.expected_meta_data_id ||
-							verifiedHash !== plan.updatedHash) {
-							throw new Error("Post-write product identity, state, metadata or exact WAPF hash mismatch.");
+							!wapfLabelSameGroup(verifiedWapf.meta.value, plan.updatedValue)) {
+							const selected = args.fields.map((item) => ({
+								id: item.field_id,
+								observed_label: verifiedWapf.group.fields.find((field: any) => genericWapfFieldId(field) === item.field_id)?.label ?? null,
+							}));
+							throw new Error("Post-write WAPF group differs from the exact label-only plan; observed hash " +
+								verifiedHash + ", labels " + JSON.stringify(selected) + ".");
 						}
 						return toolResult({
 							updated: true, environment: args.environment,
