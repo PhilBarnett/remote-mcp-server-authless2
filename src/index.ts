@@ -2292,17 +2292,14 @@ const googleAdsCampaignChangeSchema = z.object({
 					action: z.literal("PAUSE_CAMPAIGN"),
 					campaign_id: z.string().regex(/^\d{1,20}$/),
 					expected_campaign_name: z.string().trim().min(1).max(255),
-				}),
-				z.object({
-					action: z.literal("REPLACE_PMAX_IMAGE"),
-					campaign_id: z.string().regex(/^\d{1,20}$/),
-					expected_campaign_name: z.string().trim().min(1).max(255),
-					asset_group_id: z.string().regex(/^\d{1,20}$/),
-					expected_asset_group_name: z.string().trim().min(1).max(255),
-					old_asset_id: z.string().regex(/^\d{1,20}$/),
-					field_type: z.literal("MARKETING_IMAGE"),
-					new_image_name: z.string().trim().min(1).max(180),
-					new_image_source_url: z.string().url(),
+					image_replacement: z.object({
+						asset_group_id: z.string().regex(/^\d{1,20}$/),
+						expected_asset_group_name: z.string().trim().min(1).max(255),
+						old_asset_id: z.string().regex(/^\d{1,20}$/),
+						field_type: z.literal("MARKETING_IMAGE"),
+						new_image_name: z.string().trim().min(1).max(180),
+						new_image_source_url: z.string().url(),
+					}).optional(),
 				}),
 				z.object({
 					action: z.literal("INCREASE_DAILY_BUDGET_PERCENT"),
@@ -2434,7 +2431,7 @@ async function buildGoogleAdsCampaignChangePlan(
 			change.expected_campaign_name,
 		);
 
-		if (change.action === "REPLACE_PMAX_IMAGE") {
+		if (change.action === "PAUSE_CAMPAIGN" && change.image_replacement) {
 			if (input.changes.length !== 1) {
 				throw new Error("An image replacement must be the only change in its plan.");
 			}
@@ -2442,7 +2439,9 @@ async function buildGoogleAdsCampaignChangePlan(
 				snapshot.campaign.status !== "ENABLED") {
 				throw new Error("The target campaign must be an enabled Performance Max campaign.");
 			}
-			const state = await getPmaxImageSwapState(change);
+			const swap = { ...change.image_replacement, campaign_id: change.campaign_id,
+				expected_campaign_name: change.expected_campaign_name };
+			const state = await getPmaxImageSwapState(swap);
 			const old = state.links.filter((r: any) =>
 				r.assetGroupAsset?.asset === state.oldAssetResource &&
 				r.assetGroupAsset?.status === "ENABLED" &&
@@ -2450,10 +2449,10 @@ async function buildGoogleAdsCampaignChangePlan(
 			if (old.length !== 1) {
 				throw new Error("Expected exactly one enabled old image link.");
 			}
-			const loaded = await loadBlindmotionPmaxImage(change.new_image_source_url);
-			const dimensions = validateZipGripImage(loaded.bytes, loaded.mimeType, change.field_type);
+			const loaded = await loadBlindmotionPmaxImage(swap.new_image_source_url);
+			const dimensions = validateZipGripImage(loaded.bytes, loaded.mimeType, swap.field_type);
 			const digest = await sha256Hex(loaded.bytes);
-			const newAssetName = change.new_image_name + " " + digest.slice(0, 12);
+			const newAssetName = swap.new_image_name + " " + digest.slice(0, 12);
 			if (state.links.some((r: any) => r.asset?.name === newAssetName)) {
 				throw new Error("The replacement image is already linked.");
 			}
@@ -2462,11 +2461,11 @@ async function buildGoogleAdsCampaignChangePlan(
 				{ assetOperation: { create: { resourceName: newAssetResource,
 					name: newAssetName, imageAsset: { data: loaded.imageBase64 } } } },
 				{ assetGroupAssetOperation: { create: { assetGroup: state.groupResource,
-					asset: newAssetResource, fieldType: change.field_type, status: "ENABLED" } } },
+					asset: newAssetResource, fieldType: swap.field_type, status: "ENABLED" } } },
 				{ assetGroupAssetOperation: { remove: old[0].assetGroupAsset.resourceName } },
 			);
 			plannedChanges.push({
-				...change, campaign: snapshot.campaign,
+				...swap, action: "REPLACE_PMAX_IMAGE", campaign: snapshot.campaign,
 				old_link: old[0].assetGroupAsset.resourceName,
 				old_asset_name: old[0].asset?.name ?? null,
 				new_asset_name: newAssetName,
