@@ -8239,6 +8239,78 @@ function createServer() {
 		},
 	);
 
+	server.registerTool(
+		"inspect_existing_pmax_image_assets",
+		{
+			description:
+				"Inspect image assets and 30-day performance in one exactly identified existing Performance Max asset group. Read-only; no campaign or asset changes.",
+			inputSchema: z.object({
+				campaign_id: z.string().regex(/^\d{1,20}$/),
+				expected_campaign_name: z.string().trim().min(1).max(255),
+				expected_asset_group_name: z.string().trim().min(1).max(255),
+			}),
+		},
+		async ({ campaign_id, expected_campaign_name, expected_asset_group_name }) => {
+			try {
+				const snapshot = await getGoogleAdsCampaignControlSnapshot(
+					campaign_id, expected_campaign_name,
+				);
+				if (snapshot.campaign.advertising_channel_type !== "PERFORMANCE_MAX") {
+					throw new Error("Expected a Performance Max campaign.");
+				}
+				const groups = await googleAdsSearch(
+					"SELECT asset_group.id, asset_group.resource_name, asset_group.name, asset_group.status " +
+					"FROM asset_group WHERE campaign.id = " + campaign_id +
+					" AND asset_group.status != 'REMOVED'",
+				);
+				const matching = groups.filter(
+					(row: any) => row.assetGroup?.name === expected_asset_group_name,
+				);
+				if (matching.length !== 1) {
+					throw new Error("Expected exactly one matching asset group; found " + matching.length + ".");
+				}
+				const group = matching[0].assetGroup;
+				const id = String(group.id);
+				const inventory = await googleAdsSearch(
+					"SELECT asset_group_asset.resource_name, asset_group_asset.asset, " +
+					"asset_group_asset.field_type, asset_group_asset.status, " +
+					"asset_group_asset.primary_status, asset_group_asset.primary_status_reasons, " +
+					"asset.id, asset.resource_name, asset.name, asset.type, " +
+					"asset.image_asset.full_size.url, asset.image_asset.full_size.width_pixels, " +
+					"asset.image_asset.full_size.height_pixels, asset.image_asset.file_size " +
+					"FROM asset_group_asset WHERE asset_group.id = " + id +
+					" AND asset_group_asset.status != 'REMOVED' " +
+					"AND asset_group_asset.field_type IN ('MARKETING_IMAGE', 'SQUARE_MARKETING_IMAGE', 'PORTRAIT_MARKETING_IMAGE')",
+				);
+				const performance = await googleAdsSearch(
+					"SELECT asset_group_asset.resource_name, asset_group_asset.asset, " +
+					"asset_group_asset.field_type, metrics.impressions, metrics.clicks, " +
+					"metrics.conversions, metrics.conversions_value, metrics.cost_micros " +
+					"FROM asset_group_asset WHERE asset_group.id = " + id +
+					" AND asset_group_asset.status != 'REMOVED' " +
+					"AND asset_group_asset.field_type IN ('MARKETING_IMAGE', 'SQUARE_MARKETING_IMAGE', 'PORTRAIT_MARKETING_IMAGE') " +
+					"AND segments.date DURING LAST_30_DAYS",
+				);
+				const byResource = new Map(performance.map(
+					(row: any) => [row.assetGroupAsset?.resourceName, row.metrics ?? {}],
+				));
+				return toolResult({
+					campaign: snapshot.campaign,
+					asset_group: { id, name: group.name, status: group.status, resource_name: group.resourceName },
+					all_asset_groups: groups.map((row: any) => ({ id: String(row.assetGroup?.id), name: row.assetGroup?.name })),
+					image_count: inventory.length,
+					images: inventory.map((row: any) => ({
+						link: row.assetGroupAsset,
+						asset: row.asset,
+						metrics_last_30_days: googleAdsMetrics(byResource.get(row.assetGroupAsset?.resourceName) ?? {}),
+					})),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	/* Read-only Google Ads reporting tools */
 
 	const googleAdsDateSchema = {
