@@ -8410,12 +8410,78 @@ function createServer() {
 				inputSchema: z.object({
 					...googleAdsDateSchema,
 					limit: z.number().int().min(1).max(1000).default(100),
+					...(name === "get_google_ads_ad_performance" ? {
+						campaign_id: z.string().regex(/^\d{1,20}$/).optional(),
+						expected_campaign_name: z.string().trim().min(1).max(255).optional(),
+						expected_asset_group_name: z.string().trim().min(1).max(255).optional(),
+					} : {}),
 				}),
 			},
-			async ({ start_date, end_date, limit }) => {
+			async (args: any) => {
+				const { start_date, end_date, limit, campaign_id, expected_campaign_name, expected_asset_group_name } = args;
 				try {
 					assertGoogleAdsDate(start_date, "start_date");
 					assertGoogleAdsDate(end_date, "end_date");
+					if (name === "get_google_ads_ad_performance" &&
+						(campaign_id || expected_campaign_name || expected_asset_group_name)) {
+						if (!campaign_id || !expected_campaign_name || !expected_asset_group_name) {
+							throw new Error("Campaign ID and both expected names must be supplied together.");
+						}
+						const snapshot = await getGoogleAdsCampaignControlSnapshot(
+						campaign_id, expected_campaign_name,
+					);
+					if (snapshot.campaign.advertising_channel_type !== "PERFORMANCE_MAX") {
+						throw new Error("Expected a Performance Max campaign.");
+					}
+					const groups = await googleAdsSearch(
+						"SELECT asset_group.id, asset_group.resource_name, asset_group.name, asset_group.status " +
+						"FROM asset_group WHERE campaign.id = " + campaign_id +
+						" AND asset_group.status != 'REMOVED'",
+					);
+					const matching = groups.filter(
+						(row: any) => row.assetGroup?.name === expected_asset_group_name,
+					);
+					if (matching.length !== 1) {
+						throw new Error("Expected exactly one matching asset group; found " + matching.length + ".");
+					}
+					const group = matching[0].assetGroup;
+					const id = String(group.id);
+					const inventory = await googleAdsSearch(
+						"SELECT asset_group_asset.resource_name, asset_group_asset.asset, " +
+						"asset_group_asset.field_type, asset_group_asset.status, " +
+						"asset_group_asset.primary_status, asset_group_asset.primary_status_reasons, " +
+						"asset.id, asset.resource_name, asset.name, asset.type, " +
+						"asset.image_asset.full_size.url, asset.image_asset.full_size.width_pixels, " +
+						"asset.image_asset.full_size.height_pixels, asset.image_asset.file_size " +
+						"FROM asset_group_asset WHERE asset_group.id = " + id +
+						" AND asset_group_asset.status != 'REMOVED' " +
+						"AND asset_group_asset.field_type IN ('MARKETING_IMAGE', 'SQUARE_MARKETING_IMAGE', 'PORTRAIT_MARKETING_IMAGE')",
+					);
+					const performance = await googleAdsSearch(
+						"SELECT asset_group_asset.resource_name, asset_group_asset.asset, " +
+						"asset_group_asset.field_type, metrics.impressions, metrics.clicks, " +
+						"metrics.conversions, metrics.conversions_value, metrics.cost_micros " +
+						"FROM asset_group_asset WHERE asset_group.id = " + id +
+						" AND asset_group_asset.status != 'REMOVED' " +
+						"AND asset_group_asset.field_type IN ('MARKETING_IMAGE', 'SQUARE_MARKETING_IMAGE', 'PORTRAIT_MARKETING_IMAGE') " +
+						"AND segments.date BETWEEN '" + start_date + "' AND '" + end_date + "'",
+					);
+					const byResource = new Map(performance.map(
+						(row: any) => [row.assetGroupAsset?.resourceName, row.metrics ?? {}],
+					));
+					return toolResult({
+						campaign: snapshot.campaign,
+						asset_group: { id, name: group.name, status: group.status, resource_name: group.resourceName },
+						all_asset_groups: groups.map((row: any) => ({ id: String(row.assetGroup?.id), name: row.assetGroup?.name })),
+						start_date, end_date, image_count: inventory.length,
+						images: inventory.map((row: any) => ({
+							link: row.assetGroupAsset,
+							asset: row.asset,
+							metrics_for_period: googleAdsMetrics(byResource.get(row.assetGroupAsset?.resourceName) ?? {}),
+						})),
+					});
+					}
+
 					const rows = await googleAdsSearch(`
 						SELECT ${identityFields}, ${googleAdsMetricFields}
 						FROM ${resource}
@@ -8447,7 +8513,7 @@ function createServer() {
 		"get_google_ads_ad_performance",
 		"ad_group_ad",
 		"campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.type, ad_group_ad.status",
-		"Return read-only Blindmotion Google Ads individual-ad performance for a date range.",
+		"Return individual-ad performance for a date range. Optionally inspect every image and its performance in one identity-checked existing PMax asset group using campaign_id and both expected names.",
 	);
 
 	server.registerTool(
