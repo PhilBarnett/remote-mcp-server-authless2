@@ -3199,7 +3199,7 @@ async function loadBlindmotionPmaxImage(sourceUrl: string) {
 			"Image source_url must be an exact HTTPS Blindmotion WordPress uploads URL.",
 		);
 	}
-	const response = await fetch(url.toString(), { redirect: "error" });
+	const response = await fetch(url.toString(), { redirect: "manual" });
 	if (!response.ok) {
 		throw new Error(`Image download failed: ${response.status}.`);
 	}
