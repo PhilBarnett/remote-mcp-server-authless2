@@ -2294,6 +2294,17 @@ const googleAdsCampaignChangeSchema = z.object({
 					expected_campaign_name: z.string().trim().min(1).max(255),
 				}),
 				z.object({
+					action: z.literal("REPLACE_PMAX_IMAGE"),
+					campaign_id: z.string().regex(/^\d{1,20}$/),
+					expected_campaign_name: z.string().trim().min(1).max(255),
+					asset_group_id: z.string().regex(/^\d{1,20}$/),
+					expected_asset_group_name: z.string().trim().min(1).max(255),
+					old_asset_id: z.string().regex(/^\d{1,20}$/),
+					field_type: z.literal("MARKETING_IMAGE"),
+					new_image_name: z.string().trim().min(1).max(180),
+					new_image_source_url: z.string().url(),
+				}),
+				z.object({
 					action: z.literal("INCREASE_DAILY_BUDGET_PERCENT"),
 					campaign_id: z.string().regex(/^\d{1,20}$/),
 					expected_campaign_name: z.string().trim().min(1).max(255),
@@ -2362,6 +2373,47 @@ async function getGoogleAdsCampaignControlSnapshot(
 	};
 }
 
+async function getPmaxImageSwapState(change: any) {
+	const { customerId } = getGoogleAdsConfig();
+	const groupResource = `customers/${customerId}/assetGroups/${change.asset_group_id}`;
+	const oldAssetResource = `customers/${customerId}/assets/${change.old_asset_id}`;
+	const rows = await googleAdsSearch(
+		"SELECT asset_group.id, asset_group.resource_name, asset_group.name, asset_group.status, asset_group.campaign " +
+		"FROM asset_group WHERE asset_group.id = " + change.asset_group_id + " LIMIT 2",
+	);
+	if (rows.length !== 1 || rows[0]?.assetGroup?.resourceName !== groupResource ||
+		rows[0]?.assetGroup?.name !== change.expected_asset_group_name ||
+		rows[0]?.assetGroup?.campaign !== `customers/${customerId}/campaigns/${change.campaign_id}` ||
+		rows[0]?.assetGroup?.status !== "ENABLED") {
+		throw new Error("PMax asset group identity or status changed.");
+	}
+	const links = await googleAdsSearch(
+		"SELECT asset_group_asset.resource_name, asset_group_asset.asset, asset_group_asset.field_type, " +
+		"asset_group_asset.status, asset.id, asset.name, asset.type " +
+		"FROM asset_group_asset WHERE asset_group.id = " + change.asset_group_id +
+		" AND asset_group_asset.field_type = 'MARKETING_IMAGE' " +
+		"AND asset_group_asset.status != 'REMOVED' LIMIT 100",
+	);
+	return { groupResource, oldAssetResource, links };
+}
+
+async function verifyPmaxImageSwap(planned: any, afterWrite: boolean) {
+	const state = await getPmaxImageSwapState(planned);
+	const oldLinks = state.links.filter((r: any) =>
+		r.assetGroupAsset?.asset === state.oldAssetResource &&
+		r.assetGroupAsset?.status === "ENABLED");
+	const newLinks = state.links.filter((r: any) =>
+		r.asset?.name === planned.new_asset_name &&
+		r.assetGroupAsset?.status === "ENABLED");
+	if (oldLinks.length !== (afterWrite ? 0 : 1) ||
+		newLinks.length !== (afterWrite ? 1 : 0)) {
+		throw new Error("PMax image link verification failed.");
+	}
+	return { old_link_count: oldLinks.length, new_link_count: newLinks.length,
+		new_asset: newLinks[0]?.asset?.resourceName ?? null,
+		new_link: newLinks[0]?.assetGroupAsset?.resourceName ?? null };
+}
+
 async function buildGoogleAdsCampaignChangePlan(
 	input: z.infer<typeof googleAdsCampaignChangeSchema>,
 ) {
@@ -2381,6 +2433,49 @@ async function buildGoogleAdsCampaignChangePlan(
 			change.campaign_id,
 			change.expected_campaign_name,
 		);
+
+		if (change.action === "REPLACE_PMAX_IMAGE") {
+			if (input.changes.length !== 1) {
+				throw new Error("An image replacement must be the only change in its plan.");
+			}
+			if (snapshot.campaign.advertising_channel_type !== "PERFORMANCE_MAX" ||
+				snapshot.campaign.status !== "ENABLED") {
+				throw new Error("The target campaign must be an enabled Performance Max campaign.");
+			}
+			const state = await getPmaxImageSwapState(change);
+			const old = state.links.filter((r: any) =>
+				r.assetGroupAsset?.asset === state.oldAssetResource &&
+				r.assetGroupAsset?.status === "ENABLED" &&
+				r.asset?.type === "IMAGE");
+			if (old.length !== 1) {
+				throw new Error("Expected exactly one enabled old image link.");
+			}
+			const loaded = await loadBlindmotionPmaxImage(change.new_image_source_url);
+			const dimensions = validateZipGripImage(loaded.bytes, loaded.mimeType, change.field_type);
+			const digest = await sha256Hex(loaded.bytes);
+			const newAssetName = change.new_image_name + " " + digest.slice(0, 12);
+			if (state.links.some((r: any) => r.asset?.name === newAssetName)) {
+				throw new Error("The replacement image is already linked.");
+			}
+			const newAssetResource = `customers/${getGoogleAdsConfig().customerId}/assets/-1`;
+			mutateOperations.push(
+				{ assetOperation: { create: { resourceName: newAssetResource,
+					name: newAssetName, imageAsset: { data: loaded.imageBase64 } } } },
+				{ assetGroupAssetOperation: { create: { assetGroup: state.groupResource,
+					asset: newAssetResource, fieldType: change.field_type, status: "ENABLED" } } },
+				{ assetGroupAssetOperation: { remove: old[0].assetGroupAsset.resourceName } },
+			);
+			plannedChanges.push({
+				...change, campaign: snapshot.campaign,
+				old_link: old[0].assetGroupAsset.resourceName,
+				old_asset_name: old[0].asset?.name ?? null,
+				new_asset_name: newAssetName,
+				new_image_sha256: digest,
+				new_image_dimensions: dimensions,
+				mutation_required: true,
+			});
+			continue;
+		}
 
 		if (change.action === "PAUSE_CAMPAIGN") {
 			if (!["ENABLED", "PAUSED"].includes(snapshot.campaign.status)) {
@@ -2515,6 +2610,10 @@ async function verifyGoogleAdsCampaignChangePlan(
 			planned.campaign.id,
 			planned.campaign.name,
 		);
+		if (planned.action === "REPLACE_PMAX_IMAGE") {
+			verifiedChanges.push(await verifyPmaxImageSwap(planned, afterWrite));
+			continue;
+		}
 		if (planned.action === "PAUSE_CAMPAIGN") {
 			const expectedStatus = afterWrite ? "PAUSED" : planned.before_status;
 			if (snapshot.campaign.status !== expectedStatus) {
@@ -8745,7 +8844,7 @@ function createServer() {
 		"preview_google_ads_campaign_changes",
 		{
 			description:
-				"Preview a hash-locked batch of exact Google Ads campaign changes. Supports pause-only status changes and percentage daily-budget increases, verifies campaign identity and non-shared budgets, and runs Google Ads validateOnly without writing.",
+				"Preview hash-locked Google Ads campaign controls or one exact PMax image link replacement. Verifies identities and source image, and runs validateOnly without writing.",
 			inputSchema: googleAdsCampaignChangeSchema,
 		},
 		async (args) => {
@@ -8782,7 +8881,7 @@ function createServer() {
 		"apply_google_ads_campaign_changes_guarded",
 		{
 			description:
-				"Apply one exact previewed batch of Google Ads campaign changes atomically. Supports only ENABLED-to-PAUSED status changes and 1%-25% daily-budget increases on non-shared budgets; hash-locks live state, validates before writing, verifies afterward and attempts exact rollback if post-write verification fails.",
+				"Apply one hash-locked preview of campaign controls or a single PMax image link replacement atomically. Validates before writing, verifies afterward and attempts link restoration if verification fails.",
 			inputSchema: googleAdsCampaignChangeSchema.extend({
 				expected_plan_sha256: z.string().regex(/^[0-9a-f]{64}$/),
 				confirmation: z.literal(GOOGLE_ADS_CAMPAIGN_CHANGE_CONFIRMATION),
@@ -8837,6 +8936,28 @@ function createServer() {
 						throw writeError;
 					}
 					try {
+						const imagePlan = plan.plannedChanges.find(
+							(change: any) => change.action === "REPLACE_PMAX_IMAGE",
+						);
+						if (imagePlan) {
+							const state = await getPmaxImageSwapState(imagePlan);
+							const oldPresent = state.links.some((r: any) =>
+								r.assetGroupAsset?.asset === state.oldAssetResource &&
+								r.assetGroupAsset?.status === "ENABLED");
+							const newLinks = state.links.filter((r: any) =>
+								r.asset?.name === imagePlan.new_asset_name &&
+								r.assetGroupAsset?.status === "ENABLED");
+							const recovery: any[] = [];
+							if (!oldPresent) recovery.push({ assetGroupAssetOperation: {
+								create: { assetGroup: state.groupResource, asset: state.oldAssetResource,
+									fieldType: imagePlan.field_type, status: "ENABLED" } } });
+							for (const row of newLinks) recovery.push({ assetGroupAssetOperation: {
+								remove: row.assetGroupAsset.resourceName } });
+							if (recovery.length > 0) {
+								await googleAdsMutate(recovery, true);
+								await googleAdsMutate(recovery, false);
+							}
+						}
 						if (plan.rollbackOperations.length > 0) {
 							await googleAdsMutate(plan.rollbackOperations, true);
 							await googleAdsMutate(plan.rollbackOperations, false);
