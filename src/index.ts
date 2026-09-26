@@ -10356,12 +10356,61 @@ function createServer() {
 		},
 	);
 
+	/* Guarded WAPF label-only edits for an explicitly selected product on live or staging.
+	 * Field IDs and every non-label property (including calculation and conditions)
+	 * remain byte-for-byte equivalent in the parsed group. */
+	const wapfLabelField = z.object({
+		field_id: z.string().trim().min(1).max(120),
+		expected_label: z.string().min(1).max(300),
+		new_label: z.string().min(1).max(300),
+	});
+	const wapfLabelSelection = z.object({
+		environment: z.enum(["live", "staging"]),
+		product_id: genericWapfId,
+		expected_product_name: z.string().min(1).max(500),
+		fields: z.array(wapfLabelField).min(1).max(10),
+	});
+	const wapfLabelPreview = wapfLabelSelection.extend({ operation: z.literal("preview_field_labels") });
+	const wapfLabelApply = wapfLabelSelection.extend({
+		operation: z.literal("apply_field_labels"),
+		expected_status: z.enum(["publish", "draft", "private", "pending"]),
+		expected_catalog_visibility: z.enum(["visible", "catalog", "search", "hidden"]),
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		confirmation: z.literal("CONFIRM UPDATE WAPF FIELD LABELS"),
+	});
+	type WapfLabelSelection = z.infer<typeof wapfLabelSelection>;
+
+	async function wapfLabelPlan(args: WapfLabelSelection) {
+		const product = await (await productImageWcFetch(args.environment, "products/" + args.product_id)).json<any>();
+		if (product.id !== args.product_id || product.name !== args.expected_product_name) {
+			throw new Error("WAPF label edit product identity mismatch.");
+		}
+		const wapf = genericWapf(product);
+		const originalHash = await genericWapfHashOf(wapf.meta.value);
+		const ids = args.fields.map((item) => item.field_id);
+		if (new Set(ids).size !== ids.length) throw new Error("Duplicate selected WAPF field ID.");
+		const changed = structuredClone(wapf.group);
+		const fieldResults = args.fields.map((item) => {
+			if (item.expected_label === item.new_label) throw new Error("Selected label is unchanged.");
+			const matches = changed.fields.filter((field: any) => genericWapfFieldId(field) === item.field_id);
+			if (matches.length !== 1 || matches[0].type !== "number" || matches[0].label !== item.expected_label) {
+				throw new Error("Selected field ID, number type, or exact old label no longer matches: " + item.field_id);
+			}
+			matches[0].label = item.new_label;
+			return { field_id: item.field_id, before: item.expected_label, after: item.new_label };
+		});
+		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(changed) : changed;
+		const updatedHash = await genericWapfHashOf(updatedValue);
+		return { product, wapf, originalHash, updatedValue, updatedHash, fieldResults };
+	}
+
 	server.registerTool(
 		"copy_wapf_product_option_fields_guarded",
 		{
 			description:
-				"Copy explicitly selected WAPF fields between caller-supplied WooCommerce products, preserving choices, pricing and conditions. Product identities, state hashes, source indexes, target replacement indexes and insertion point are runtime parameters. Maps external field references to unique same-label/type target fields, refuses ambiguity or collisions, changes only _wapf_fieldgroup, verifies and rolls back on failure.",
-			inputSchema: z.object({
+				"Copy selected WAPF fields between products or preview/apply exact number-field label changes on one live or staging product. Both guarded writes change only _wapf_fieldgroup, verify the result and roll back on failure; label edits preserve field IDs, pricing, calculations and conditions.",
+			inputSchema: z.union([z.object({
 				source_product_id: genericWapfId,
 				source_product_name: z.string().trim().min(1).max(500),
 				target_product_id: genericWapfId,
@@ -10372,10 +10421,70 @@ function createServer() {
 				target_field_indices_to_replace: z.array(genericWapfIndex).max(100),
 				insert_at_index: genericWapfIndex,
 				confirmation: z.literal(genericWapfConfirmation),
-			}),
+			}), wapfLabelPreview, wapfLabelApply]),
 		},
 		async (args) => {
 			try {
+				if ("operation" in args) {
+					const plan = await wapfLabelPlan(args);
+					if (args.operation === "preview_field_labels") {
+						return toolResult({
+							read_only: true, environment: args.environment,
+							product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
+							meta_data_id: plan.wapf.meta.id,
+							before_field_group_sha256: plan.originalHash,
+							planned_after_field_group_sha256: plan.updatedHash,
+							labels: plan.fieldResults,
+							write_performed: false,
+						});
+					}
+					if (plan.product.status !== args.expected_status ||
+						plan.product.catalog_visibility !== args.expected_catalog_visibility ||
+						plan.wapf.meta.id !== args.expected_meta_data_id ||
+						plan.originalHash !== args.expected_field_group_sha256) {
+						throw new Error("Product state or WAPF field group changed since preview; refusing write.");
+					}
+					const path = "products/" + args.product_id;
+					try {
+						await productImageWcWrite(args.environment, path, {
+							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
+						});
+						const verified = await (await productImageWcFetch(args.environment, path)).json<any>();
+						const verifiedWapf = genericWapf(verified);
+						const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+						if (verified.id !== args.product_id || verified.name !== args.expected_product_name ||
+							verified.status !== args.expected_status ||
+							verified.catalog_visibility !== args.expected_catalog_visibility ||
+							verifiedWapf.meta.id !== args.expected_meta_data_id ||
+							verifiedHash !== plan.updatedHash) {
+							throw new Error("Post-write product identity, state, metadata or exact WAPF hash mismatch.");
+						}
+						return toolResult({
+							updated: true, environment: args.environment,
+							product: { id: verified.id, name: verified.name },
+							labels: plan.fieldResults,
+							before_field_group_sha256: plan.originalHash,
+							after_field_group_sha256: verifiedHash,
+							untouched: ["field IDs", "other labels", "pricing", "calculations", "conditions", "non-WAPF metadata", "product status", "catalog visibility"],
+						});
+					} catch (writeError) {
+						try {
+							await productImageWcWrite(args.environment, path, {
+								meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }],
+							});
+							const rolledBack = await (await productImageWcFetch(args.environment, path)).json<any>();
+							if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.originalHash) {
+								throw new Error("Rollback did not restore the original WAPF hash.");
+							}
+						} catch (rollbackError) {
+							throw new Error("WAPF label update failed and rollback was incomplete: " +
+								(writeError instanceof Error ? writeError.message : String(writeError)) + " | " +
+								(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)));
+						}
+						throw new Error("WAPF label update failed; original field group restored: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)));
+					}
+				}
 				if (args.source_product_id === args.target_product_id) throw new Error("Source and target products must differ.");
 				const responses = await Promise.all([
 					wcFetch("products/" + args.source_product_id),
