@@ -1585,7 +1585,6 @@ function safeMetaBudgetObject(object: any, objectType: "campaign" | "adset") {
 }
 
 const META_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ASSET";
-const META_ARCHIVE_DRAFT_ADS_CONFIRMATION = "CONFIRM ARCHIVE PAUSED META DRAFT ADS";
 const META_PAUSE_CAMPAIGN_CONFIRMATION = "CONFIRM PAUSE META CAMPAIGN";
 const META_ADSET_STATUS_CHANGE_CONFIRMATION = "CONFIRM META ADSET STATUS CHANGE";
 const META_LEAD_AD_LINK = "https://fb.me/";
@@ -8030,112 +8029,6 @@ function createServer() {
 					activation_performed: false,
 					object_type: "ad",
 					...verified,
-				});
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"archive_meta_paused_draft_ads_guarded",
-		{
-			description:
-				"Archive explicitly identified incorrect Meta draft ads only after verifying exact names, ownership, PAUSED status, PAUSED parent campaign, and zero lifetime spend and impressions. Cannot archive active or previously delivered ads.",
-			inputSchema: z.object({
-				campaign_id: z.string().regex(/^\d+$/),
-				expected_campaign_name: z.string().trim().min(3).max(200),
-				ads: z
-					.array(
-						z.object({
-							ad_id: z.string().regex(/^\d+$/),
-							expected_name: z.string().trim().min(3).max(200),
-						}),
-					)
-					.min(1)
-					.max(10),
-				retirement_reason: z.literal("INCORRECT SPRING DRAFT"),
-				confirmation: z.literal(META_ARCHIVE_DRAFT_ADS_CONFIRMATION),
-			}),
-		},
-		async ({ campaign_id, expected_campaign_name, ads }) => {
-			try {
-				const campaign = await assertMetaObjectOwnership(campaign_id, "campaign");
-				if (campaign.name !== expected_campaign_name || !/spring/i.test(campaign.name)) {
-					throw new Error(
-						"Refusing retirement: campaign name does not exactly match the expected Spring campaign.",
-					);
-				}
-				if (campaign.status !== "PAUSED") {
-					throw new Error("Refusing retirement: parent campaign must be PAUSED.");
-				}
-				if (new Set(ads.map((item) => item.ad_id)).size !== ads.length) {
-					throw new Error("Refusing retirement: each ad ID may appear only once.");
-				}
-
-				const validated = await Promise.all(
-					ads.map(async ({ ad_id, expected_name }) => {
-						const ad = await assertMetaObjectOwnership(ad_id, "ad");
-						if (String(ad.campaign_id) !== campaign_id) {
-							throw new Error(
-								`Refusing retirement: ad ${ad_id} is not in campaign ${campaign_id}.`,
-							);
-						}
-						if (ad.name !== expected_name) {
-							throw new Error(
-								`Refusing retirement: ad ${ad_id} name does not exactly match expectation.`,
-							);
-						}
-						if (ad.status !== "PAUSED") {
-							throw new Error(`Refusing retirement: ad ${ad_id} is not PAUSED.`);
-						}
-						const insights = await metaFetch(ad_id + "/insights", {
-							fields: "spend,impressions",
-							date_preset: "maximum",
-							limit: 100,
-						});
-						const totals = (insights.data ?? []).reduce(
-							(accumulator: { spend: number; impressions: number }, row: any) => ({
-								spend: accumulator.spend + Number(row.spend ?? 0),
-								impressions: accumulator.impressions + Number(row.impressions ?? 0),
-							}),
-							{ spend: 0, impressions: 0 },
-						);
-						if (totals.spend !== 0 || totals.impressions !== 0) {
-							throw new Error(
-								`Refusing retirement: ad ${ad_id} has delivery history (${totals.impressions} impressions, ${totals.spend} spend).`,
-							);
-						}
-						return { ad, lifetime_delivery: totals };
-					}),
-				);
-
-				const archived: any[] = [];
-				for (const item of validated) {
-					try {
-						await metaPost(item.ad.id, { status: "ARCHIVED" });
-						const verified = await metaFetch(item.ad.id, {
-							fields: "id,name,account_id,campaign_id,adset_id,status,effective_status,updated_time",
-						});
-						if (verified.status !== "ARCHIVED") {
-							throw new Error(`Ad ${item.ad.id} failed ARCHIVED verification.`);
-						}
-						archived.push({ ...verified, lifetime_delivery: item.lifetime_delivery });
-					} catch (error) {
-						return toolResult({
-							completed: false,
-							archived,
-							failed_ad_id: item.ad.id,
-							error: error instanceof Error ? error.message : String(error),
-							note: "All ads were prevalidated before retirement; a Meta API failure caused a partial archive result.",
-						});
-					}
-				}
-				return toolResult({
-					completed: true,
-					archived,
-					deleted: false,
-					activation_performed: false,
 				});
 			} catch (error) {
 				return toolError(error);
