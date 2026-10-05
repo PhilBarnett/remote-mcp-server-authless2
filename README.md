@@ -132,6 +132,47 @@ identities and Elementor source values match the reviewed state. It removes only
 sections already hidden on every device, replaces known placeholder content, updates
 the three locked outdoor products and attempts rollback if a write fails.
 
+## ChatGPT Ads connection
+
+The read-only `get_chatgpt_ads_report` tool uses OpenAI's Advertiser API and is
+pinned to `adacct_6ac4305ad094819e97ddf2ada19c5a78`. Every operation first
+retrieves `/ad_account` and refuses a mismatched account.
+
+Setup:
+
+1. In the matching [Ads Manager](https://ads.openai.com/) account, open Settings
+   and create an Advertiser API key (not an OpenAI model API key).
+2. In Cloudflare, open Worker `remote-mcp-server-authless2`, then Settings,
+   Variables and Secrets. Add an encrypted secret named `OPENAI_ADS_API_KEY`.
+   Paste the key directly into Cloudflare; never add it to source, PRs or chat.
+3. Deploy the reviewed code through the existing main-branch workflow and refresh
+   the Blindmotion MCP connection. Call `get_chatgpt_ads_report` with
+   `action: "account"` to verify account identity, status, review, currency and timezone.
+
+Actions: `account`, `campaigns`, `ad_groups` (requires `campaign_id`), `ads`
+(requires `ad_group_id`), `locations` (requires `query`), `delivery`, and
+`conversions`. Lists use bounded pages with `limit` and `after`; inspect the
+returned pagination metadata before treating a page as a complete inventory.
+Reports require Unix timestamps `start_unix` and `end_unix`, with an exclusive
+end, both at midnight in the actual account timezone, spanning at most 365 local
+days. Delivery reports support campaign/ad-group/ad aggregation and daily/totals.
+Conversion reports combine the account's entities and identify their reporting
+clock and click/view windows; attributed sales are not independent proof of
+incremental revenue. Conversion tracking must exist before useful outcomes appear.
+
+The tool performs only API reads. The documented POST `/conversions/insights`
+is a reporting query, not a resource mutation. There is no activation, budget,
+creative, customer upload or tracking-installation path. Missing configuration,
+identity mismatch, upstream errors and redirects fail closed without echoing
+credentials. Live authentication remains unverified until the secret is installed.
+
+To maintain the 95-tool ceiling, `get_google_ads_daily_performance` is replaced
+by `get_google_ads_summary` with `time_granularity: "daily"`. Existing summary
+calls retain the default totals behavior and the same result shape.
+
+Validate the new connection guards with
+`node --experimental-strip-types --test scripts/test-chatgpt-ads.mjs`.
+
 ## Repository-scoped GitHub App
 
 The Worker can authenticate as GitHub App `4894554`, installation `160530258`, using

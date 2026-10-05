@@ -9,6 +9,7 @@ import {
 } from "./tools/search-console";
 import { registerProductPromotionTools } from "./tools/product-promotion";
 import { registerFabricSampleOrderTool } from "./tools/fabric-sample-orders";
+import { registerChatgptAdsTools } from "./tools/chatgpt-ads";
 
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
@@ -3899,6 +3900,10 @@ function createServer() {
 	});
 	registerProductPromotionTools(server);
 	registerFabricSampleOrderTool(server, { wcFetch, wcCreate });
+	registerChatgptAdsTools(server, {
+		getBindings: () => env as unknown as { OPENAI_ADS_API_KEY?: string },
+		fetch,
+	});
 
 	server.registerTool(
 		"get_blindmotion_github_app_status",
@@ -8221,17 +8226,18 @@ function createServer() {
 		"get_google_ads_summary",
 		{
 			description:
-				"Summarise Blindmotion Google Ads impressions, clicks, spend, conversions, conversion value and reported ROAS for a date range.",
-			inputSchema: z.object(googleAdsDateSchema),
+				"Return total or daily Blindmotion Google Ads impressions, clicks, spend, conversions, conversion value and reported ROAS for a date range. Use time_granularity=daily for daily performance.",
+			inputSchema: z.object({ ...googleAdsDateSchema, time_granularity: z.enum(["none", "daily"]).default("none") }),
 		},
-		async ({ start_date, end_date }) => {
+		async ({ start_date, end_date, time_granularity }) => {
 			try {
 				assertGoogleAdsDate(start_date, "start_date");
 				assertGoogleAdsDate(end_date, "end_date");
 				const rows = await googleAdsSearch(`
-					SELECT customer.id, ${googleAdsMetricFields}
+					SELECT ${time_granularity === "daily" ? "segments.date" : "customer.id"}, ${googleAdsMetricFields}
 					FROM customer
 					WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
+					${time_granularity === "daily" ? "ORDER BY segments.date ASC" : ""}
 				`);
 				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
 			} catch (error) {
@@ -8465,27 +8471,6 @@ function createServer() {
 		},
 	);
 
-	server.registerTool(
-		"get_google_ads_daily_performance",
-		{
-			description:
-				"Return daily Blindmotion Google Ads spend, traffic, conversions and conversion value for a date range.",
-			inputSchema: z.object(googleAdsDateSchema),
-		},
-		async ({ start_date, end_date }) => {
-			try {
-				const rows = await googleAdsSearch(`
-					SELECT segments.date, ${googleAdsMetricFields}
-					FROM customer
-					WHERE segments.date BETWEEN '${start_date}' AND '${end_date}'
-					ORDER BY segments.date ASC
-				`);
-				return toolResult({ start_date, end_date, data: normalizeGoogleAdsRows(rows) });
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
 
 	/* Reusable guarded product Performance Max tools. Product identity is verified
 	 * against live WooCommerce and every campaign is created PAUSED. */
