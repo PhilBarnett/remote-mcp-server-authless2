@@ -100,23 +100,9 @@ function prepare(input: Input) {
 	if (operation.body) validate(input.body ?? {}, operation.body, "body");
 	else if (input.body && Object.keys(input.body).length) throw new Error("This operation does not accept a body.");
 	safePayload(input.body);
-	if (["create_campaign", "create_ad_group", "create_ad"].includes(input.operation) && input.body?.status !== "paused") throw new Error("Create campaigns, ad groups and ads paused, then use the separate activation control.");
 	if (input.operation === "post_product_feed_sftp_access" && (input.body?.authentication_method !== "ssh_key" || typeof input.body?.ssh_public_key !== "string" || !input.body.ssh_public_key.trim())) throw new Error("SFTP controls require ssh_key authentication and an SSH public key; manage password issuance securely in Ads Manager.");
 	if (operation.idempotency && !input.idempotency_key && input.mode !== "describe") throw new Error("This create operation requires an idempotency_key for safe retries.");
-	if (input.operation === "upload_image" && !input.body?.image_url && !input.body?.file) throw new Error("Image upload requires image_url or a base64-encoded file.");
-	if (input.body?.image_url && input.body?.file) throw new Error("Choose image_url or file, not both.");
-	let multipart: FormData | undefined;
-	if (operation.multipart || (input.operation === "upload_image" && input.body?.file)) {
-		multipart = new FormData();
-		for (const [key, value] of Object.entries(input.body ?? {})) {
-			if (key === "file") {
-				if (typeof value !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw new Error("Upload file must be standard base64.");
-				const decoded = atob(value);
-				if (!decoded.length || decoded.length > 1000000) throw new Error("Inline uploads must be between 1 byte and 1 MB.");
-				multipart.set(key, new Blob([Uint8Array.from(decoded, character => character.charCodeAt(0))]), "blindmotion-upload");
-			} else multipart.set(key, String(value));
-		}
-	}
+	const multipart: FormData | undefined = undefined;
 	return { operation, path: path.replace(/^\//, ""), query, multipart };
 }
 
@@ -124,8 +110,8 @@ function describe(operation?: Input["operation"]) {
 	if (!operation) return {
 		account_id: ACCOUNT_ID,
 		operations: Object.entries(operations).map(([name, value]) => ({ operation: name, summary: value.summary, read_only: value.readOnly })),
-		usage: "Choose an operation and use describe for its exact parameters and body schema. Reads use mode=read. Writes require preview then apply with the same inputs and preview_token. Money is in AUD micros (1 AUD = 1000000 micros). New campaigns, ad groups and ads start paused. Upload file values are base64, maximum 1 MB.",
-		outside_scope: "Account provisioning, OAuth identity, API-key issuance, lead webhook secret provisioning and partner-only data/eligibility jobs are not exposed. SFTP setup uses SSH public keys, not password issuance.",
+		usage: "Choose an operation and use describe for its exact parameters and body schema. Reads use mode=read. Writes require preview then apply with the same inputs and preview_token. Money is in AUD micros (1 AUD = 1000000 micros). Routine campaigns and reporting use the official Ads Manager plugin.",
+		outside_scope: "Routine campaign, ad, audience, upload and reporting operations belong to the official Ads Manager plugin. Account provisioning and API-key issuance are excluded. SFTP setup uses SSH public keys, not password issuance.",
 	};
 	const value = operations[operation] as any;
 	const used: Record<string, unknown> = {};
@@ -151,11 +137,9 @@ async function snapshot(request: Transport, input: Input, path: string, account:
 	const state: Record<string, unknown> = { account };
 	const routes = new Set<string>();
 	const first = path.split("/");
-	if (["campaigns", "ad_groups", "ads", "custom_audiences"].includes(first[0]) && first[1] && first[1] !== "merge") routes.add(first.slice(0, 2).join("/"));
+	if (first[0] === "ads" && first[1]) routes.add(first.slice(0, 2).join("/"));
 	if (first[0] === "feeds") routes.add(first[1] ? `feeds/${first[1]}/settings` : "feeds");
 	if (first[0] === "ad_account" && /spend_limit/.test(path)) routes.add("ad_account/spend_limit_windows");
-	if (input.operation === "create_campaign") routes.add("campaigns");
-	if (input.operation === "create_custom_audience") routes.add("custom_audiences");
 	if (input.operation === "create_conversion_source") routes.add("conversions/pixels");
 	if (input.operation === "create_conversion_event_setting") routes.add("conversions/event_settings");
 	for (const field of ["campaign_id", "ad_group_id", "product_feed_id"] as const) {
