@@ -3902,7 +3902,8 @@ function createServer() {
 	registerFabricSampleOrderTool(server, { wcFetch, wcCreate });
 	registerChatgptAdsTools(server, {
 		getBindings: () => env as unknown as { OPENAI_ADS_API_KEY?: string },
-		fetch,
+		// Keep the native Cloudflare fetch receiver out of the dependency object.
+		fetch: (input, init) => fetch(input, init),
 	});
 
 	server.registerTool(
