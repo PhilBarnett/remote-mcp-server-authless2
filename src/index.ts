@@ -13949,6 +13949,501 @@ function createServer() {
 		},
 	);
 
+
+	/* Guarded Fabric Sample visual synchronisation. This narrowly converts the
+	 * Single/Dual selector to image swatches, splits shared combination fields
+	 * into range-specific variants, remaps only matching downstream conditions,
+	 * and can replace one exact representative fabric image from a hash-locked
+	 * public source. It supports live and staging without changing publication. */
+	const fabricSampleVisualConfirmation = "CONFIRM APPLY FABRIC SAMPLE VISUAL SYNC";
+	const fabricSampleVisualStatus = z.enum(["publish", "draft", "private", "pending"]);
+	const fabricSampleVisualVisibility = z.enum(["visible", "catalog", "search", "hidden"]);
+	const fabricSampleVisualImage = z.object({
+		attachment_id: genericWapfId,
+		expected_filename: wapfVisualFilename,
+	});
+	const fabricSampleVisualChoiceImage = z.object({
+		choice_slug: wapfVisualChoiceSlug,
+		expected_choice_label: z.string().min(1).max(300),
+		image: fabricSampleVisualImage,
+	});
+	const fabricSampleVisualField = z.object({
+		field_id: wapfVisualFieldId,
+		expected_label: z.string().min(1).max(300),
+		expected_type: z.enum(["radio", "image-swatch"]),
+		choices: z.array(fabricSampleVisualChoiceImage).min(1).max(10),
+	});
+	const fabricSampleHero = z.object({
+		field_id: wapfVisualFieldId,
+		expected_field_label: z.string().min(1).max(300),
+		choice_slug: wapfVisualChoiceSlug,
+		expected_choice_label: z.string().min(1).max(300),
+		expected_attachment_id: genericWapfId,
+		source_url: z.string().url(),
+		filename: wapfVisualFilename,
+		mime_type: z.enum(["image/jpeg", "image/png", "image/webp"]),
+		expected_sha256: genericWapfHash,
+	});
+	const fabricSampleVisualBase = z.object({
+		environment: z.enum(["live", "staging"]),
+		product_id: genericWapfId,
+		expected_product_name: z.string().trim().min(1).max(500),
+		expected_status: fabricSampleVisualStatus,
+		expected_catalog_visibility: fabricSampleVisualVisibility,
+		expected_meta_data_id: genericWapfId,
+		expected_field_group_sha256: genericWapfHash,
+		product_type_field_id: wapfVisualFieldId,
+		expected_product_type_label: z.string().min(1).max(300),
+		everyday_choice_slug: wapfVisualChoiceSlug,
+		premium_choice_slug: wapfVisualChoiceSlug,
+		configuration_field: fabricSampleVisualField,
+		single_choice_slug: wapfVisualChoiceSlug,
+		dual_choice_slug: wapfVisualChoiceSlug,
+		shared_single_field_id: wapfVisualFieldId,
+		expected_single_field_label: z.string().min(1).max(300),
+		premium_single_field_id: wapfVisualFieldId,
+		everyday_single_choices: z.array(fabricSampleVisualChoiceImage).min(1).max(10),
+		premium_single_choices: z.array(fabricSampleVisualChoiceImage).min(1).max(10),
+		shared_dual_field_id: wapfVisualFieldId,
+		expected_dual_field_label: z.string().min(1).max(300),
+		premium_dual_field_id: wapfVisualFieldId,
+		everyday_dual_choices: z.array(fabricSampleVisualChoiceImage).min(1).max(10),
+		premium_dual_choices: z.array(fabricSampleVisualChoiceImage).min(1).max(10),
+		hero_image: fabricSampleHero.optional(),
+	});
+	type FabricSampleVisualInput = z.infer<typeof fabricSampleVisualBase>;
+
+	function fabricSampleExactField(fields: any[], id: string, label: string) {
+		const matches = fields.filter((field: any) => genericWapfFieldId(field) === id);
+		if (matches.length !== 1 || wapfFieldLabel(matches[0]) !== label) {
+			throw new Error("Expected Fabric Sample field identity not found: " + label + ".");
+		}
+		return matches[0];
+	}
+
+	function fabricSampleChoiceMap(field: any, specs: Array<z.infer<typeof fabricSampleVisualChoiceImage>>) {
+		if (!Array.isArray(field?.options?.choices) || field.options.choices.length !== specs.length) {
+			throw new Error("Fabric Sample choice count changed for field " + genericWapfFieldId(field) + ".");
+		}
+		const map = new Map(specs.map((spec) => [spec.choice_slug, spec]));
+		if (map.size !== specs.length) throw new Error("Duplicate Fabric Sample choice slug supplied.");
+		for (const choice of field.options.choices) {
+			const spec = map.get(String(choice?.slug ?? ""));
+			if (!spec || String(choice?.label ?? "") !== spec.expected_choice_label) {
+				throw new Error("Fabric Sample choice identity changed in field " + genericWapfFieldId(field) + ".");
+			}
+		}
+		return map;
+	}
+
+	async function buildFabricSampleVisualPlan(
+		args: FabricSampleVisualInput,
+		productOverride?: any,
+		uploadedHero?: { id: number; source_url: string },
+	) {
+		const product = productOverride ??
+			await (await productImageWcFetch(args.environment, "products/" + args.product_id)).json<any>();
+		if (product.id !== args.product_id || product.name !== args.expected_product_name ||
+			product.status !== args.expected_status ||
+			product.catalog_visibility !== args.expected_catalog_visibility) {
+			throw new Error("Fabric Sample product identity or publication state changed.");
+		}
+		const wapf = genericWapf(product);
+		const beforeHash = await genericWapfHashOf(wapf.meta.value);
+		if (wapf.meta.id !== args.expected_meta_data_id ||
+			beforeHash !== args.expected_field_group_sha256) {
+			throw new Error("Fabric Sample WAPF identity or hash changed after review.");
+		}
+		const originalFields = wapf.group.fields as any[];
+		const typeField = fabricSampleExactField(
+			originalFields, args.product_type_field_id, args.expected_product_type_label,
+		);
+		const typeChoices = typeField?.options?.choices ?? [];
+		for (const slug of [args.everyday_choice_slug, args.premium_choice_slug]) {
+			if (typeChoices.filter((choice: any) => String(choice?.slug) === slug).length !== 1) {
+				throw new Error("Expected Everyday/Premium product-range choice is missing or ambiguous.");
+			}
+		}
+		const configuration = fabricSampleExactField(
+			originalFields, args.configuration_field.field_id, args.configuration_field.expected_label,
+		);
+		if (configuration.type !== args.configuration_field.expected_type ||
+			args.configuration_field.expected_type !== "radio") {
+			throw new Error("The configuration field is no longer the expected radio selector.");
+		}
+		const configurationSpecs = fabricSampleChoiceMap(
+			configuration, args.configuration_field.choices,
+		);
+		if (!configurationSpecs.has(args.single_choice_slug) ||
+			!configurationSpecs.has(args.dual_choice_slug)) {
+			throw new Error("Single/Dual configuration choice slugs do not match the selector.");
+		}
+		const sharedSingle = fabricSampleExactField(
+			originalFields, args.shared_single_field_id, args.expected_single_field_label,
+		);
+		const sharedDual = fabricSampleExactField(
+			originalFields, args.shared_dual_field_id, args.expected_dual_field_label,
+		);
+		if (sharedSingle.type !== "image-swatch" || sharedDual.type !== "image-swatch") {
+			throw new Error("Shared Single/Dual combination fields must remain image swatches.");
+		}
+		fabricSampleChoiceMap(sharedSingle, args.everyday_single_choices);
+		fabricSampleChoiceMap(sharedSingle, args.premium_single_choices);
+		fabricSampleChoiceMap(sharedDual, args.everyday_dual_choices);
+		fabricSampleChoiceMap(sharedDual, args.premium_dual_choices);
+		const occupiedIds = new Set(originalFields.map((field: any) => genericWapfFieldId(field)));
+		for (const newId of [args.premium_single_field_id, args.premium_dual_field_id]) {
+			if (occupiedIds.has(newId) ||
+				!(/^[A-Za-z0-9_-]{1,100}$/).test(newId)) {
+				throw new Error("A new Premium field ID is invalid or already occupied: " + newId + ".");
+			}
+		}
+		if (args.premium_single_field_id === args.premium_dual_field_id) {
+			throw new Error("Premium Single and Dual field IDs must differ.");
+		}
+
+		const allChoiceSpecs = [
+			...args.configuration_field.choices,
+			...args.everyday_single_choices,
+			...args.premium_single_choices,
+			...args.everyday_dual_choices,
+			...args.premium_dual_choices,
+		];
+		const attachmentSpecs = new Map<number, { expected_filename: string }>();
+		for (const choice of allChoiceSpecs) {
+			const prior = attachmentSpecs.get(choice.image.attachment_id);
+			if (prior && prior.expected_filename.toLowerCase() !== choice.image.expected_filename.toLowerCase()) {
+				throw new Error("One attachment ID was supplied with conflicting filenames.");
+			}
+			attachmentSpecs.set(choice.image.attachment_id, {
+				expected_filename: choice.image.expected_filename,
+			});
+		}
+		const ids = [...attachmentSpecs.keys()];
+		const mediaResponse = await productImageWpFetch(
+			args.environment, "media?include=" + ids.join(",") + "&per_page=" + ids.length,
+		);
+		const mediaById = new Map<number, any>(
+			(await mediaResponse.json<any[]>()).map((media: any) => [Number(media.id), media]),
+		);
+		for (const [id, spec] of attachmentSpecs) {
+			const media = mediaById.get(id);
+			const filename = String(media?.media_details?.file ?? media?.source_url ?? "").split("/").pop();
+			if (!media || !String(media?.mime_type ?? "").startsWith("image/") ||
+				String(filename ?? "").toLowerCase() !== spec.expected_filename.toLowerCase() ||
+				!String(media?.source_url ?? "").startsWith("https://")) {
+				throw new Error("Fabric Sample media identity changed: " + id + ".");
+			}
+		}
+
+		let heroBytes: Uint8Array | null = null;
+		if (args.hero_image) {
+			const response = await fetchPublicResource(args.hero_image.source_url, "image/*");
+			const mimeType = String(response.headers.get("content-type") ?? "").split(";")[0].toLowerCase();
+			heroBytes = new Uint8Array(await response.arrayBuffer());
+			if (heroBytes.length < 1000 || heroBytes.length > 6_000_000 ||
+				mimeType !== args.hero_image.mime_type ||
+				!hasExpectedImageSignature(heroBytes, args.hero_image.mime_type) ||
+				await sha256Hex(heroBytes) !== args.hero_image.expected_sha256) {
+				throw new Error("The reviewed Fairlight hero source bytes, MIME type or SHA-256 changed.");
+			}
+		}
+
+		const updatedGroup = structuredClone(wapf.group);
+		const fields = updatedGroup.fields as any[];
+		const fieldIndex = (id: string) => fields.findIndex(
+			(field: any) => genericWapfFieldId(field) === id,
+		);
+		const assignImages = (
+			field: any,
+			specs: Array<z.infer<typeof fabricSampleVisualChoiceImage>>,
+		) => {
+			const map = fabricSampleChoiceMap(field, specs);
+			for (const choice of field.options.choices) {
+				const spec = map.get(String(choice.slug))!;
+				const media = mediaById.get(spec.image.attachment_id);
+				choice.image = media.source_url;
+				choice.attachment = spec.image.attachment_id;
+			}
+		};
+		const updatedConfiguration = fields[fieldIndex(args.configuration_field.field_id)];
+		updatedConfiguration.type = "image-swatch";
+		assignImages(updatedConfiguration, args.configuration_field.choices);
+
+		const singleIndex = fieldIndex(args.shared_single_field_id);
+		const dualIndexBeforeInsert = fieldIndex(args.shared_dual_field_id);
+		const everydaySingle = fields[singleIndex];
+		assignImages(everydaySingle, args.everyday_single_choices);
+		everydaySingle.conditionals = [{ rules: [
+			{ condition: "==", value: args.everyday_choice_slug, field: args.product_type_field_id, generated: false },
+			{ condition: "==", value: args.single_choice_slug, field: args.configuration_field.field_id, generated: false },
+		] }];
+		const premiumSingle = structuredClone(everydaySingle);
+		premiumSingle.id = args.premium_single_field_id;
+		assignImages(premiumSingle, args.premium_single_choices);
+		premiumSingle.conditionals[0].rules[0].value = args.premium_choice_slug;
+		fields.splice(singleIndex + 1, 0, premiumSingle);
+
+		const dualIndex = dualIndexBeforeInsert > singleIndex ? dualIndexBeforeInsert + 1 : dualIndexBeforeInsert;
+		const everydayDual = fields[dualIndex];
+		assignImages(everydayDual, args.everyday_dual_choices);
+		everydayDual.conditionals = [{ rules: [
+			{ condition: "==", value: args.everyday_choice_slug, field: args.product_type_field_id, generated: false },
+			{ condition: "==", value: args.dual_choice_slug, field: args.configuration_field.field_id, generated: false },
+		] }];
+		const premiumDual = structuredClone(everydayDual);
+		premiumDual.id = args.premium_dual_field_id;
+		assignImages(premiumDual, args.premium_dual_choices);
+		premiumDual.conditionals[0].rules[0].value = args.premium_choice_slug;
+		fields.splice(dualIndex + 1, 0, premiumDual);
+
+		let remappedSingleRules = 0;
+		let remappedDualRules = 0;
+		const splitIds = new Set([
+			args.shared_single_field_id, args.shared_dual_field_id,
+			args.premium_single_field_id, args.premium_dual_field_id,
+		]);
+		for (const field of fields) {
+			if (splitIds.has(genericWapfFieldId(field))) continue;
+			for (const group of field?.conditionals ?? []) {
+				const rules = Array.isArray(group?.rules) ? group.rules : [];
+				const isPremium = rules.some((rule: any) =>
+					String(rule?.field) === args.product_type_field_id &&
+					String(rule?.value) === args.premium_choice_slug);
+				const isEveryday = rules.some((rule: any) =>
+					String(rule?.field) === args.product_type_field_id &&
+					String(rule?.value) === args.everyday_choice_slug);
+				if (isPremium && isEveryday) {
+					throw new Error("A downstream condition group mixes Everyday and Premium.");
+				}
+				for (const rule of rules) {
+					const referenced = String(rule?.field ?? "");
+					if (referenced !== args.shared_single_field_id &&
+						referenced !== args.shared_dual_field_id) continue;
+					if (!isPremium && !isEveryday) {
+						throw new Error("A shared Single/Dual dependency has no explicit product range.");
+					}
+					if (isPremium && referenced === args.shared_single_field_id) {
+						rule.field = args.premium_single_field_id;
+						remappedSingleRules += 1;
+					}
+					if (isPremium && referenced === args.shared_dual_field_id) {
+						rule.field = args.premium_dual_field_id;
+						remappedDualRules += 1;
+					}
+				}
+			}
+		}
+		if (remappedSingleRules < 1 || remappedDualRules < 1) {
+			throw new Error("No complete Premium Single/Dual downstream dependency set was found.");
+		}
+
+		if (args.hero_image) {
+			const heroField = fabricSampleExactField(
+				fields, args.hero_image.field_id, args.hero_image.expected_field_label,
+			);
+			const matches = (heroField?.options?.choices ?? []).filter(
+				(choice: any) => String(choice?.slug) === args.hero_image!.choice_slug,
+			);
+			if (matches.length !== 1 ||
+				String(matches[0]?.label ?? "") !== args.hero_image.expected_choice_label ||
+				Number(matches[0]?.attachment ?? 0) !== args.hero_image.expected_attachment_id) {
+				throw new Error("The exact Fairlight hero choice changed after review.");
+			}
+			if (uploadedHero) {
+				matches[0].image = uploadedHero.source_url;
+				matches[0].attachment = uploadedHero.id;
+			}
+		}
+
+		const fieldsById = new Map(fields.map((field: any) => [genericWapfFieldId(field), field]));
+		for (const field of fields) {
+			for (const group of field?.conditionals ?? []) {
+				for (const rule of group?.rules ?? []) {
+					const source: any = fieldsById.get(String(rule?.field ?? ""));
+					const sourceSlugs = new Set(
+						(source?.options?.choices ?? []).map((choice: any) => String(choice?.slug ?? "")),
+					);
+					if (!source || !sourceSlugs.has(String(rule?.value ?? ""))) {
+						throw new Error("Fabric Sample plan would create an orphaned conditional reference.");
+					}
+				}
+			}
+		}
+		const updatedValue = typeof wapf.meta.value === "string"
+			? JSON.stringify(updatedGroup) : updatedGroup;
+		const afterHash = !args.hero_image || uploadedHero
+			? await genericWapfHashOf(updatedValue) : null;
+		const planCore = {
+			environment: args.environment,
+			product_id: args.product_id,
+			product_name: args.expected_product_name,
+			product_status: args.expected_status,
+			catalog_visibility: args.expected_catalog_visibility,
+			meta_data_id: wapf.meta.id,
+			before_field_group_sha256: beforeHash,
+			configuration_field_id: args.configuration_field.field_id,
+			new_configuration_type: "image-swatch",
+			everyday_single_field_id: args.shared_single_field_id,
+			premium_single_field_id: args.premium_single_field_id,
+			everyday_dual_field_id: args.shared_dual_field_id,
+			premium_dual_field_id: args.premium_dual_field_id,
+			remapped_single_rules: remappedSingleRules,
+			remapped_dual_rules: remappedDualRules,
+			choice_images: allChoiceSpecs.map((choice) => ({
+				choice_slug: choice.choice_slug,
+				expected_choice_label: choice.expected_choice_label,
+				attachment_id: choice.image.attachment_id,
+				expected_filename: choice.image.expected_filename,
+			})),
+			hero_image: args.hero_image ? {
+				field_id: args.hero_image.field_id,
+				choice_slug: args.hero_image.choice_slug,
+				expected_attachment_id: args.hero_image.expected_attachment_id,
+				source_url: args.hero_image.source_url,
+				filename: args.hero_image.filename,
+				mime_type: args.hero_image.mime_type,
+				expected_sha256: args.hero_image.expected_sha256,
+				byte_length: heroBytes!.length,
+			} : null,
+		};
+		return {
+			product, wapf, updatedValue, afterHash, planCore,
+			planHash: await genericWapfHashOf(planCore), heroBytes,
+		};
+	}
+
+	server.registerTool(
+		"preview_fabric_sample_visual_sync",
+		{
+			description:
+				"Preview an exact live-or-staging Fabric Sample visual sync: convert Single/Dual to image swatches, split shared Single/Dual fabric-combination images by Everyday/Premium, remap only range-matched dependencies, and optionally replace one hash-locked representative fabric image. Performs no writes.",
+			inputSchema: fabricSampleVisualBase,
+		},
+		async (args) => {
+			try {
+				const plan = await buildFabricSampleVisualPlan(args);
+				return toolResult({
+					preview_only: true,
+					write_performed: false,
+					plan: plan.planCore,
+					plan_sha256: plan.planHash,
+					planned_after_field_group_sha256: plan.afterHash,
+					media_upload_required: Boolean(args.hero_image),
+					untouched: [
+						"choice labels", "choice slugs", "pricing", "required flags",
+						"product status", "catalog visibility", "non-WAPF product data",
+					],
+				});
+			} catch (error) { return toolError(error); }
+		},
+	);
+
+	server.registerTool(
+		"apply_fabric_sample_visual_sync_guarded",
+		{
+			description:
+				"Apply one exact previewed Fabric Sample visual sync on live or staging. Revalidates product state, WAPF hash, every field/choice/media identity and optional remote hero bytes; verifies the final group and restores the original group on failure. Publication state is preserved. Uploaded media is retained.",
+			inputSchema: fabricSampleVisualBase.extend({
+				expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal(fabricSampleVisualConfirmation),
+			}),
+		},
+		async (args) => {
+			try {
+				const product = await (
+					await productImageWcFetch(args.environment, "products/" + args.product_id)
+				).json<any>();
+				const baseArgs = fabricSampleVisualBase.parse(args);
+				const preview = await buildFabricSampleVisualPlan(baseArgs, product);
+				if (preview.planHash !== args.expected_plan_sha256) {
+					throw new Error("The Fabric Sample visual plan changed after preview; refusing write.");
+				}
+				let uploadedHero: { id: number; source_url: string } | undefined;
+				if (args.hero_image) {
+					const uploaded = await productImageWpUploadMedia(
+						args.environment,
+						args.hero_image.filename,
+						args.hero_image.mime_type,
+						preview.heroBytes!,
+					);
+					if (!uploaded?.id || !String(uploaded?.source_url ?? "").startsWith("https://") ||
+						!String(uploaded?.mime_type ?? "").startsWith("image/")) {
+						throw new Error("The Fairlight hero upload did not return a valid image attachment.");
+					}
+					uploadedHero = { id: Number(uploaded.id), source_url: String(uploaded.source_url) };
+				}
+				const plan = await buildFabricSampleVisualPlan(baseArgs, product, uploadedHero);
+				if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) {
+					throw new Error("The resolved Fabric Sample visual plan changed during media preparation.");
+				}
+				const path = "products/" + args.product_id;
+				try {
+					await productImageWcWrite(args.environment, path, {
+						meta_data: [{
+							id: plan.wapf.meta.id,
+							key: "_wapf_fieldgroup",
+							value: plan.updatedValue,
+						}],
+					});
+					const verified = await (await productImageWcFetch(args.environment, path)).json<any>();
+					const verifiedWapf = genericWapf(verified);
+					const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+					if (verified.id !== args.product_id ||
+						verified.name !== args.expected_product_name ||
+						verified.status !== args.expected_status ||
+						verified.catalog_visibility !== args.expected_catalog_visibility ||
+						verifiedWapf.meta.id !== args.expected_meta_data_id ||
+						verifiedHash !== plan.afterHash) {
+						throw new Error("Post-write Fabric Sample visual verification failed.");
+					}
+					return toolResult({
+						updated: true,
+						verified: true,
+						environment: args.environment,
+						product: {
+							id: verified.id, name: verified.name, status: verified.status,
+							catalog_visibility: verified.catalog_visibility,
+						},
+						before_field_group_sha256: args.expected_field_group_sha256,
+						after_field_group_sha256: verifiedHash,
+						plan_sha256: plan.planHash,
+						uploaded_hero_attachment_id: uploadedHero?.id ?? null,
+						rollback_performed: false,
+						untouched: [
+							"choice labels", "choice slugs", "pricing", "required flags",
+							"product status", "catalog visibility", "non-WAPF product data",
+						],
+					});
+				} catch (writeError) {
+					try {
+						await productImageWcWrite(args.environment, path, {
+							meta_data: [{
+								id: plan.wapf.meta.id,
+								key: "_wapf_fieldgroup",
+								value: plan.wapf.meta.value,
+							}],
+						});
+						const rolledBack = await (
+							await productImageWcFetch(args.environment, path)
+						).json<any>();
+						if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !==
+							args.expected_field_group_sha256) {
+							throw new Error("Rollback hash did not match the original group.");
+						}
+					} catch (rollbackError) {
+						throw new Error("Fabric Sample visual update failed and rollback was incomplete: " +
+							(writeError instanceof Error ? writeError.message : String(writeError)) + " | " +
+							(rollbackError instanceof Error ? rollbackError.message : String(rollbackError)));
+					}
+					throw new Error("Fabric Sample visual update failed; original field group restored. " +
+						"Any uploaded media was retained safely: " +
+						(writeError instanceof Error ? writeError.message : String(writeError)));
+				}
+			} catch (error) { return toolError(error); }
+		},
+	);
+
 	return server;
 }
 
