@@ -12594,7 +12594,7 @@ function createServer() {
 		expected_colour_template_label: z.string().trim().min(1).max(300),
 		new_colour_field_id: wapfVisualFieldId,
 		new_colour_field_label: z.string().trim().min(1).max(300),
-		pricing_clone_mode: z.enum(["lookup_variable_rules", "direct_choice_pricing"])
+		pricing_clone_mode: z.enum(["lookup_variable_rules", "direct_choice_pricing", "zero_choice_pricing"])
 			.default("lookup_variable_rules"),
 		colours: z.array(everydayFabricColour).min(1).max(20),
 	});
@@ -12820,15 +12820,25 @@ function createServer() {
 				 !String(references[0]?.pricing_amount ?? "").trim())) {
 				throw new Error("The direct-pricing reference choice is not an active formula.");
 			}
+			if (family.pricing_clone_mode === "zero_choice_pricing" &&
+				(String(references[0]?.pricing_type ?? "none") !== "none" ||
+				 Number(references[0]?.pricing_amount ?? 0) !== 0)) {
+				throw new Error("The zero-pricing reference choice is not genuinely zero-priced.");
+			}
 			const firstColour = family.colours[0];
 			const firstMedia = media.get(firstColour.source_url + "|" + firstColour.filename.toLocaleLowerCase())!;
-			choices.push({
+			const newChoice = {
 				...structuredClone(references[0]),
 				label: family.new_choice_label,
 				slug: family.new_choice_slug,
 				image: firstMedia.source_url,
 				attachment: firstMedia.attachment,
-			});
+			};
+			if (family.pricing_clone_mode === "zero_choice_pricing") {
+				newChoice.pricing_type = "none";
+				newChoice.pricing_amount = 0;
+			}
+			choices.push(newChoice);
 			const templateField = templateMatches[0];
 			const templateChoice = structuredClone(templateField?.options?.choices?.[0] ?? {});
 			const newField = structuredClone(templateField);
