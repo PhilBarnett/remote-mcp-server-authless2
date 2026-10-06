@@ -35,12 +35,25 @@ test("inventory is authenticated, bounded and preserves incomplete pagination", 
 	for (const call of calls) {
 		assert.equal(call.url.origin, "https://api.ads.openai.com");
 		assert.equal(call.options.method, "GET");
-		assert.equal(call.options.redirect, "error");
+		assert.equal(call.options.redirect, "manual");
 	}
 });
 test("upstream error bodies never expose secrets", async () => {
 	const { deps } = setup([new Response("test-secret-not-a-real-key", { status: 401 })]);
 	await assert.rejects(readChatgptAds(deps, { action: "account" }), error => error.message.includes("401") && !error.message.includes("test-secret"));
+});
+test("redirects are rejected without forwarding credentials", async () => {
+	const { deps, calls } = setup([new Response(null, { status: 302, headers: { Location: "https://other.example/test-secret-not-a-real-key" } })]);
+	await assert.rejects(readChatgptAds(deps, { action: "account" }), error => error.message.includes("redirect HTTP 302") && !error.message.includes("test-secret") && !error.message.includes("other.example"));
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].options.redirect, "manual");
+});
+test("transport failures expose only an allowlisted error category", async () => {
+	for (const name of ["TimeoutError", "AbortError", "TypeError", "test-secret-not-a-real-key"]) {
+		const { deps } = setup([]);
+		deps.fetch = async () => { const error = new Error("test-secret-not-a-real-key"); error.name = name; throw error; };
+		await assert.rejects(readChatgptAds(deps, { action: "account" }), error => error.message.includes(name.startsWith("test-secret") ? "TransportError" : name) && !error.message.includes("test-secret"));
+	}
 });
 test("success responses redact an echoed credential", async () => {
 	const { deps } = setup([{ ...account, unexpected: "test-secret-not-a-real-key" }]);

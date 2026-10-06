@@ -41,13 +41,17 @@ async function adsRequest(
 	try {
 		response = await deps.fetch(url.toString(), {
 			method: conversionBody ? "POST" : "GET",
-			redirect: "error",
+			redirect: "manual",
 			signal: AbortSignal.timeout(20000),
 			headers: { Authorization: `Bearer ${key}`, Accept: "application/json", ...(conversionBody ? { "Content-Type": "application/json" } : {}) },
 			...(conversionBody ? { body: JSON.stringify(conversionBody) } : {}),
 		});
-	} catch {
-		throw new Error("ChatGPT Ads request failed or timed out; credentials and upstream details are withheld.");
+	} catch (error) {
+		const kind = error instanceof Error && ["TimeoutError", "AbortError", "TypeError"].includes(error.name) ? error.name : "TransportError";
+		throw new Error(`ChatGPT Ads request failed (${kind}); credentials and upstream details are withheld.`);
+	}
+	if (response.status >= 300 && response.status < 400) {
+		throw new Error(`ChatGPT Ads API returned redirect HTTP ${response.status}; redirect blocked to protect credentials.`);
 	}
 	if (!response.ok) {
 		// Never echo upstream error bodies, headers or credentials.
@@ -149,3 +153,4 @@ export function registerChatgptAdsTools(server: McpServer, deps: AdsDependencies
 		catch (error) { return { isError: true, content: [{ type: "text" as const, text: error instanceof Error ? error.message : "ChatGPT Ads report failed." }] }; }
 	});
 }
+
