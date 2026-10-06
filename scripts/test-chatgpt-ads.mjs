@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readChatgptAds } from "../src/tools/chatgpt-ads.ts";
+import { build } from "esbuild";
+const bundle = await build({ entryPoints: [new URL("../src/tools/chatgpt-ads.ts", import.meta.url).pathname], bundle: true, write: false, format: "esm", platform: "node", target: "es2022" });
+const { readChatgptAds } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`);
 
 const account = { id: "adacct_6ac4305ad094819e97ddf2ada19c5a78", timezone: "Australia/Sydney", currency_code: "AUD", status: "active" };
 function setup(responses, secret = "test-secret-not-a-real-key") {

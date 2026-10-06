@@ -134,7 +134,7 @@ the three locked outdoor products and attempts rollback if a write fails.
 
 ## ChatGPT Ads connection
 
-The read-only `get_chatgpt_ads_report` tool uses OpenAI's Advertiser API and is
+The `manage_chatgpt_ads` tool uses OpenAI's Advertiser API and is
 pinned to `adacct_6ac4305ad094819e97ddf2ada19c5a78`. Every operation first
 retrieves `/ad_account` and refuses a mismatched account.
 
@@ -146,7 +146,7 @@ Setup:
    Variables and Secrets. Add an encrypted secret named `OPENAI_ADS_API_KEY`.
    Paste the key directly into Cloudflare; never add it to source, PRs or chat.
 3. Deploy the reviewed code through the existing main-branch workflow and refresh
-   the Blindmotion MCP connection. Call `get_chatgpt_ads_report` with
+   the Blindmotion MCP connection. Call `manage_chatgpt_ads` with
    `action: "account"` to verify account identity, status, review, currency and timezone.
 
 Actions: `account`, `campaigns`, `ad_groups` (requires `campaign_id`), `ads`
@@ -160,18 +160,51 @@ Conversion reports combine the account's entities and identify their reporting
 clock and click/view windows; attributed sales are not independent proof of
 incremental revenue. Conversion tracking must exist before useful outcomes appear.
 
-The tool performs only API reads. The documented POST `/conversions/insights`
-is a reporting query, not a resource mutation. There is no activation, budget,
-creative, customer upload or tracking-installation path. Missing configuration,
-identity mismatch, upstream errors and redirects fail closed without echoing
-credentials. Live authentication remains unverified until the secret is installed.
+The existing report actions retain their input and result shapes. The tool replaces
+`get_chatgpt_ads_report` rather than adding another exposed tool, preserving the
+95-tool ceiling. Refresh the connector after deployment to load the new name.
+
+Use `action: "controls", mode: "describe"` to list 73 documented account controls.
+Add an `operation` to discover its exact `parameters`, `body` and referenced
+request schemas. The catalog is derived from the official Ads OpenAPI specification
+retrieved on 6 October 2026; arbitrary URLs, methods, headers and API routes are not accepted.
+
+Controls include campaigns, ad groups, ads, budgets, bidding, targeting, schedules,
+activation/pause/archive, creative upload and preview, landing-page diagnostics,
+account brand and spend limits, custom audiences and membership, product feeds and
+products, conversion pixels/event settings and expanded reporting. Some features
+depend on account eligibility. API-key issuance, account provisioning, OAuth identity,
+lead webhook secret provisioning and partner-only data/eligibility jobs remain outside
+this account-management connection. SFTP provisioning requires an SSH public key;
+password issuance belongs in Ads Manager. Inline multipart files are base64 and limited
+to 1 MB. Larger existing uploads can be referenced by their API file IDs.
+
+Read operations use `mode: "read"`. Mutations use `mode: "preview"`, followed by
+`mode: "apply"` with identical operation, parameters, body, idempotency key and the
+returned `preview_token`. The token expires after 15 minutes, is signed using a key
+that stays inside the Worker, and binds the account, exact request and current account/
+resource snapshots. Changed inputs, state, credentials, expired or forged tokens fail
+before a write. Monetary micros are AUD: 1 dollar equals 1,000,000 micros. New campaigns,
+ad groups and ads must be created paused; activation is a separate control.
+
+Create endpoints that document idempotency require a caller-supplied idempotency key.
+Other mutations are never retried automatically. A timeout may mean the API committed
+the change: inspect current state before attempting another write. Results separately
+report whether a post-write verification read completed; this is not a promise that
+every asynchronous action has finished or that the API supports atomic rollback.
+Installing capabilities does not authorize campaigns, spending or customer uploads.
+
+Missing configuration, identity mismatch, upstream errors and redirects fail without
+echoing credentials. Sensitive response fields are redacted, including nested passwords
+and tokens. Redirects use Cloudflare-supported manual mode and are rejected explicitly.
 
 To maintain the 95-tool ceiling, `get_google_ads_daily_performance` is replaced
 by `get_google_ads_summary` with `time_granularity: "daily"`. Existing summary
 calls retain the default totals behavior and the same result shape.
 
 Validate the new connection guards with
-`node --experimental-strip-types --test scripts/test-chatgpt-ads.mjs`.
+`node --test scripts/test-chatgpt-ads.mjs scripts/test-chatgpt-ads-controls.mjs`.
+Run the Cloudflare runtime regression with `node scripts/test-chatgpt-ads-runtime.mjs`.
 
 ## Repository-scoped GitHub App
 
