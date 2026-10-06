@@ -12716,7 +12716,7 @@ function createServer() {
 			const candidates = await (
 				await productImageWpFetch(
 					environment,
-					"media?search=" + encodeURIComponent("Fairlight") + "&per_page=100&context=edit",
+					"media?search=" + encodeURIComponent("Fairlight") + "&per_page=100",
 				)
 			).json<any[]>();
 			for (const candidate of candidates) {
