@@ -12574,6 +12574,7 @@ function createServer() {
 	 * hash locked and rolled back on any verification failure. */
 	const everydayFabricAdditionConfirmation = "CONFIRM ADD EVERYDAY FABRIC TO STAGING";
 	const singleFabricAdditionConfirmation = "CONFIRM ADD FABRIC TO STAGING";
+	const liveFabricAdditionConfirmation = "CONFIRM ADD REVIEWED FABRIC TO LIVE";
 	const everydayFabricRole = z.enum(["blockout", "light_filter", "sheer"]);
 	const everydayFabricColour = z.object({
 		label: z.string().trim().min(1).max(200),
@@ -12603,6 +12604,10 @@ function createServer() {
 		expected_meta_data_id: genericWapfId,
 		expected_field_group_sha256: genericWapfHash,
 		families: z.array(everydayFabricFamily).min(1).max(3),
+	});
+	const liveFabricAdditionBase = everydayFabricAdditionBase.extend({
+		expected_status: z.enum(["publish", "draft", "private", "pending"]),
+		expected_catalog_visibility: z.enum(["visible", "catalog", "search", "hidden"]),
 	});
 	type EverydayFabricAdditionInput = z.infer<typeof everydayFabricAdditionBase>;
 	type EverydayFabricFamilyInput = z.infer<typeof everydayFabricFamily>;
@@ -12703,13 +12708,14 @@ function createServer() {
 	async function resolveEverydayColourMedia(
 		locked: Map<string, EverydayLockedColour>,
 		upload: boolean,
+		environment: "live" | "staging",
 	) {
 		const resolved = new Map<string, { attachment: number | null; source_url: string }>();
 		const existingBySlug = new Map<string, any>();
 		if (upload) {
 			const candidates = await (
 				await productImageWpFetch(
-					"staging",
+					environment,
 					"media?search=" + encodeURIComponent("Fairlight") + "&per_page=100&context=edit",
 				)
 			).json<any[]>();
@@ -12717,7 +12723,7 @@ function createServer() {
 				const slug = String(candidate?.slug ?? "").toLocaleLowerCase();
 				if (!slug) continue;
 				if (existingBySlug.has(slug)) {
-					throw new Error("Multiple staging attachments use Fairlight slug " + slug + ".");
+					throw new Error("Multiple " + environment + " attachments use Fairlight slug " + slug + ".");
 				}
 				existingBySlug.set(slug, candidate);
 			}
@@ -12733,20 +12739,20 @@ function createServer() {
 					const loaded = await fetchPublicResource(existingUrl, "image/jpeg,image/png,image/webp");
 					const existingBytes = new Uint8Array(await loaded.response.arrayBuffer());
 					if (await sha256Hex(existingBytes) !== colour.expected_sha256) {
-						throw new Error("Existing staging attachment has different bytes: " + slug + ".");
+						throw new Error("Existing " + environment + " attachment has different bytes: " + slug + ".");
 					}
 					attachment = Number(candidate.id);
 					sourceUrl = existingUrl;
 				} else {
 					const uploaded = await productImageWpUploadMedia(
-						"staging", colour.filename, colour.mime_type, colour.bytes,
+						environment, colour.filename, colour.mime_type, colour.bytes,
 					);
 					attachment = Number(uploaded.id);
 					sourceUrl = String(uploaded.source_url ?? "");
 					existingBySlug.set(slug.toLocaleLowerCase(), uploaded);
 				}
 				if (!Number.isInteger(attachment) || attachment! < 1 || !sourceUrl.startsWith("https://")) {
-					throw new Error("Staging did not return a valid Fairlight attachment.");
+					throw new Error(environment + " did not return a valid Fairlight attachment.");
 				}
 			}
 			resolved.set(key, { attachment, source_url: sourceUrl });
@@ -12758,11 +12764,14 @@ function createServer() {
 		args: EverydayFabricAdditionInput,
 		upload = false,
 		suppliedProduct?: any,
+		environment: "live" | "staging" = "staging",
+		expectedStatus: "publish" | "draft" | "private" | "pending" = "draft",
+		expectedCatalogVisibility: "visible" | "catalog" | "search" | "hidden" = "hidden",
 	) {
-		const product = suppliedProduct ?? await (await productImageWcFetch("staging", "products/" + args.product_id)).json<any>();
+		const product = suppliedProduct ?? await (await productImageWcFetch(environment, "products/" + args.product_id)).json<any>();
 		if (product.id !== args.product_id || product.name !== args.expected_product_name ||
-			product.status !== "draft" || product.catalog_visibility !== "hidden") {
-			throw new Error("Everyday product identity or draft/hidden state changed.");
+			product.status !== expectedStatus || product.catalog_visibility !== expectedCatalogVisibility) {
+			throw new Error("Fabric product identity or expected publication state changed.");
 		}
 		const wapf = genericWapf(product);
 		const beforeHash = await genericWapfHashOf(wapf.meta.value);
@@ -12784,7 +12793,7 @@ function createServer() {
 		const existingIds = new Set(wapf.group.fields.map((field: any) => genericWapfFieldId(field)));
 		if (allNewIds.some((id) => existingIds.has(id))) throw new Error("A requested Fairlight field ID already exists.");
 		const lockedColours = await lockEverydayColours(args.families);
-		const media = await resolveEverydayColourMedia(lockedColours, upload);
+		const media = await resolveEverydayColourMedia(lockedColours, upload, environment);
 		const updatedGroup = structuredClone(wapf.group);
 		const variableRuleCounts: Record<string, number> = {};
 		for (const family of args.families) {
@@ -12873,8 +12882,11 @@ function createServer() {
 			}),
 		}));
 		const planHash = await genericWapfHashOf({
+			environment,
 			product_id: args.product_id,
 			product_name: args.expected_product_name,
+			expected_status: expectedStatus,
+			expected_catalog_visibility: expectedCatalogVisibility,
 			before_field_group_sha256: beforeHash,
 			families: manifest,
 			variable_rule_counts: variableRuleCounts,
@@ -12885,7 +12897,7 @@ function createServer() {
 	const wapfPricingGridManager = wapfPricingGridBase.partial().extend({
 		product_id: z.number().int().positive(),
 		environment: z.enum(["live", "staging"]),
-		action: z.enum(["inspect", "preview", "apply", "preview_fabric_addition", "apply_fabric_addition", "preview_option_lookup", "apply_option_lookup"]),
+		action: z.enum(["inspect", "preview", "apply", "preview_fabric_addition", "apply_fabric_addition", "preview_live_fabric_addition", "apply_live_fabric_addition", "preview_option_lookup", "apply_option_lookup"]),
 		option_surcharges: z.array(z.union([
 			z.object({
 				field_id: z.string().min(1),
@@ -12905,6 +12917,8 @@ function createServer() {
 			}),
 		])).max(20).optional(),
 		families: z.array(everydayFabricFamily).min(1).max(3).optional(),
+		expected_status: z.enum(["publish", "draft", "private", "pending"]).optional(),
+		expected_catalog_visibility: z.enum(["visible", "catalog", "search", "hidden"]).optional(),
 		expected_plan_sha256: genericWapfHash.optional(),
 		confirmation: z.string().optional(),
 	});
@@ -12912,57 +12926,81 @@ function createServer() {
 	server.registerTool(
 		"manage_wapf_pricing_grid",
 		{
-			description: "Inspect, preview or apply a complete parameter-driven WAPF price grid, manage a staging-only option-price lookup reference, or preview/apply a staging-only one-to-three-family fabric addition. Option-lookup updates are hash-locked, verify the named lookup and change only explicitly selected choice pricing; fabric addition remains draft/hidden only. The tool cannot publish.",
+			description: "Inspect, preview or apply a complete parameter-driven WAPF price grid, manage a staging-only option-price lookup reference, or preview/apply a guarded one-to-three-family fabric addition. Live fabric additions require exact current publication state, a hash-locked plan and a separate live confirmation; all additions preserve publication state, verify the exact resulting WAPF group and roll back on failure. The tool cannot publish.",
 			inputSchema: wapfPricingGridManager,
 		},
 		async (args) => {
 			try {
-				if (args.action === "preview_fabric_addition" || args.action === "apply_fabric_addition") {
-					if (args.environment !== "staging") throw new Error("Fabric addition is restricted to staging.");
+				const isLiveFabricAction =
+					args.action === "preview_live_fabric_addition" || args.action === "apply_live_fabric_addition";
+				const isFabricAction = isLiveFabricAction ||
+					args.action === "preview_fabric_addition" || args.action === "apply_fabric_addition";
+				if (isFabricAction) {
+					const fabricEnvironment = isLiveFabricAction ? "live" : "staging";
+					if (args.environment !== fabricEnvironment) {
+						throw new Error("The selected fabric action does not match the requested environment.");
+					}
+					const liveFabricArgs = isLiveFabricAction ? liveFabricAdditionBase.parse(args) : null;
 					const fabricArgs = everydayFabricAdditionBase.parse(args);
-					if (args.action === "preview_fabric_addition") {
-						const plan = await buildEverydayFabricAdditionPlan(fabricArgs);
+					const expectedStatus = liveFabricArgs?.expected_status ?? "draft";
+					const expectedCatalogVisibility = liveFabricArgs?.expected_catalog_visibility ?? "hidden";
+					const previewAction = args.action === "preview_fabric_addition" ||
+						args.action === "preview_live_fabric_addition";
+					if (previewAction) {
+						const plan = await buildEverydayFabricAdditionPlan(
+							fabricArgs, false, undefined, fabricEnvironment, expectedStatus, expectedCatalogVisibility,
+						);
 						return toolResult({
-							preview_only: true, write_performed: false,
+							preview_only: true, write_performed: false, environment: fabricEnvironment,
 							product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
 							before_field_group_sha256: plan.beforeHash, plan_sha256: plan.planHash,
 							families: plan.manifest, variable_rule_counts: plan.variableRuleCounts,
 							resulting_field_count: plan.updatedGroup.fields.length,
-							required_confirmation: fabricArgs.families.length === 3
-								? everydayFabricAdditionConfirmation
-								: singleFabricAdditionConfirmation,
+							required_confirmation: isLiveFabricAction
+								? liveFabricAdditionConfirmation
+								: fabricArgs.families.length === 3
+									? everydayFabricAdditionConfirmation
+									: singleFabricAdditionConfirmation,
 						});
 					}
-					const requiredFabricConfirmation = fabricArgs.families.length === 3
-						? everydayFabricAdditionConfirmation
-						: singleFabricAdditionConfirmation;
+					const requiredFabricConfirmation = isLiveFabricAction
+						? liveFabricAdditionConfirmation
+						: fabricArgs.families.length === 3
+							? everydayFabricAdditionConfirmation
+							: singleFabricAdditionConfirmation;
 					if (args.confirmation !== requiredFabricConfirmation) {
 						throw new Error("Exact confirmation required: " + requiredFabricConfirmation);
 					}
-					const product = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+					const product = await (
+						await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
+					).json<any>();
 					if (!args.expected_plan_sha256) {
-						throw new Error("The reviewed Everyday fabric plan hash is required.");
+						throw new Error("The reviewed fabric plan hash is required.");
 					}
-					const plan = await buildEverydayFabricAdditionPlan(fabricArgs, true, product);
+					const plan = await buildEverydayFabricAdditionPlan(
+						fabricArgs, true, product, fabricEnvironment, expectedStatus, expectedCatalogVisibility,
+					);
 					if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) {
-						throw new Error("The Everyday fabric plan changed while resolving staging media.");
+						throw new Error("The fabric plan changed while resolving " + fabricEnvironment + " media.");
 					}
 					try {
-						await productImageWcWrite("staging", "products/" + fabricArgs.product_id, {
+						await productImageWcWrite(fabricEnvironment, "products/" + fabricArgs.product_id, {
 							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
 						});
-						const verified = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+						const verified = await (
+							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
+						).json<any>();
 						const verifiedWapf = genericWapf(verified);
 						const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
 						if (verified.id !== fabricArgs.product_id || verified.name !== fabricArgs.expected_product_name ||
-							verified.status !== "draft" || verified.catalog_visibility !== "hidden" ||
+							verified.status !== expectedStatus || verified.catalog_visibility !== expectedCatalogVisibility ||
 							verifiedWapf.meta.id !== fabricArgs.expected_meta_data_id ||
 							verifiedHash !== plan.afterHash ||
 							verifiedWapf.group.fields.length !== plan.updatedGroup.fields.length) {
-							throw new Error("Post-write Everyday fabric verification failed.");
+							throw new Error("Post-write fabric verification failed.");
 						}
 						return toolResult({
-							updated: true, verified: true, write_performed: true,
+							updated: true, verified: true, write_performed: true, environment: fabricEnvironment,
 							product_id: verified.id, before_field_group_sha256: plan.beforeHash,
 							after_field_group_sha256: verifiedHash, field_count: verifiedWapf.group.fields.length,
 							families: plan.manifest.map((family) => ({
@@ -12970,17 +13008,19 @@ function createServer() {
 								colour_field: family.new_colour_field_label, colour_count: family.colours.length,
 							})),
 							variable_rule_counts: plan.variableRuleCounts, rollback_performed: false,
-							untouched: ["live site", "publication state", "product identity", "regular price", "non-WAPF product data"],
+							untouched: ["publication state", "product identity", "regular price", "non-WAPF product data"],
 						});
 					} catch (writeError) {
-						await productImageWcWrite("staging", "products/" + fabricArgs.product_id, {
+						await productImageWcWrite(fabricEnvironment, "products/" + fabricArgs.product_id, {
 							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }],
 						});
-						const rolledBack = await (await productImageWcFetch("staging", "products/" + fabricArgs.product_id)).json<any>();
+						const rolledBack = await (
+							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
+						).json<any>();
 						if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
-							throw new Error("Everyday fabric update failed and exact rollback verification also failed.");
+							throw new Error("Fabric update failed and exact rollback verification also failed.");
 						}
-						throw new Error("Everyday fabric update failed; exact rollback succeeded: " +
+						throw new Error("Fabric update failed; exact rollback succeeded: " +
 							(writeError instanceof Error ? writeError.message : String(writeError)));
 					}
 				}
