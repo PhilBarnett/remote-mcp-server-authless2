@@ -41,5 +41,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Test ChatGPT Ads controls in Node and Cloudflare runtime
+        run: npm run test:chatgpt-ads
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 95
+

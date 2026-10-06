@@ -3,6 +3,7 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
+		"test:chatgpt-ads": "node --test scripts/test-chatgpt-ads.mjs scripts/test-chatgpt-ads-controls.mjs && node scripts/test-chatgpt-ads-runtime.mjs",
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"format": "oxfmt --write .",

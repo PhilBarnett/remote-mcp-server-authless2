@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { controlSchema, manageChatgptAdsControls } from "./chatgpt-ads-controls";
 
 const ACCOUNT_ID = "adacct_6ac4305ad094819e97ddf2ada19c5a78";
 const API_ORIGIN = "https://api.ads.openai.com";
@@ -8,6 +9,12 @@ type AdsDependencies = {
 	getBindings: () => AdsBindings;
 	fetch: typeof fetch;
 };
+
+function redactResponse(value: any): any {
+	if (Array.isArray(value)) return value.map(redactResponse);
+	if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, /(?:api_key|access_token|refresh_token|signing_secret|password|private_key|authorization)/i.test(name) ? "[REDACTED]" : redactResponse(item)]));
+	return value;
+}
 
 const schema = z.object({
 	action: z.enum(["account", "campaigns", "ad_groups", "ads", "delivery", "conversions", "locations"]),
@@ -32,6 +39,7 @@ async function adsRequest(
 	path: string,
 	params: URLSearchParams = new URLSearchParams(),
 	conversionBody?: Record<string, unknown>,
+	options: { method?: string; idempotencyKey?: string; multipart?: FormData } = {},
 ) {
 	const key = deps.getBindings().OPENAI_ADS_API_KEY?.trim();
 	if (!key) throw new Error("ChatGPT Ads is not configured. Add OPENAI_ADS_API_KEY as an encrypted Cloudflare Worker secret.");
@@ -40,11 +48,11 @@ async function adsRequest(
 	let response: Response;
 	try {
 		response = await deps.fetch(url.toString(), {
-			method: conversionBody ? "POST" : "GET",
+			method: options.method ?? (conversionBody ? "POST" : "GET"),
 			redirect: "manual",
 			signal: AbortSignal.timeout(20000),
-			headers: { Authorization: `Bearer ${key}`, Accept: "application/json", ...(conversionBody ? { "Content-Type": "application/json" } : {}) },
-			...(conversionBody ? { body: JSON.stringify(conversionBody) } : {}),
+			headers: { Authorization: `Bearer ${key}`, Accept: "application/json", ...(conversionBody && !options.multipart ? { "Content-Type": "application/json" } : {}), ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}) },
+			...(options.multipart ? { body: options.multipart } : conversionBody ? { body: JSON.stringify(conversionBody) } : {}),
 		});
 	} catch (error) {
 		const kind = error instanceof Error && ["TimeoutError", "AbortError", "TypeError"].includes(error.name) ? error.name : "TransportError";
@@ -58,10 +66,11 @@ async function adsRequest(
 		throw new Error(`ChatGPT Ads API returned HTTP ${response.status}. Check account access and request settings in Ads Manager.`);
 	}
 	const body = await response.text();
+	if (!body.trim()) return {};
 	if (body.length > 2000000) throw new Error("ChatGPT Ads response is too large; request a smaller page.");
 	try {
 		// Defence in depth if an upstream response ever echoes the secret.
-		return JSON.parse(body.split(key).join("[REDACTED]")) as Record<string, any>;
+		return redactResponse(JSON.parse(body.split(key).join("[REDACTED]"))) as Record<string, any>;
 	} catch {
 		throw new Error("ChatGPT Ads returned an invalid JSON response.");
 	}
@@ -143,14 +152,25 @@ export async function readChatgptAds(deps: AdsDependencies, input: unknown) {
 	};
 }
 
+export async function manageChatgptAds(deps: AdsDependencies, input: unknown) {
+	if (input && typeof input === "object" && "action" in input && input.action === "controls") {
+		return manageChatgptAdsControls(input, (path, params, body, options) => adsRequest(deps, path, params, body, options), () => deps.getBindings().OPENAI_ADS_API_KEY);
+	}
+	return readChatgptAds(deps, input);
+}
+
+// MCP requires an object at the JSON Schema root. Per-action handlers enforce
+// their own required fields and defaults after this common transport schema.
+const neutralFields = Object.fromEntries(Object.entries({ ...schema.shape, ...controlSchema.shape }).map(([name, field]) => [name, (field instanceof z.ZodDefault ? field.removeDefault() : field).optional()]));
+export const managementInputSchema = z.object({ ...neutralFields, action: z.enum(["account", "campaigns", "ad_groups", "ads", "delivery", "conversions", "locations", "controls"]) }).strict();
+
 export function registerChatgptAdsTools(server: McpServer, deps: AdsDependencies) {
-	server.registerTool("get_chatgpt_ads_report", {
-		description: "Read Blindmotion ChatGPT Ads account status, campaign/ad inventory, delivery, attributed conversions and supported geographic lookup. Account identity is pinned; credentials stay in Cloudflare. Unix report boundaries must be account-local midnight with an exclusive end. Pagination is explicit. Cannot create ads, change budgets or activate delivery.",
-		inputSchema: schema,
-		annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+	server.registerTool("manage_chatgpt_ads", {
+		description: "Manage the fixed Blindmotion ChatGPT Ads account. Existing account, campaign inventory, delivery, conversions and locations report actions remain available. action=controls, mode=describe lists 73 documented operations and exact request schemas. Reads use mode=read. Mutations require preview then apply with identical inputs and a signed 15-minute preview_token; account state is revalidated. Controls cover campaigns, ads, ad groups, budgets, bids, targeting, schedules, activation/pause/archive, creatives/uploads/previews, account spend limits/brand, audiences, feeds and conversion setup. Creates start paused. Currency is AUD; monetary micros are 1000000 per dollar. Credentials stay in Cloudflare. API-key issuance and account provisioning are excluded. Capability installation does not authorize spending.",
+		inputSchema: managementInputSchema,
+		annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
 	}, async args => {
-		try { return { content: [{ type: "text" as const, text: JSON.stringify(await readChatgptAds(deps, args), null, 2) }] }; }
+		try { return { content: [{ type: "text" as const, text: JSON.stringify(await manageChatgptAds(deps, args), null, 2) }] }; }
 		catch (error) { return { isError: true, content: [{ type: "text" as const, text: error instanceof Error ? error.message : "ChatGPT Ads report failed." }] }; }
 	});
 }
-
