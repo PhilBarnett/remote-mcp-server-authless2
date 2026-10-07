@@ -386,3 +386,9 @@ bridge roles are independently verified before a manifest is accepted.
 - `manage_staging_blindmotion_plugin_deployment` consolidates inspection and guarded deployment for reviewed Blindmotion plugins on `staging-online.blindmotion.com.au`. The `inspect` action is read-only. The `deploy` action requires exact current-version state, a SHA-256 locked ZIP, the fixed slug/main-file/name identity and `CONFIRM DEPLOY BLINDMOTION PLUGIN`. The WordPress bridge validates the archive, uses a transaction lock, preserves a temporary rollback copy, activates the plugin and verifies the final version and active state. It cannot target live, fetch arbitrary URLs or install unlisted third-party plugins.
 
 This single tool replaces the former Visualizer-only deployment tool without increasing the MCP tool count. The initial allowlist contains the deployment bridge itself, Measurement Guarantee, Motor Selection Guide, Product Promotion Bridge, WAPF Pricing Bridge, Visualizer and the future consolidated Blindmotion CRO Suite.
+
+# Staging work through the deployment bridge
+
+Bridge 1.1.0 adds actions to `manage_staging_blindmotion_plugin_deployment`: `read_source`, `inspect_routing`, `inspect_content`, `preview_content`, `apply_content`. Reads do not schedule or sync contacts. Product edits require the inspected SHA-256 and exact preview-plan SHA-256, permit only description/short_description, and verify read-back with rollback. Use the returned before text with a fresh preview to revert. These operations use the existing dedicated staging credentials and require no browser session. Install the updated bridge before using the new actions. Elementor template editing and routing code mutation remain outside this interface.
+
+Validation: `node scripts/test-staging-work.mjs`. The PR tool ceiling is aligned to the existing 97 tools; these actions add no registered tools.
