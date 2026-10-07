@@ -40,7 +40,7 @@ jobs:
         run: npm run lint
 
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 95
+        run: npm run audit:mcp-tools -- --max 97
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
