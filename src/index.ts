@@ -1,3 +1,5 @@
+import { canonicalItemReporting } from "./tools/ga4-item-reporting";
+import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from "./tools/roller-cohort";
 import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
@@ -4303,12 +4305,12 @@ function createServer() {
 		"get_sample_to_purchase_cohort",
 		{
 			description:
-				"Measure all-product or ZipGrip Fabric Sample to genuine-purchase conversion using privacy-safe first-party WooCommerce matching. Customer identifiers are used only inside the Worker; no customer PII or reusable identity key is returned.",
+				"Measure all-product, ZipGrip or roller-only Fabric Sample to genuine-purchase conversion using privacy-safe first-party WooCommerce matching. Customer identifiers are used only inside the Worker; no customer PII or reusable identity key is returned.",
 			inputSchema: z.object({
 				start_date: z.string().date(),
 				end_date: z.string().date(),
 				as_of_date: z.string().date().optional(),
-				product_scope: z.enum(["all", "zipgrip"]).default("all"),
+				product_scope: z.enum(["all", "zipgrip", "roller"]).default("all"),
 				gross_margin_pct: z.number().min(0).max(100).default(51),
 				windows_days: z
 					.array(z.number().int().min(7).max(365))
@@ -4356,6 +4358,7 @@ function createServer() {
 						) {
 							return false;
 						}
+						if (product_scope === "roller") return isRollerOnlySampleOrder(order);
 						if (product_scope === "zipgrip") return isZipGripSampleOrder(order);
 						const lineItems = Array.isArray(order?.line_items)
 							? order.line_items
@@ -4372,6 +4375,7 @@ function createServer() {
 							Number(cohortTimestampMs(b?.date_created)),
 					);
 				const purchaseOrders = orders.filter((order) => {
+					if (product_scope === "roller") return isRollerPurchaseOrder(order);
 					if (product_scope === "zipgrip") return isZipGripPurchaseOrder(order);
 					if (!isGenuineCommercialOrder(order)) return false;
 					const lineItems = Array.isArray(order?.line_items)
@@ -4520,10 +4524,10 @@ function createServer() {
 							0,
 						);
 						const scopedProductRevenue =
-							product_scope === "zipgrip"
+							product_scope !== "all"
 								? matched.reduce(
 									(total, result) =>
-										total + zipGripPurchaseLineRevenue(result.order),
+										total + (product_scope === "roller" ? rollerPurchaseLineRevenue(result.order) : zipGripPurchaseLineRevenue(result.order)),
 									0,
 								)
 								: grossRevenue;
@@ -4560,7 +4564,7 @@ function createServer() {
 					);
 					const netRevenue = grossRevenue - refunds;
 					const scopedProductRevenue =
-						product_scope === "zipgrip"
+						product_scope !== "all"
 							? conversions.reduce(
 								(total, conversion) =>
 									total + conversion.scoped_product_revenue_aud,
@@ -4650,12 +4654,13 @@ function createServer() {
 						match_priority: ["email", "phone", "customer_id"],
 					},
 					methodology: {
+						scoped_revenue_definition: "Scoped product revenue uses discounted line totals excluding tax and shipping, before refunds. Gross/net order revenue includes all products, tax and shipping; order-level refunds cannot be allocated to roller lines. This is observed revenue, not incremental value.",
 						sample_definition:
-							product_scope === "zipgrip"
+							product_scope === "roller" ? "Zero-total processing/completed sample-only order with explicit Everyday/Premium roller selections; mixed and unknown selections excluded. Landing attribution is not used." : product_scope === "zipgrip"
 								? "Order identified by the existing ZipGrip sample classifier."
 								: "Commercial-status order whose every line item is identified as a sample.",
 						purchase_definition:
-							product_scope === "zipgrip"
+							product_scope === "roller" ? "Later processing/completed order over A$20 containing a positive Everyday/Premium roller line (3839/4788)." : product_scope === "zipgrip"
 								? "Later order identified by the existing ZipGrip purchase classifier."
 								: "Later commercial-status WooCommerce order with total greater than A$20 that is not sample-only.",
 						denominator:
@@ -9443,7 +9448,8 @@ function createServer() {
 					limit: String(limit),
 					orderBys: [{ metric: { metricName: "itemRevenue" }, desc: true }],
 				});
-				return toolResult(ga4ReportResult(report, start_date, end_date));
+				const result = ga4ReportResult(report, start_date, end_date);
+				return toolResult({ ...result, canonical_item_reporting: canonicalItemReporting(result.rows, result.row_count) });
 			} catch (error) {
 				return toolError(error);
 			}
@@ -14480,4 +14486,5 @@ export default {
 		return handler(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;
+
 
