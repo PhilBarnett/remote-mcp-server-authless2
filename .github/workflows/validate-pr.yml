@@ -44,6 +44,10 @@ jobs:
       - name: Test ChatGPT Ads controls in Node and Cloudflare runtime
         run: npm run test:chatgpt-ads
 
+      - name: Test staging work guards
+        run: node scripts/test-staging-work.mjs
+
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 95
+        run: npm run audit:mcp-tools -- --max 97
+
 

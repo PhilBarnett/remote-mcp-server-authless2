@@ -10,6 +10,7 @@ import {
 import { registerProductPromotionTools } from "./tools/product-promotion";
 import { registerFabricSampleOrderTool } from "./tools/fabric-sample-orders";
 import { registerChatgptAdsTools } from "./tools/chatgpt-ads";
+import { stagingWorkSchemas, runStagingWork } from "./tools/staging-work";
 
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
@@ -5213,8 +5214,9 @@ function createServer() {
 		"manage_staging_blindmotion_plugin_deployment",
 		{
 			description:
-				"Inspect, install or update one reviewed allowlisted Blindmotion WordPress plugin on the exact staging origin. Inspection is read-only. Deployment hash-locks ZIP bytes, verifies current version and fixed identity, activates and verifies with transactional rollback. Cannot target live or arbitrary plugins.",
+				"Inspect, install or update one reviewed allowlisted Blindmotion WordPress plugin on the exact staging origin. Inspection is read-only. Deployment hash-locks ZIP bytes, verifies current version and fixed identity, activates and verifies with transactional rollback. Also reads bounded plugin source, dry-runs sample routing and inspects/previews/applies hash-locked product descriptions with verified rollback. Cannot target live, pricing, publication status or arbitrary plugins.",
 			inputSchema: z.discriminatedUnion("action", [
+                ...stagingWorkSchemas,
 				z.object({
 					action: z.literal("inspect"),
 					plugin_slug: STAGING_PLUGIN_SLUG_SCHEMA,
@@ -5234,6 +5236,10 @@ function createServer() {
 		},
 		async (input) => {
 			try {
+                if (input.action !== "inspect" && input.action !== "deploy") {
+                    return runStagingWork(stagingPluginDeploymentRequest, input, input.action === "apply_content");
+                }
+
 				const expected = STAGING_PLUGIN_DEPLOYMENT_ALLOWLIST[input.plugin_slug];
 				if (input.action === "inspect") {
 					const inspected = await stagingPluginDeploymentRequest({
@@ -14138,7 +14144,7 @@ function createServer() {
 
 		let heroBytes: Uint8Array | null = null;
 		if (args.hero_image) {
-			const response = await fetchPublicResource(args.hero_image.source_url, "image/*");
+			const { response } = await fetchPublicResource(args.hero_image.source_url, "image/*");
 			const mimeType = String(response.headers.get("content-type") ?? "").split(";")[0].toLowerCase();
 			heroBytes = new Uint8Array(await response.arrayBuffer());
 			if (heroBytes.length < 1000 || heroBytes.length > 6_000_000 ||
@@ -14454,3 +14460,4 @@ export default {
 		return handler(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;
+
