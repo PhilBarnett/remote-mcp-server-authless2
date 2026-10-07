@@ -1,0 +1,16 @@
+import { readFileSync } from "node:fs";
+import assert from "node:assert/strict";
+const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+const body = source.slice(source.indexOf("function fabricSampleColourSlug("), source.indexOf("async function buildFabricSamplePlan(")).replace(/: any/g, "").replace(/: string\[\]/g, "").replace(/: string/g, "");
+const wapfConditionalRules = f => (f.conditionals || []).flatMap(g => g.rules || []);
+const map = new Function("wapfConditionalRules", body + "; return fabricSampleColourSlug;")(wapfConditionalRules);
+const rule = (field,value,condition="==") => ({field,value,condition});
+const selector = {conditionals:[{rules:[rule("config","single")]},{rules:[rule("config","double")]}]};
+const field = groups => ({id:"encore",conditionals:groups.map(rules=>({rules}))});
+assert.equal(map(field([[rule("fabric","encore")]]),selector,"fabric",["encore"]),"encore");
+assert.equal(map(field([[rule("config","single"),rule("fabric","encore")],[rule("config","double"),rule("fabric","encore")]]),selector,"fabric",["encore"]),"encore");
+assert.throws(()=>map(field([[rule("other","x"),rule("fabric","encore")]]),selector,"fabric",["encore"]));
+assert.throws(()=>map(field([[rule("fabric","encore")],[rule("fabric","apollo")]]),selector,"fabric",["encore","apollo"]));
+assert.throws(()=>map(field([[rule("fabric","encore","!=")]]),selector,"fabric",["encore"]));
+assert.throws(()=>map(field([[]]),selector,"fabric",["encore"]));
+console.log("6 fabric sample conditional mapping checks passed");
