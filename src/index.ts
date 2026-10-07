@@ -285,6 +285,36 @@ type FabricSamplePlanInput = {
 	sampleProductLabel: string;
 };
 
+function fabricSampleColourSlug(field: any, selector: any, selectorId: string, choiceSlugs: string[]) {
+	const groups = field?.conditionals;
+	const selectorRules = wapfConditionalRules(selector);
+	if (!Array.isArray(groups) || groups.length === 0) {
+		throw new Error(`Source colour field ${field?.id ?? "unknown"} has an unsupported conditional dependency.`);
+	}
+	const slugs = groups.map((group: any) => {
+		const rules = group?.rules;
+		if (!Array.isArray(rules) || rules.length === 0) throw new Error("Empty source colour condition group.");
+		const fabricRules = rules.filter((rule: any) => String(rule?.field) === selectorId);
+		if (fabricRules.length !== 1 || fabricRules[0]?.condition !== "==" ||
+			!choiceSlugs.includes(String(fabricRules[0]?.value ?? ""))) {
+			throw new Error(`Source colour field ${field?.id ?? "unknown"} has an unsupported conditional dependency.`);
+		}
+		for (const rule of rules) {
+			if (String(rule?.field) === selectorId) continue;
+			// Only discard upstream visibility gates already declared by the fabric selector.
+			// The sample selector replaces those gates; unrelated constraints must still fail.
+			if (rule?.condition !== "==" || !selectorRules.some((gate: any) =>
+				gate?.condition === "==" && String(gate?.field) === String(rule?.field) &&
+				String(gate?.value) === String(rule?.value))) {
+				throw new Error(`Source colour field ${field?.id ?? "unknown"} has an unsupported conditional dependency.`);
+			}
+		}
+		return String(fabricRules[0].value);
+	});
+	if (new Set(slugs).size !== 1) throw new Error("Source colour field maps to multiple fabric choices.");
+	return slugs[0];
+}
+
 async function buildFabricSamplePlan(source: any, destination: any, input: FabricSamplePlanInput) {
 	const sourceWapf = singleWapfFieldGroup(source);
 	const destinationWapf = singleWapfFieldGroup(destination);
@@ -319,24 +349,14 @@ async function buildFabricSamplePlan(source: any, destination: any, input: Fabri
 	}
 	const dependentChoiceSlugs: string[] = [];
 	for (const field of dependentFields) {
-		const rules = wapfConditionalRules(field);
-		if (
-			rules.length !== 1 ||
-			String(rules[0]?.field) !== input.sourceFabricSelectorFieldId ||
-			rules[0]?.condition !== "==" ||
-			!sourceChoiceSlugs.includes(String(rules[0]?.value ?? ""))
-		) {
-			throw new Error(
-				`Source colour field ${field?.id ?? "unknown"} has an unsupported conditional dependency.`,
-			);
-		}
+		const sourceChoiceSlug = fabricSampleColourSlug(field, sourceSelector, input.sourceFabricSelectorFieldId, sourceChoiceSlugs);
 		const choices = field?.options?.choices;
 		if (!Array.isArray(choices) || choices.length < 1 || choices.length > 100) {
 			throw new Error(
 				`Source colour field ${field?.id ?? "unknown"} must contain between 1 and 100 choices.`,
 			);
 		}
-		dependentChoiceSlugs.push(String(rules[0].value));
+		dependentChoiceSlugs.push(sourceChoiceSlug);
 	}
 	if (
 		new Set(dependentChoiceSlugs).size !== sourceChoiceSlugs.length ||
@@ -460,7 +480,7 @@ async function buildFabricSamplePlan(source: any, destination: any, input: Fabri
 
 	const newColourFields: any[] = [];
 	for (const sourceColourField of dependentFields) {
-		const rule = wapfConditionalRules(sourceColourField)[0];
+		const sourceColourSlug = fabricSampleColourSlug(sourceColourField, sourceSelector, input.sourceFabricSelectorFieldId, sourceChoiceSlugs);
 		const newColourField = structuredClone(destinationColourTemplate);
 		newColourField.id = await deterministicWapfToken(
 			"sample-colour-field",
@@ -485,7 +505,7 @@ async function buildFabricSamplePlan(source: any, destination: any, input: Fabri
 				rules: [
 					{
 						condition: "==",
-						value: sourceToNewChoiceSlug.get(String(rule.value)),
+						value: sourceToNewChoiceSlug.get(sourceColourSlug),
 						field: String(newSelector.id),
 						generated: false,
 					},
