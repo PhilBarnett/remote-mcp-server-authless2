@@ -46,18 +46,3 @@ export function purchaseDiagnosticResult(result: any, input: PurchaseDiagnosticI
   methodology:"Read-only GA4 purchase-event diagnostics in the GA4 property timezone and currency. Transaction rows and item rows use separate metric scopes: never sum transaction revenue from item rows. Numeric transaction IDs are candidates for WooCommerce order matching, not proof of a match; non-numeric IDs are redacted. Repeated date/host rows or eventCount > 1 are investigation flags, not proof of duplicate orders. GA4 reporting may deduplicate events and cannot prove raw collector exactly-once delivery. Missing GA4 rows may reflect consent, blocking, status/date, refunds or collection differences. Paginate until has_more is false; thresholding/sampling/data loss can limit conclusions. Item revenue excludes tax and shipping. This report does not repair collection or alter feed IDs.",
  };
 }
-export function registerPurchaseDiagnosticTool(server: any, deps: {
- runReport: (request: any)=>Promise<any>;
- reportResult:(report:any,start:string,end:string)=>any;
- toolResult:(value:any)=>any; toolError:(error:unknown)=>any;
-}) {
- server.registerTool("get_ga4_purchase_diagnostics",{
-  description:"Read-only GA4 purchase diagnostics by date, hostname and numeric transaction ID, with separately scoped transaction or item rows, pagination and data-quality flags. Used for WooCommerce reconciliation; does not change collection.",
-  inputSchema:purchaseDiagnosticSchema,
-  annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true},
- },async (input: PurchaseDiagnosticInput)=>{
-  try {const report=await deps.runReport(purchaseDiagnosticRequest(input));
-   return deps.toolResult(purchaseDiagnosticResult(deps.reportResult(report,input.start_date,input.end_date),input,report));
-  } catch(error) {return deps.toolError(error);}
- });
-}
