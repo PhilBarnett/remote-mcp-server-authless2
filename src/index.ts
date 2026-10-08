@@ -9479,6 +9479,7 @@ function createServer() {
 		return sha256Hex(new TextEncoder().encode(JSON.stringify(value)));
 	}
 	function canonicalWapfValue(value: unknown): unknown {
+		if (typeof value === "number" && Number.isFinite(value)) return String(value);
 		if (Array.isArray(value)) return value.map(canonicalWapfValue);
 		if (!value || typeof value !== "object") return value;
 		return Object.fromEntries(
@@ -9489,6 +9490,35 @@ function createServer() {
 	}
 	async function genericWapfCanonicalHashOf(value: unknown) {
 		return genericWapfHashOf(canonicalWapfValue(value));
+	}
+	function firstCanonicalWapfDifference(expected: unknown, observed: unknown, path = "$"): string | null {
+		if (Object.is(expected, observed)) return null;
+		if (Array.isArray(expected) && Array.isArray(observed)) {
+			if (expected.length !== observed.length) {
+				return path + ": expected array length " + expected.length + ", observed " + observed.length;
+			}
+			for (let index = 0; index < expected.length; index += 1) {
+				const difference = firstCanonicalWapfDifference(expected[index], observed[index], path + "[" + index + "]");
+				if (difference) return difference;
+			}
+			return null;
+		}
+		if (expected && observed && typeof expected === "object" && typeof observed === "object") {
+			const expectedRecord = expected as Record<string, unknown>;
+			const observedRecord = observed as Record<string, unknown>;
+			const keys = [...new Set([...Object.keys(expectedRecord), ...Object.keys(observedRecord)])].sort();
+			for (const key of keys) {
+				if (!(key in expectedRecord)) return path + "." + key + ": unexpected key";
+				if (!(key in observedRecord)) return path + "." + key + ": missing key";
+				const difference = firstCanonicalWapfDifference(
+					expectedRecord[key], observedRecord[key], path + "." + key,
+				);
+				if (difference) return difference;
+			}
+			return null;
+		}
+		const compact = (value: unknown) => JSON.stringify(value)?.slice(0, 160) ?? String(value);
+		return path + ": expected " + compact(expected) + ", observed " + compact(observed);
 	}
 	function genericWapfFieldId(field: any) {
 		return String(field?.id ?? field?.key ?? "").trim();
@@ -13045,13 +13075,17 @@ function createServer() {
 							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
 						).json<any>();
 						const verifiedWapf = genericWapf(verified);
-						const verifiedHash = await genericWapfCanonicalHashOf(verifiedWapf.group);
+						const plannedCanonicalGroup = canonicalWapfValue(plan.updatedGroup);
+						const verifiedCanonicalGroup = canonicalWapfValue(verifiedWapf.group);
+						const verifiedHash = await genericWapfHashOf(verifiedCanonicalGroup);
+						const groupDifference = firstCanonicalWapfDifference(plannedCanonicalGroup, verifiedCanonicalGroup);
 						if (verified.id !== fabricArgs.product_id || verified.name !== fabricArgs.expected_product_name ||
 							verified.status !== expectedStatus || verified.catalog_visibility !== expectedCatalogVisibility ||
 							verifiedWapf.meta.id !== fabricArgs.expected_meta_data_id ||
-							verifiedHash !== plan.afterHash ||
+							verifiedHash !== plan.afterHash || groupDifference ||
 							verifiedWapf.group.fields.length !== plan.updatedGroup.fields.length) {
-							throw new Error("Post-write fabric verification failed.");
+							throw new Error("Post-write fabric verification failed: " +
+								(groupDifference ?? "product identity, state, metadata identity or field count changed") + ".");
 						}
 						return toolResult({
 							updated: true, verified: true, write_performed: true, environment: fabricEnvironment,
