@@ -14525,10 +14525,200 @@ function createServer() {
 	return server;
 }
 
+// Equinox has its own authenticated MCP endpoint. Never changes Blindmotion's env.
+const EQUINOX_ORIGIN = "https://equinoxwholesaleblinds.com.au";
+const equinoxEncoder = new TextEncoder();
+
+function equinoxSecret() {
+	const secret = (env as unknown as Record<string, string>).EQUINOX_MCP_TOKEN;
+	if (!secret || secret.length < 32) throw new Error("Set EQUINOX_MCP_TOKEN to a random secret of at least 32 characters before connecting Equinox.");
+	return secret;
+}
+
+async function equinoxSignature(text: string) {
+	const key = await crypto.subtle.importKey("raw", equinoxEncoder.encode(equinoxSecret()), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+	const bytes = new Uint8Array(await crypto.subtle.sign("HMAC", key, equinoxEncoder.encode(text)));
+	return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function equinoxEqual(a: string, b: string) {
+	if (a.length !== b.length) return false;
+	let mismatch = 0;
+	for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	return mismatch === 0;
+}
+
+function equinoxCanonical(value: any): string {
+	if (Array.isArray(value)) return "[" + value.map(equinoxCanonical).join(",") + "]";
+	if (value !== null && typeof value === "object") return "{" + Object.keys(value).sort().map(k => JSON.stringify(k) + ":" + equinoxCanonical(value[k])).join(",") + "}";
+	return JSON.stringify(value);
+}
+
+function equinoxRedact(value: any): any {
+	if (Array.isArray(value)) return value.map(equinoxRedact);
+	if (value && typeof value === "object" && [value.key, value.id, value.name].some(v => typeof v === "string" && /password|secret|token|consumer_key|api_key|authorization/i.test(v))) return { id: value.id, key: value.key, redacted: true };
+	if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, /password|secret|token|consumer_key|api_key|authorization/i.test(key) ? "[redacted]" : equinoxRedact(v)]));
+	return value;
+}
+
+function equinoxPath(path: string) {
+	if (!/^\/(?:wp\/v2|wc\/v3|wwp[^/]*\/v\d+|wholesale[^/]*\/v\d+)(?:\/[A-Za-z0-9_.~-]+)*$/.test(path) || path.includes("..")) throw new Error("Use a discovered WordPress, WooCommerce or Wholesale Suite REST route, not a URL.");
+	if (/application-passwords|\/batch(?:\/|$)/i.test(path)) throw new Error("Credential and batch routes are not available; use individual resource operations.");
+	return path;
+}
+
+async function equinoxRequest(path: string, method = "GET", query: Record<string, string> = {}, body?: any, media?: { filename: string; mime_type: string; base64: string }) {
+	const url = new URL("/wp-json" + path, EQUINOX_ORIGIN);
+	for (const [key, value] of Object.entries(query)) {
+		if (/^(?:_method|_jsonp|rest_route|callback)$/i.test(key)) throw new Error("REST routing overrides are not accepted.");
+		url.searchParams.set(key, value);
+	}
+	const headers: Record<string, string> = { Authorization: getWpWriteAuthHeader(), Accept: "application/json" };
+	let payload: BodyInit | undefined;
+	if (media) {
+		if (path !== "/wp/v2/media" || method !== "POST" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(media.filename) || !["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(media.mime_type)) throw new Error("Invalid media upload destination, filename or MIME type.");
+		const bytes = Uint8Array.from(atob(media.base64), c => c.charCodeAt(0));
+		if (!bytes.length || bytes.length > 4_000_000) throw new Error("Media must be between 1 byte and 4 MB.");
+		headers["Content-Type"] = media.mime_type;
+		headers["Content-Disposition"] = 'attachment; filename="' + media.filename + '"';
+		payload = bytes;
+	} else if (body !== undefined) {
+		headers["Content-Type"] = "application/json";
+		payload = JSON.stringify(body);
+	}
+	const response = await fetch(url.toString(), { method, headers, body: payload, redirect: "error", signal: AbortSignal.timeout(25000) });
+	const raw = await response.text();
+	let data: any;
+	try { data = JSON.parse(raw); } catch { throw new Error("Equinox returned non-JSON content (HTTP " + response.status + "). Check connectivity and WordPress REST availability."); }
+	if (!response.ok) throw new Error("Equinox REST request failed (HTTP " + response.status + ", code " + String(data?.code ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "") + "). No response body or credentials are exposed.");
+	return { data, total: response.headers.get("X-WP-Total"), total_pages: response.headers.get("X-WP-TotalPages") };
+}
+
+async function equinoxCatalog() {
+	const result = await equinoxRequest("/");
+	const index = result.data;
+	// The public REST index advertises the canonical WordPress home/site identity.
+	if (![index.url, index.home].some(v => { try { return new URL(String(v)).origin === EQUINOX_ORIGIN; } catch { return false; } })) throw new Error("Equinox REST index did not identify the expected site; no management operation allowed.");
+	return index;
+}
+
+function equinoxRoute(index: any, path: string, method: string) {
+	equinoxPath(path);
+	for (const [pattern, route] of Object.entries(index.routes ?? {}) as Array<[string, any]>) {
+		let matches = false;
+		try { matches = new RegExp("^(?:" + pattern.replace(/\(\?P</g, "(?<") + ")$").test(path); } catch { continue; }
+		if (!matches) continue;
+		const endpoints = route.endpoints ?? [];
+		if (endpoints.some((endpoint: any) => (Array.isArray(endpoint.methods) ? endpoint.methods : Object.keys(endpoint.methods ?? {})).includes(method))) return route;
+	}
+	throw new Error("The installed Equinox REST API does not advertise " + method + " " + path + ". A WordPress-side extension may be needed for this capability.");
+}
+
+const equinoxOperationSchema = z.object({
+	path: z.string().max(250),
+	method: z.enum(["POST", "PUT", "PATCH", "DELETE"]),
+	query: z.record(z.string(), z.string()).default({}),
+	body: z.record(z.string(), z.unknown()).optional(),
+	media: z.object({ filename: z.string(), mime_type: z.string(), base64: z.string().max(5_400_000) }).optional(),
+});
+type EquinoxOperation = z.infer<typeof equinoxOperationSchema>;
+
+async function equinoxBefore(operation: EquinoxOperation, index: any) {
+	// Collection POST is create. Singleton/update/delete operations must be readable.
+	const needsBefore = operation.method !== "POST" || /\/\d+$|\/settings$/.test(operation.path);
+	if (!needsBefore) return null;
+	equinoxRoute(index, operation.path, "GET");
+	const query = { ...operation.query };
+	delete query.force;
+	const result = await equinoxRequest(operation.path, "GET", query);
+	return { sha256: await sha256Hex(equinoxEncoder.encode(equinoxCanonical(result.data))), resource: equinoxRedact(result.data) };
+}
+
+async function equinoxPlan(operation: EquinoxOperation) {
+	if (operation.media && operation.body) throw new Error("Use either media bytes or a JSON body.");
+	if (operation.body && Object.keys(operation.body).some(k => /^_method$|^rest_route$/i.test(k))) throw new Error("REST routing overrides are not accepted.");
+	const index = await equinoxCatalog();
+	equinoxRoute(index, operation.path, operation.method);
+	const before = await equinoxBefore(operation, index);
+	return { operation_sha256: await sha256Hex(equinoxEncoder.encode(equinoxCanonical(operation))), before };
+}
+
+function createEquinoxServer() {
+	const server = new McpServer({ name: "Equinox Wholesale Management", version: "1.0.0" });
+	server.registerTool("manage_equinox", {
+		description: "Authenticated Equinox-only WordPress/WooCommerce/Wholesale Suite management. Discover installed REST routes and schemas, read resources, preview and apply creates, edits, publication, settings, customer and order changes, media uploads and deletions. No Blindmotion targets. Capability creation is not permission to send marketing, charge/refund payments, grant access or delete records: obtain task-specific user authorization. Unsupported plugin controls are reported explicitly. Every write uses the identical operation and a 10-minute signed preview token, with no automatic retries. Inspect route schemas first. Token can be replayed within its lifetime for collection creates: do not repeat an uncertain write; reconcile by reading first.",
+		inputSchema: z.object({
+			action: z.enum(["discover", "read", "preview", "apply"]),
+			path: z.string().max(250).optional(),
+			query: z.record(z.string(), z.string()).default({}),
+			operation: equinoxOperationSchema.optional(),
+			preview_token: z.string().max(2500).optional(),
+			confirmation: z.literal("CONFIRM EQUINOX WRITE").optional(),
+		}),
+	}, async args => {
+		try {
+			if (args.action === "discover") {
+				const index = await equinoxCatalog();
+				const me = await equinoxRequest("/wp/v2/users/me", "GET", { context: "edit" });
+				const routes = Object.fromEntries(Object.entries(index.routes ?? {}).filter(([p]) => /^\/(wp\/v2|wc\/v3|wwp[^/]*\/v\d+|wholesale[^/]*\/v\d+)(\/|$)/.test(p) && !/application-passwords|\/batch(?:\/|$)/.test(p)));
+				return toolResult({ site: EQUINOX_ORIGIN, authenticated_user_id: me.data.id, capabilities: me.data.capabilities ?? null, namespaces: index.namespaces, routes: args.path ? { [args.path]: equinoxRoute(index, args.path, "GET") } : routes, note: "Only installed REST-exposed controls are available. WAPF/Elementor metadata must be registered for REST editing; plugin-only admin screens, ERP exports and email automation integrations require their own supported interface. No external service is implicitly connected." });
+			}
+			if (args.action === "read") {
+				if (!args.path) throw new Error("path is required.");
+				equinoxRoute(await equinoxCatalog(), args.path, "GET");
+				return toolResult({ site: EQUINOX_ORIGIN, ...equinoxRedact(await equinoxRequest(args.path, "GET", args.query)) });
+			}
+			if (!args.operation) throw new Error("operation is required.");
+			if (args.action === "preview") {
+				const plan = await equinoxPlan(args.operation);
+				const claim = JSON.stringify({ site: EQUINOX_ORIGIN, operation_sha256: plan.operation_sha256, before_sha256: plan.before?.sha256 ?? null, expires: Date.now() + 600000 });
+				return toolResult({ site: EQUINOX_ORIGIN, write_performed: false, operation: equinoxRedact({ ...args.operation, media: args.operation.media ? { filename: args.operation.media.filename, mime_type: args.operation.media.mime_type, base64: "[bytes omitted]" } : undefined }), before: plan.before, preview_token: btoa(claim) + "." + await equinoxSignature(claim), note: "Preview does not execute a server-side validation mutation. Apply can trigger normal WooCommerce emails, webhooks and ERP hooks. Deletion may be permanent depending on route and force parameter. Collection creates cannot be rolled back or automatically retried." });
+			}
+			if (args.confirmation !== "CONFIRM EQUINOX WRITE" || !args.preview_token) throw new Error("Apply requires confirmation and the exact preview token.");
+			const parts = args.preview_token.split(".");
+			if (parts.length !== 2) throw new Error("Invalid preview token.");
+			const claim = atob(parts[0]);
+			if (!equinoxEqual(parts[1], await equinoxSignature(claim))) throw new Error("Invalid preview signature.");
+			const payload = JSON.parse(claim);
+			if (payload.site !== EQUINOX_ORIGIN || !Number.isFinite(payload.expires) || payload.expires < Date.now() || payload.expires > Date.now() + 600000) throw new Error("Preview expired or has invalid site/time.");
+			const current = await equinoxPlan(args.operation);
+			if (current.operation_sha256 !== payload.operation_sha256 || (current.before?.sha256 ?? null) !== payload.before_sha256) throw new Error("Operation or current resource changed. Preview again before writing.");
+			const result = await equinoxRequest(args.operation.path, args.operation.method, args.operation.query, args.operation.body, args.operation.media);
+			let readBack: any = null;
+			let verificationError: string | null = null;
+			if (args.operation.method !== "DELETE") {
+				try {
+					const path = args.operation.method === "POST" && !current.before && Number.isInteger(result.data?.id) ? args.operation.path + "/" + result.data.id : args.operation.path;
+					equinoxRoute(await equinoxCatalog(), path, "GET");
+					readBack = (await equinoxRequest(path)).data;
+				} catch { verificationError = "Write returned success but read-back failed. Do not repeat the mutation; inspect the resource."; }
+			}
+			return toolResult({ site: EQUINOX_ORIGIN, write_performed: true, response: equinoxRedact(result.data), read_back: equinoxRedact(readBack), verification_error: verificationError, rollback_performed: false, before: current.before });
+		} catch (error) { return toolError(error); }
+	});
+	return server;
+}
+
+const equinoxHandler = createMcpHandler(createEquinoxServer);
+
+async function routeEquinoxRequest(request: Request, runtimeEnv: Env, ctx: ExecutionContext) {
+	let secret: string;
+	try { secret = equinoxSecret(); } catch { return new Response("Equinox endpoint is not configured.", { status: 503 }); }
+	const supplied = request.headers.get("Authorization") ?? "";
+	if (!equinoxEqual(supplied, "Bearer " + secret)) return new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": "Bearer" } });
+	const url = new URL(request.url);
+	url.pathname = "/mcp";
+	return equinoxHandler(new Request(url, request), runtimeEnv, ctx);
+}
+
+
 const handler = createMcpHandler(createServer);
 
 export default {
 	fetch(request: Request, env: Env, ctx: ExecutionContext) {
+		if (new URL(request.url).pathname === "/equinox/mcp") {
+			return routeEquinoxRequest(request, env, ctx);
+		}
 		return handler(request, env, ctx);
 	},
 } satisfies ExportedHandler<Env>;
