@@ -4060,29 +4060,12 @@ function createServer() {
 	);
 
 	server.registerTool(
-		"inspect_production_sample_routing",
-		{
-			description:
-				"Read current live Blindmotion sample-routing snippet 11 for comparison with staging. Fixed live origin and snippet identity, GET only, no activation, execution, contact synchronization or email changes. Returns a source hash and credential-redacted PHP source; parity remains unverified until reviewed.",
-			inputSchema: z.object({}).strict(),
-		},
-		async () => {
-			try {
-				const workerEnv = env as unknown as Record<string, string>;
-				return toolResult(await readProductionSampleRouting(workerEnv.WC_SITE, getWpWriteAuthHeader()));
-			} catch (error) {
-				return toolError(error);
-			}
-		},
-	);
-
-	server.registerTool(
 		"get_blindmotion_mcp_source_file",
 		{
 			description:
-				"Read one permitted Blindmotion MCP source file from the exact current main commit through the repository-scoped GitHub App. Returns content and blob SHA; cannot read any other path or ref.",
+				"Read one permitted Blindmotion MCP source file from the exact current main commit, or use path=production-sample-routing for the fixed live routing snippet 11. Production reads are GET-only, identity-checked, credential-redacted and hashed; they cannot execute PHP, update routing, activate snippets, change contacts or send email.",
 			inputSchema: z.object({
-				path: z.enum(["src/index.ts", "README.md"]),
+				path: z.enum(["src/index.ts", "README.md", "production-sample-routing"]),
 				expected_main_sha: z
 					.string()
 					.regex(/^[0-9a-f]{40}$/)
@@ -4091,6 +4074,11 @@ function createServer() {
 		},
 		async ({ path, expected_main_sha }) => {
 			try {
+				if (path === "production-sample-routing") {
+					if (expected_main_sha !== undefined) throw new Error("expected_main_sha applies only to repository source reads.");
+					const workerEnv = env as unknown as Record<string, string>;
+					return toolResult(await readProductionSampleRouting(workerEnv.WC_SITE, getWpWriteAuthHeader()));
+				}
 				const token = await getGithubInstallationToken();
 				const main = await getGithubMainState(token);
 				if (expected_main_sha !== undefined && main.sha !== expected_main_sha) {
