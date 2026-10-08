@@ -400,3 +400,76 @@ Validation: `node scripts/test-staging-work.mjs`. The PR tool ceiling is aligned
 The result includes activation status, retrieval time, the SHA-256 of the original source, and a redacted source copy. Credential-related lines, addresses and token-shaped string literals are suppressed. Redactions must be reviewed when comparing classification rules; this tool deliberately returns `production_parity_verified: false` and cannot declare production parity automatically. HTTP and malformed-JSON error bodies are withheld. A WordPress permission or unavailable-route error is reported without changing the server's capabilities or permissions.
 
 Run `node --test scripts/test-production-sample-routing-read.mjs` for the fixed-origin read, identity, redaction, error-body and response-size regression checks. After deployment, use this read together with staging `inspect_routing` to finish PR #47's current-source comparison before any live email changes.
+
+
+## Equinox wholesale management endpoint
+
+Equinox has a separate `/equinox/mcp` endpoint on this Worker, exposing one
+`manage_equinox` tool with discover/read/preview/apply actions. The existing
+Blindmotion endpoint and its environment selection remain unchanged.
+
+### Deployment and authentication
+
+1. Merge/deploy this change.
+2. Store a cryptographically random secret (at least 32 characters) as the encrypted
+   Cloudflare binding `EQUINOX_MCP_TOKEN`. Do not put it in source or chat.
+3. Configure an MCP client that supports a Bearer Authorization header to use the
+   Worker's `/equinox/mcp` endpoint with this secret. If the client's connector
+   requires OAuth, implement OAuth or use a supported authenticated gateway before
+   connecting; this patch does not implement OAuth.
+4. Call discover. It verifies Equinox's REST index identity and authenticates against
+   users/me using the existing `WP_USERNAME` and `WP_APPLICATION_PASSWORD`.
+   This reuse was explicitly requested by the site owner. These must actually be
+   valid on Equinox; a shared interactive password does not establish application
+   password validity. Credentials never leave the Worker except to the fixed HTTPS
+   Equinox origin. Redirects are refused.
+
+Missing/short endpoint secrets return 503; absent/wrong Bearer credentials return
+401. No Equinox tool is registered on the original unauthenticated MCP endpoint.
+The target is fixed to https://equinoxwholesaleblinds.com.au; no arbitrary origin,
+credential override or Blindmotion environment mutation is supported.
+
+### Scope
+
+This is a write-enabled management interface, not a read-only connection.
+It supports installed REST routes in wp/v2, wc/v3 and Wholesale Suite namespaces:
+product/variation CRUD and publication, pricing and REST-visible metadata,
+pages/posts, media (including bounded JPEG/PNG/WebP/PDF uploads), customer and
+order management, coupons, shipping/tax/payment configuration and REST-visible
+WordPress/wholesale settings. Actual rights remain the WordPress user's rights.
+Use discover's live route schemas rather than guessing request bodies.
+Credential/application-password endpoints and bulk batch endpoints are excluded.
+
+Not every WordPress admin screen exposes REST controls. WAPF/Elementor private
+metadata, wholesale role approval/settings, plugin installation, ERP diagnostics,
+email marketing and support integrations may need a separate WordPress bridge or
+service connector. Discovery reports available routes; unsupported operations fail
+explicitly. This patch does not claim to connect unrelated external services.
+
+### Writes and operational limits
+
+Read the resource, preview one explicit operation, then apply the exact operation
+with its signed 10-minute preview token and CONFIRM EQUINOX WRITE.
+The token binds the site, method, path, query, body/media hash and existing-resource
+snapshot where applicable. Modified operations and stale snapshots fail before
+writing. No write happens during preview. API-level validation occurs on apply.
+HTTP success and read-back data are reported separately; compare returned fields
+with intent. A read-back failure after successful mutation is reported without
+retrying the write. Previous resource snapshots are returned but rollback is not
+automatic. Concurrent writes between validation and mutation are still possible.
+
+WooCommerce writes can invoke normal emails/webhooks/ERP integrations. Connection
+authorization is not authorization to send campaigns, charge/refund payments,
+grant users access or delete business records. Obtain the relevant task instruction.
+Deletion uses the route's normal semantics, including permanent deletion if the
+explicit reviewed request uses force=true. Media bytes are limited to 4 MB.
+Tokens are not durable single-use receipts; collection creates can be replayed
+during token lifetime. Never retry an uncertain create/payment/refund operation:
+reconcile the server state first. There is no durable idempotency store in this patch.
+
+Validation during preparation: TypeScript check of the new endpoint against the
+installed MCP/Agents/Zod dependencies, plus mocked-runtime tests for fail-closed
+authentication, fixed origin, rejected path/routing overrides, no redirects,
+non-mutating previews, tampered tokens/operations, stale-resource rejection,
+write/read-back, redaction and unsupported routes. Live Equinox connectivity,
+installed plugin routes and application-password acceptance remain deployment checks.
