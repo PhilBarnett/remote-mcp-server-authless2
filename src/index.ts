@@ -157,7 +157,7 @@ async function readProductionSampleRouting(
 		{
 			method: "GET",
 			headers: { Authorization: authorization, Accept: "application/json" },
-			redirect: "error",
+			redirect: "manual",
 			signal: AbortSignal.timeout(15_000),
 		},
 	);
