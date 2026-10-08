@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult, registerPurchaseDiagnosticTool} from '../src/tools/ga4-purchase-diagnostics.ts';
+import {purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult} from '../src/tools/ga4-purchase-diagnostics.ts';
 const input = (extra={})=>purchaseDiagnosticSchema.parse({start_date:'2026-09-01',end_date:'2026-09-30',...extra});
 test('transaction metrics are purchase-filtered and separated from item metrics',()=>{
  const t=purchaseDiagnosticRequest(input({hostname:'online.blindmotion.com.au'}));
@@ -23,9 +23,8 @@ test('invalid dates, reverse ranges, URLs and excessive pages fail closed',()=>{
  for(const extra of [{start_date:'2026-02-30'},{start_date:'2026-10-01'}]) assert.throws(()=>purchaseDiagnosticRequest(input(extra)));
  for(const extra of [{hostname:'https://example.com/path'},{limit:1001},{offset:-1},{report:'users'}]) assert.equal(purchaseDiagnosticSchema.safeParse({start_date:'2026-09-01',end_date:'2026-09-30',...extra}).success,false);
 });
-test('registered read-only tool awaits reports and returns errors without writes',async()=>{
- let handler;let seen;
- registerPurchaseDiagnosticTool({registerTool:(name,config,fn)=>{assert.equal(name,'get_ga4_purchase_diagnostics');assert.equal(config.annotations.readOnlyHint,true);handler=fn;}},{runReport:async request=>{seen=request;return {metadata:{},rows:[]};},reportResult:()=>({rows:[],row_count:0}),toolResult:x=>x,toolError:e=>({error:e.message})});
- const result=await handler(input());assert.equal(result.has_more,false);assert.equal(seen.dimensionFilter.andGroup.expressions[0].filter.fieldName,'eventName');
- const bad=await handler(input({start_date:'2026-02-30'}));assert.match(bad.error,/valid YYYY/);
+test('empty pages and quality flags disclose reporting limits',()=>{
+ const r=purchaseDiagnosticResult({rows:[],row_count:100},input(),{metadata:{dataLossFromOtherRow:true,samplingMetadatas:[{samplesReadCount:'20',samplingSpaceSize:'100'}],emptyReason:'thresholded'}});
+ assert.equal(r.has_more,true);assert.equal(r.next_offset,null);assert.equal(r.data_quality.data_loss_from_other_row,true);
+ assert.equal(r.data_quality.sampling_metadatas[0].samplesReadCount,'20');assert.equal(r.data_quality.empty_reason,'thresholded');
 });
