@@ -453,7 +453,11 @@ Equinox credentials are sent only to `https://equinoxwholesaleblinds.com.au`;
 redirects are refused. Existing hosting/REST connectivity issues may still need
 resolution independently of ChatGPT authentication.
 
-Access tokens expire after one hour; refresh grants expire after 30 days.
+Access tokens expire after one hour and are renewed automatically by the client.
+Each successful refresh extends the connection by another 30 days; there is no
+fixed monthly sign-in while refreshes continue. A connection with no successful
+refresh for 30 days expires and needs owner sign-in again. Revocation, lost client
+credentials or client-side connection failures can also require reconnection.
 Re-authorizing the same client/resource replaces its old grant. For emergency
 revocation delete its grants using the OAuth provider, or clear this dedicated
 `OAUTH_KV` namespace to revoke ALL connections. Rotating `MCP_OWNER_SECRET` only

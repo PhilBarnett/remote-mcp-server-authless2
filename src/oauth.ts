@@ -129,5 +129,7 @@ export function authenticatedMcp<E extends AuthEnv>(handler: (request: Request, 
 		requiredScopes: [MCP_SCOPE],
 		accessTokenTTL: 3600,
 		refreshTokenTTL: 2592000,
+		// Each successful refresh extends the grant by another 30 days.
+		refreshTokenIdleTTL: 2592000,
 	});
 }

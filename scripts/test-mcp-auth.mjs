@@ -124,8 +124,18 @@ try {
 	assert.equal(upstreamCalls.length, callCount);
 	assert.ok(upstreamCalls.some(call => call.origin === "https://equinoxwholesaleblinds.com.au"));
 	assert.ok(upstreamCalls.some(call => call.origin === "https://online.blindmotion.com.au"));
+	// Simulate a grant nearing expiry; refresh must extend it, not retain the old deadline.
+	const kv = await mf.getKVNamespace("OAUTH_KV");
+	const grants = await kv.list({ prefix: "grant:business-owner:" });
+	assert.equal(grants.keys.length, 1);
+	const grantKey = grants.keys[0].name;
+	const grant = await kv.get(grantKey, "json");
+	grant.expiresAt = Math.floor(Date.now() / 1000) + 300;
+	await kv.put(grantKey, JSON.stringify(grant), { expirationTtl: 300, metadata: grants.keys[0].metadata });
 	const refreshResponse = await formPost("/oauth/token", { grant_type: "refresh_token", refresh_token: token.refresh_token, client_id: client.client_id, resource });
 	assert.equal(refreshResponse.status, 200);
+	const renewedGrant = await kv.get(grantKey, "json");
+	assert.ok(renewedGrant.expiresAt > Math.floor(Date.now() / 1000) + 29 * 86400);
 	const refreshed = await refreshResponse.json();
 	assert.ok(refreshed.access_token && refreshed.refresh_token !== token.refresh_token);
 	const refreshedTools = await rpc(refreshed.access_token, "tools/list");
