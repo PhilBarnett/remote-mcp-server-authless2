@@ -126,6 +126,87 @@ async function wpFetch(path: string) {
 	return response;
 }
 
+// Production routing audit: fixed-origin GET only; never execute the returned PHP.
+function redactRoutingAuditSource(code: string) {
+	let redactions = 0;
+	const redact = () => { redactions++; return "/* [REDACTED FOR ROUTING AUDIT] */"; };
+	let source = code.replace(/^.*(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|authorization|bearer\s+)[^\r\n]*$/gim, redact);
+	source = source.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, redact);
+	// Hide token-shaped literals even when the assignment uses an unexpected name.
+	source = source.replace(/(['"])([A-Za-z0-9_+/.=-]{24,})\1/g, (_match, quote: string, value: string) => {
+		if (!/[A-Za-z]/.test(value) || !/[0-9]/.test(value)) return _match;
+		redactions++;
+		return quote + "[REDACTED TOKEN]" + quote;
+	});
+	return { source, redactions };
+}
+
+async function readProductionSampleRouting(
+	site: string,
+	authorization: string,
+	request: typeof fetch = fetch,
+) {
+	const origin = new URL(site);
+	if (
+		origin.origin !== "https://online.blindmotion.com.au" ||
+		(origin.pathname !== "/" && origin.pathname !== "") ||
+		origin.search || origin.hash || origin.username || origin.password
+	) throw new Error("Production routing audit requires the exact live Blindmotion origin.");
+	const response = await request(
+		"https://online.blindmotion.com.au/wp-json/code-snippets/v1/snippets/11",
+		{
+			method: "GET",
+			headers: { Authorization: authorization, Accept: "application/json" },
+			redirect: "error",
+			signal: AbortSignal.timeout(15_000),
+		},
+	);
+	// Do not expose remote error bodies: they can include credentials or private data.
+	if (!response.ok) throw new Error("Production routing source read failed: HTTP " + response.status);
+	if (!response.body) throw new Error("Production routing source response was empty.");
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	try {
+		while (true) {
+			const part = await reader.read();
+			if (part.done) break;
+			size += part.value.byteLength;
+			if (size > 262_144) throw new Error("Production routing source exceeds the audit size limit.");
+			chunks.push(part.value);
+		}
+	} finally {
+		await reader.cancel();
+		reader.releaseLock();
+	}
+	const bytes = new Uint8Array(size);
+	let offset = 0;
+	for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+	let snippet;
+	try { snippet = JSON.parse(new TextDecoder().decode(bytes)); }
+	catch { throw new Error("Production routing source returned invalid JSON."); }
+	if (
+		snippet?.id !== 11 || typeof snippet.code !== "string" ||
+		typeof snippet.active !== "boolean" ||
+		!/\bclass\s+BM_Sample_Routing\b/.test(snippet.code)
+	) throw new Error("Production snippet 11 failed routing identity verification.");
+	const sanitized = redactRoutingAuditSource(snippet.code);
+	return {
+		read_only: true,
+		environment: "live",
+		host: "online.blindmotion.com.au",
+		snippet_id: 11,
+		active: snippet.active,
+		source_sha256: await sha256Hex(new TextEncoder().encode(snippet.code)),
+		source: sanitized.source,
+		source_redactions: sanitized.redactions,
+		retrieved_at: new Date().toISOString(),
+		production_parity_verified: false,
+		write_performed: false,
+	};
+}
+// End production routing audit.
+
 async function wpAuthenticatedFetch(path: string) {
 	const workerEnv = env as unknown as Record<string, string>;
 	const url = new URL(`${workerEnv.WC_SITE}/wp-json/wp/v2/${path}`);
@@ -3972,6 +4053,23 @@ function createServer() {
 						merge_tool_available: false,
 					},
 				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"inspect_production_sample_routing",
+		{
+			description:
+				"Read current live Blindmotion sample-routing snippet 11 for comparison with staging. Fixed live origin and snippet identity, GET only, no activation, execution, contact synchronization or email changes. Returns a source hash and credential-redacted PHP source; parity remains unverified until reviewed.",
+			inputSchema: z.object({}).strict(),
+		},
+		async () => {
+			try {
+				const workerEnv = env as unknown as Record<string, string>;
+				return toolResult(await readProductionSampleRouting(workerEnv.WC_SITE, getWpWriteAuthHeader()));
 			} catch (error) {
 				return toolError(error);
 			}

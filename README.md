@@ -392,3 +392,11 @@ This single tool replaces the former Visualizer-only deployment tool without inc
 Bridge 1.1.0 adds actions to `manage_staging_blindmotion_plugin_deployment`: `read_source`, `inspect_routing`, `inspect_content`, `preview_content`, `apply_content`. Reads do not schedule or sync contacts. Product edits require the inspected SHA-256 and exact preview-plan SHA-256, permit only description/short_description, and verify read-back with rollback. Use the returned before text with a fresh preview to revert. These operations use the existing dedicated staging credentials and require no browser session. Install the updated bridge before using the new actions. Elementor template editing and routing code mutation remain outside this interface.
 
 Validation: `node scripts/test-staging-work.mjs`. The PR tool ceiling is aligned to the existing 97 tools; these actions add no registered tools.
+
+## Production sample-routing source audit
+
+`inspect_production_sample_routing` reads only the current live Code Snippets record 11 using the existing WordPress application-password binding. It accepts no URL, path, snippet ID or write arguments. The fixed HTTPS origin, GET method, redirect rejection, 15-second timeout, 256 KiB response cap and `BM_Sample_Routing` class check prevent expanding the operation into arbitrary admin access. It never evaluates PHP, activates snippets, synchronizes contacts or sends email.
+
+The result includes activation status, retrieval time, the SHA-256 of the original source, and a redacted source copy. Credential-related lines, addresses and token-shaped string literals are suppressed. Redactions must be reviewed when comparing classification rules; this tool deliberately returns `production_parity_verified: false` and cannot declare production parity automatically. HTTP and malformed-JSON error bodies are withheld. A WordPress permission or unavailable-route error is reported without changing the server's capabilities or permissions.
+
+Run `node --test scripts/test-production-sample-routing-read.mjs` for the fixed-origin read, identity, redaction, error-body and response-size regression checks. After deployment, use this read together with staging `inspect_routing` to finish PR #47's current-source comparison before any live email changes.
