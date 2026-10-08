@@ -1,3 +1,4 @@
+import { purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult } from "./tools/ga4-purchase-diagnostics";
 import { canonicalItemReporting } from "./tools/ga4-item-reporting";
 import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from "./tools/roller-cohort";
 import { env } from "cloudflare:workers";
@@ -124,6 +125,87 @@ async function wpFetch(path: string) {
 
 	return response;
 }
+
+// Production routing audit: fixed-origin GET only; never execute the returned PHP.
+function redactRoutingAuditSource(code: string) {
+	let redactions = 0;
+	const redact = () => { redactions++; return "/* [REDACTED FOR ROUTING AUDIT] */"; };
+	let source = code.replace(/^.*(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|authorization|bearer\s+)[^\r\n]*$/gim, redact);
+	source = source.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, redact);
+	// Hide token-shaped literals even when the assignment uses an unexpected name.
+	source = source.replace(/(['"])([A-Za-z0-9_+/.=-]{24,})\1/g, (_match, quote: string, value: string) => {
+		if (!/[A-Za-z]/.test(value) || !/[0-9]/.test(value)) return _match;
+		redactions++;
+		return quote + "[REDACTED TOKEN]" + quote;
+	});
+	return { source, redactions };
+}
+
+async function readProductionSampleRouting(
+	site: string,
+	authorization: string,
+	request: typeof fetch = fetch,
+) {
+	const origin = new URL(site);
+	if (
+		origin.origin !== "https://online.blindmotion.com.au" ||
+		(origin.pathname !== "/" && origin.pathname !== "") ||
+		origin.search || origin.hash || origin.username || origin.password
+	) throw new Error("Production routing audit requires the exact live Blindmotion origin.");
+	const response = await request(
+		"https://online.blindmotion.com.au/wp-json/code-snippets/v1/snippets/11",
+		{
+			method: "GET",
+			headers: { Authorization: authorization, Accept: "application/json" },
+			redirect: "error",
+			signal: AbortSignal.timeout(15_000),
+		},
+	);
+	// Do not expose remote error bodies: they can include credentials or private data.
+	if (!response.ok) throw new Error("Production routing source read failed: HTTP " + response.status);
+	if (!response.body) throw new Error("Production routing source response was empty.");
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	try {
+		while (true) {
+			const part = await reader.read();
+			if (part.done) break;
+			size += part.value.byteLength;
+			if (size > 262_144) throw new Error("Production routing source exceeds the audit size limit.");
+			chunks.push(part.value);
+		}
+	} finally {
+		await reader.cancel();
+		reader.releaseLock();
+	}
+	const bytes = new Uint8Array(size);
+	let offset = 0;
+	for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+	let snippet;
+	try { snippet = JSON.parse(new TextDecoder().decode(bytes)); }
+	catch { throw new Error("Production routing source returned invalid JSON."); }
+	if (
+		snippet?.id !== 11 || typeof snippet.code !== "string" ||
+		typeof snippet.active !== "boolean" ||
+		!/\bclass\s+BM_Sample_Routing\b/.test(snippet.code)
+	) throw new Error("Production snippet 11 failed routing identity verification.");
+	const sanitized = redactRoutingAuditSource(snippet.code);
+	return {
+		read_only: true,
+		environment: "live",
+		host: "online.blindmotion.com.au",
+		snippet_id: 11,
+		active: snippet.active,
+		source_sha256: await sha256Hex(new TextEncoder().encode(snippet.code)),
+		source: sanitized.source,
+		source_redactions: sanitized.redactions,
+		retrieved_at: new Date().toISOString(),
+		production_parity_verified: false,
+		write_performed: false,
+	};
+}
+// End production routing audit.
 
 async function wpAuthenticatedFetch(path: string) {
 	const workerEnv = env as unknown as Record<string, string>;
@@ -808,8 +890,14 @@ async function stagingPluginDeploymentRequest(body: unknown) {
 async function productImageWcFetch(environment: ProductImageEnvironment, path: string) {
 	if (environment === "live") return wcFetch(path);
 	const access = stagingProductImageAccess();
-	const response = await fetch(`${access.baseUrl}/wp-json/wc/v3/${path}`, {
-		headers: { Authorization: access.auth, Accept: "application/json" },
+	const url = new URL(`${access.baseUrl}/wp-json/wc/v3/${path}`);
+	url.searchParams.set("_blindmotion_read", crypto.randomUUID());
+	const response = await fetch(url.toString(), {
+		headers: {
+			Authorization: access.auth,
+			Accept: "application/json",
+			"Cache-Control": "no-cache, no-store",
+		},
 	});
 	if (!response.ok) {
 		throw new Error(`Staging WooCommerce request failed: ${response.status} ${await response.text()}`);
@@ -3975,9 +4063,9 @@ function createServer() {
 		"get_blindmotion_mcp_source_file",
 		{
 			description:
-				"Read one permitted Blindmotion MCP source file from the exact current main commit through the repository-scoped GitHub App. Returns content and blob SHA; cannot read any other path or ref.",
+				"Read one permitted Blindmotion MCP source file from the exact current main commit, or use path=production-sample-routing for the fixed live routing snippet 11. Production reads are GET-only, identity-checked, credential-redacted and hashed; they cannot execute PHP, update routing, activate snippets, change contacts or send email.",
 			inputSchema: z.object({
-				path: z.enum(["src/index.ts", "README.md"]),
+				path: z.enum(["src/index.ts", "README.md", "production-sample-routing"]),
 				expected_main_sha: z
 					.string()
 					.regex(/^[0-9a-f]{40}$/)
@@ -3986,6 +4074,11 @@ function createServer() {
 		},
 		async ({ path, expected_main_sha }) => {
 			try {
+				if (path === "production-sample-routing") {
+					if (expected_main_sha !== undefined) throw new Error("expected_main_sha applies only to repository source reads.");
+					const workerEnv = env as unknown as Record<string, string>;
+					return toolResult(await readProductionSampleRouting(workerEnv.WC_SITE, getWpWriteAuthHeader()));
+				}
 				const token = await getGithubInstallationToken();
 				const main = await getGithubMainState(token);
 				if (expected_main_sha !== undefined && main.sha !== expected_main_sha) {
@@ -9427,15 +9520,24 @@ function createServer() {
 		"get_ga4_ecommerce_performance",
 		{
 			description:
-				"Return Blindmotion GA4 ecommerce item views, cart additions, purchases and item revenue for a date range.",
+				"Return Blindmotion GA4 ecommerce item funnel performance (default), or read-only purchase diagnostics by transaction/item, date and hostname with pagination and data-quality flags. Diagnostic modes support WooCommerce reconciliation without changing collection.",
 			inputSchema: z.object({
 				start_date: z.string(),
 				end_date: z.string(),
-				limit: z.number().int().min(1).max(250).default(100),
+				limit: z.number().int().min(1).max(1000).default(100),
+				report_mode: z.enum(["funnel", "transactions", "purchase_items"]).default("funnel"),
+				hostname: purchaseDiagnosticSchema.shape.hostname,
+				offset: purchaseDiagnosticSchema.shape.offset,
 			}),
 		},
-		async ({ start_date, end_date, limit }) => {
+		async ({ start_date, end_date, limit, report_mode, hostname, offset }) => {
 			try {
+				if (report_mode !== "funnel") {
+					const input = purchaseDiagnosticSchema.parse({start_date, end_date, limit, hostname, offset, report: report_mode === "purchase_items" ? "items" : "transactions"});
+					const report = await ga4RunReport(purchaseDiagnosticRequest(input));
+					return toolResult(purchaseDiagnosticResult(ga4ReportResult(report, start_date, end_date), input, report));
+				}
+				if (limit > 250 || offset !== 0 || hostname !== undefined) throw new Error("Funnel mode supports limit <= 250 and no hostname/offset. Use a purchase diagnostic report_mode for those parameters.");
 				const report = await ga4RunReport({
 					dateRanges: [{ startDate: start_date, endDate: end_date }],
 					dimensions: [{ name: "itemId" }, { name: "itemName" }],
@@ -13072,20 +13174,40 @@ function createServer() {
 							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
 						});
 						const verified = await (
-							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
+							await productImageWcFetch(
+								fabricEnvironment,
+								"products/" + fabricArgs.product_id +
+									"?context=edit&_blindmotion_verify=" + crypto.randomUUID(),
+							)
 						).json<any>();
 						const verifiedWapf = genericWapf(verified);
 						const plannedCanonicalGroup = canonicalWapfValue(plan.updatedGroup);
 						const verifiedCanonicalGroup = canonicalWapfValue(verifiedWapf.group);
 						const verifiedHash = await genericWapfHashOf(verifiedCanonicalGroup);
 						const groupDifference = firstCanonicalWapfDifference(plannedCanonicalGroup, verifiedCanonicalGroup);
+						const plannedFieldIds = plan.updatedGroup.fields.map((field: any) => genericWapfFieldId(field));
+						const verifiedFieldIds = verifiedWapf.group.fields.map((field: any) => genericWapfFieldId(field));
+						const missingFieldIds = plannedFieldIds.filter((id: string) => !verifiedFieldIds.includes(id));
+						const unexpectedFieldIds = verifiedFieldIds.filter((id: string) => !plannedFieldIds.includes(id));
+						const selectorPersistence = fabricArgs.families.map((family) => {
+							const selector = verifiedWapf.group.fields.find((field: any) =>
+								genericWapfFieldId(field) === family.selector_field_id);
+							return {
+								role: family.role,
+								choice_persisted: Boolean(selector?.options?.choices?.some((choice: any) =>
+									String(choice?.slug ?? "") === family.new_choice_slug)),
+							};
+						});
 						if (verified.id !== fabricArgs.product_id || verified.name !== fabricArgs.expected_product_name ||
 							verified.status !== expectedStatus || verified.catalog_visibility !== expectedCatalogVisibility ||
 							verifiedWapf.meta.id !== fabricArgs.expected_meta_data_id ||
 							verifiedHash !== plan.afterHash || groupDifference ||
 							verifiedWapf.group.fields.length !== plan.updatedGroup.fields.length) {
 							throw new Error("Post-write fabric verification failed: " +
-								(groupDifference ?? "product identity, state, metadata identity or field count changed") + ".");
+								(groupDifference ?? "product identity, state, metadata identity or field count changed") +
+								"; missing field IDs=" + JSON.stringify(missingFieldIds) +
+								"; unexpected field IDs=" + JSON.stringify(unexpectedFieldIds) +
+								"; selector persistence=" + JSON.stringify(selectorPersistence) + ".");
 						}
 						return toolResult({
 							updated: true, verified: true, write_performed: true, environment: fabricEnvironment,
@@ -13103,7 +13225,11 @@ function createServer() {
 							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }],
 						});
 						const rolledBack = await (
-							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
+							await productImageWcFetch(
+								fabricEnvironment,
+								"products/" + fabricArgs.product_id +
+									"?context=edit&_blindmotion_rollback_verify=" + crypto.randomUUID(),
+							)
 						).json<any>();
 						if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
 							throw new Error("Fabric update failed and exact rollback verification also failed.");
@@ -13159,6 +13285,24 @@ function createServer() {
 									pricing_amount: compactPricingAmount(choice?.pricing_amount),
 									has_image: Boolean(choice?.image),
 								})),
+								storage_shape: {
+									field_keys: Object.keys(field ?? {}).sort(),
+									option_keys: Object.keys(field?.options ?? {}).sort(),
+									conditionals: Array.isArray(field?.conditionals)
+										? field.conditionals.map((group: any) => ({
+												group_keys: Object.keys(group ?? {}).sort(),
+												rules: Array.isArray(group?.rules)
+													? group.rules.map((rule: any) => ({
+															condition: rule?.condition ?? null,
+															value: rule?.value ?? null,
+															field: rule?.field ?? null,
+															generated: rule?.generated ?? null,
+															keys: Object.keys(rule ?? {}).sort(),
+														}))
+													: [],
+											}))
+										: [],
+								},
 							};
 						}),
 						read_only: true,
