@@ -1,3 +1,4 @@
+import { registerPurchaseDiagnosticTool } from "./tools/ga4-purchase-diagnostics";
 import { canonicalItemReporting } from "./tools/ga4-item-reporting";
 import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from "./tools/roller-cohort";
 import { env } from "cloudflare:workers";
@@ -9455,6 +9456,8 @@ function createServer() {
 			}
 		},
 	);
+
+	registerPurchaseDiagnosticTool(server, { runReport: ga4RunReport, reportResult: ga4ReportResult, toolResult, toolError });
 
 	/* Generic, parameter-driven WAPF option inspection and guarded copy. */
 	const genericWapfId = z.number().int().positive();
