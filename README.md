@@ -395,7 +395,7 @@ Validation: `node scripts/test-staging-work.mjs`. The PR tool ceiling is aligned
 
 ## Production sample-routing source audit
 
-`inspect_production_sample_routing` reads only the current live Code Snippets record 11 using the existing WordPress application-password binding. It accepts no URL, path, snippet ID or write arguments. The fixed HTTPS origin, GET method, redirect rejection, 15-second timeout, 256 KiB response cap and `BM_Sample_Routing` class check prevent expanding the operation into arbitrary admin access. It never evaluates PHP, activates snippets, synchronizes contacts or sends email.
+`get_blindmotion_mcp_source_file({path: "production-sample-routing"})` reads only the current live Code Snippets record 11 using the existing WordPress application-password binding. This additional fixed selector accepts no caller-supplied URL, snippet ID or write arguments, and adds no registered tool. The fixed HTTPS origin, GET method, redirect rejection, 15-second timeout, 256 KiB response cap and `BM_Sample_Routing` class check prevent expanding the operation into arbitrary admin access. It never evaluates PHP, activates snippets, synchronizes contacts or sends email.
 
 The result includes activation status, retrieval time, the SHA-256 of the original source, and a redacted source copy. Credential-related lines, addresses and token-shaped string literals are suppressed. Redactions must be reviewed when comparing classification rules; this tool deliberately returns `production_parity_verified: false` and cannot declare production parity automatically. HTTP and malformed-JSON error bodies are withheld. A WordPress permission or unavailable-route error is reported without changing the server's capabilities or permissions.
 
