@@ -1,3 +1,4 @@
+import { purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult } from "./tools/ga4-purchase-diagnostics";
 import { canonicalItemReporting } from "./tools/ga4-item-reporting";
 import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from "./tools/roller-cohort";
 import { env } from "cloudflare:workers";
@@ -9433,15 +9434,24 @@ function createServer() {
 		"get_ga4_ecommerce_performance",
 		{
 			description:
-				"Return Blindmotion GA4 ecommerce item views, cart additions, purchases and item revenue for a date range.",
+				"Return Blindmotion GA4 ecommerce item funnel performance (default), or read-only purchase diagnostics by transaction/item, date and hostname with pagination and data-quality flags. Diagnostic modes support WooCommerce reconciliation without changing collection.",
 			inputSchema: z.object({
 				start_date: z.string(),
 				end_date: z.string(),
-				limit: z.number().int().min(1).max(250).default(100),
+				limit: z.number().int().min(1).max(1000).default(100),
+				report_mode: z.enum(["funnel", "transactions", "purchase_items"]).default("funnel"),
+				hostname: purchaseDiagnosticSchema.shape.hostname,
+				offset: purchaseDiagnosticSchema.shape.offset,
 			}),
 		},
-		async ({ start_date, end_date, limit }) => {
+		async ({ start_date, end_date, limit, report_mode, hostname, offset }) => {
 			try {
+				if (report_mode !== "funnel") {
+					const input = purchaseDiagnosticSchema.parse({start_date, end_date, limit, hostname, offset, report: report_mode === "purchase_items" ? "items" : "transactions"});
+					const report = await ga4RunReport(purchaseDiagnosticRequest(input));
+					return toolResult(purchaseDiagnosticResult(ga4ReportResult(report, start_date, end_date), input, report));
+				}
+				if (limit > 250 || offset !== 0 || hostname !== undefined) throw new Error("Funnel mode supports limit <= 250 and no hostname/offset. Use a purchase diagnostic report_mode for those parameters.");
 				const report = await ga4RunReport({
 					dateRanges: [{ startDate: start_date, endDate: end_date }],
 					dimensions: [{ name: "itemId" }, { name: "itemName" }],

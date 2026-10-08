@@ -48,7 +48,7 @@ jobs:
         run: node scripts/test-staging-work.mjs
 
       - name: Test roller cohorts and GA4 item reporting
-        run: node --experimental-strip-types --test scripts/test-roller-cohort.mjs scripts/test-ga4-item-reporting.mjs
+        run: node --experimental-strip-types --test scripts/test-roller-cohort.mjs scripts/test-ga4-item-reporting.mjs scripts/test-ga4-purchase-diagnostics.mjs
 
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 97
