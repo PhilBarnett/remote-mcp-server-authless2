@@ -9478,6 +9478,18 @@ function createServer() {
 	async function genericWapfHashOf(value: unknown) {
 		return sha256Hex(new TextEncoder().encode(JSON.stringify(value)));
 	}
+	function canonicalWapfValue(value: unknown): unknown {
+		if (Array.isArray(value)) return value.map(canonicalWapfValue);
+		if (!value || typeof value !== "object") return value;
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, item]) => [key, canonicalWapfValue(item)]),
+		);
+	}
+	async function genericWapfCanonicalHashOf(value: unknown) {
+		return genericWapfHashOf(canonicalWapfValue(value));
+	}
 	function genericWapfFieldId(field: any) {
 		return String(field?.id ?? field?.key ?? "").trim();
 	}
@@ -12915,7 +12927,7 @@ function createServer() {
 			variableRuleCounts[family.role] = clonedRules;
 		}
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
-		const afterHash = upload ? await genericWapfHashOf(updatedGroup) : null;
+		const afterHash = upload ? await genericWapfCanonicalHashOf(updatedGroup) : null;
 		const manifest = args.families.map((family) => ({
 			...family,
 			colours: family.colours.map((colour) => {
@@ -13033,7 +13045,7 @@ function createServer() {
 							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
 						).json<any>();
 						const verifiedWapf = genericWapf(verified);
-						const verifiedHash = await genericWapfHashOf(verifiedWapf.group);
+						const verifiedHash = await genericWapfCanonicalHashOf(verifiedWapf.group);
 						if (verified.id !== fabricArgs.product_id || verified.name !== fabricArgs.expected_product_name ||
 							verified.status !== expectedStatus || verified.catalog_visibility !== expectedCatalogVisibility ||
 							verifiedWapf.meta.id !== fabricArgs.expected_meta_data_id ||
