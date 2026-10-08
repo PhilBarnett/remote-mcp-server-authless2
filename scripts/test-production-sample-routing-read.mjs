@@ -21,7 +21,7 @@ test("fixed authenticated GET, hash and active source, no parity claim", async (
     count++;
     assert.equal(url, "https://online.blindmotion.com.au/wp-json/code-snippets/v1/snippets/11");
     assert.equal(options.method, "GET");
-    assert.equal(options.redirect, "error");
+    assert.equal(options.redirect, "manual");
     assert.equal(options.headers.Authorization, "Basic test");
     assert.equal(options.body, undefined);
     return response(valid);
@@ -61,4 +61,13 @@ test("error and malformed JSON responses do not disclose their bodies", async ()
 test("reject oversized responses", async () => {
   await assert.rejects(read("https://online.blindmotion.com.au", "Basic test",
     async () => response({ ...valid, code: valid.code + "x".repeat(262144) })), /size limit/);
+});
+
+
+test("redirect is rejected without following or exposing its target", async () => {
+ let calls=0;
+ await assert.rejects(read("https://online.blindmotion.com.au", "Basic test", async () => {
+   calls++; return new Response("private redirect body", {status:302,headers:{Location:"https://credential-sink.invalid/"}});
+ }), /HTTP 302/);
+ assert.equal(calls,1);
 });
