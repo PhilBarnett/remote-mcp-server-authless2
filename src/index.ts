@@ -12915,7 +12915,7 @@ function createServer() {
 			variableRuleCounts[family.role] = clonedRules;
 		}
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(updatedGroup) : updatedGroup;
-		const afterHash = upload ? await genericWapfHashOf(updatedValue) : null;
+		const afterHash = upload ? await genericWapfHashOf(updatedGroup) : null;
 		const manifest = args.families.map((family) => ({
 			...family,
 			colours: family.colours.map((colour) => {
@@ -13033,7 +13033,7 @@ function createServer() {
 							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
 						).json<any>();
 						const verifiedWapf = genericWapf(verified);
-						const verifiedHash = await genericWapfHashOf(verifiedWapf.meta.value);
+						const verifiedHash = await genericWapfHashOf(verifiedWapf.group);
 						if (verified.id !== fabricArgs.product_id || verified.name !== fabricArgs.expected_product_name ||
 							verified.status !== expectedStatus || verified.catalog_visibility !== expectedCatalogVisibility ||
 							verifiedWapf.meta.id !== fabricArgs.expected_meta_data_id ||
