@@ -13072,7 +13072,11 @@ function createServer() {
 							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }],
 						});
 						const verified = await (
-							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
+							await productImageWcFetch(
+								fabricEnvironment,
+								"products/" + fabricArgs.product_id +
+									"?context=edit&_blindmotion_verify=" + crypto.randomUUID(),
+							)
 						).json<any>();
 						const verifiedWapf = genericWapf(verified);
 						const plannedCanonicalGroup = canonicalWapfValue(plan.updatedGroup);
@@ -13119,7 +13123,11 @@ function createServer() {
 							meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }],
 						});
 						const rolledBack = await (
-							await productImageWcFetch(fabricEnvironment, "products/" + fabricArgs.product_id)
+							await productImageWcFetch(
+								fabricEnvironment,
+								"products/" + fabricArgs.product_id +
+									"?context=edit&_blindmotion_rollback_verify=" + crypto.randomUUID(),
+							)
 						).json<any>();
 						if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
 							throw new Error("Fabric update failed and exact rollback verification also failed.");
