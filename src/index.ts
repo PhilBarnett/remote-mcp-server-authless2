@@ -808,8 +808,14 @@ async function stagingPluginDeploymentRequest(body: unknown) {
 async function productImageWcFetch(environment: ProductImageEnvironment, path: string) {
 	if (environment === "live") return wcFetch(path);
 	const access = stagingProductImageAccess();
-	const response = await fetch(`${access.baseUrl}/wp-json/wc/v3/${path}`, {
-		headers: { Authorization: access.auth, Accept: "application/json" },
+	const url = new URL(`${access.baseUrl}/wp-json/wc/v3/${path}`);
+	url.searchParams.set("_blindmotion_read", crypto.randomUUID());
+	const response = await fetch(url.toString(), {
+		headers: {
+			Authorization: access.auth,
+			Accept: "application/json",
+			"Cache-Control": "no-cache, no-store",
+		},
 	});
 	if (!response.ok) {
 		throw new Error(`Staging WooCommerce request failed: ${response.status} ${await response.text()}`);
