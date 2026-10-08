@@ -13079,13 +13079,29 @@ function createServer() {
 						const verifiedCanonicalGroup = canonicalWapfValue(verifiedWapf.group);
 						const verifiedHash = await genericWapfHashOf(verifiedCanonicalGroup);
 						const groupDifference = firstCanonicalWapfDifference(plannedCanonicalGroup, verifiedCanonicalGroup);
+						const plannedFieldIds = plan.updatedGroup.fields.map((field: any) => genericWapfFieldId(field));
+						const verifiedFieldIds = verifiedWapf.group.fields.map((field: any) => genericWapfFieldId(field));
+						const missingFieldIds = plannedFieldIds.filter((id: string) => !verifiedFieldIds.includes(id));
+						const unexpectedFieldIds = verifiedFieldIds.filter((id: string) => !plannedFieldIds.includes(id));
+						const selectorPersistence = fabricArgs.families.map((family) => {
+							const selector = verifiedWapf.group.fields.find((field: any) =>
+								genericWapfFieldId(field) === family.selector_field_id);
+							return {
+								role: family.role,
+								choice_persisted: Boolean(selector?.options?.choices?.some((choice: any) =>
+									String(choice?.slug ?? "") === family.new_choice_slug)),
+							};
+						});
 						if (verified.id !== fabricArgs.product_id || verified.name !== fabricArgs.expected_product_name ||
 							verified.status !== expectedStatus || verified.catalog_visibility !== expectedCatalogVisibility ||
 							verifiedWapf.meta.id !== fabricArgs.expected_meta_data_id ||
 							verifiedHash !== plan.afterHash || groupDifference ||
 							verifiedWapf.group.fields.length !== plan.updatedGroup.fields.length) {
 							throw new Error("Post-write fabric verification failed: " +
-								(groupDifference ?? "product identity, state, metadata identity or field count changed") + ".");
+								(groupDifference ?? "product identity, state, metadata identity or field count changed") +
+								"; missing field IDs=" + JSON.stringify(missingFieldIds) +
+								"; unexpected field IDs=" + JSON.stringify(unexpectedFieldIds) +
+								"; selector persistence=" + JSON.stringify(selectorPersistence) + ".");
 						}
 						return toolResult({
 							updated: true, verified: true, write_performed: true, environment: fabricEnvironment,
@@ -13159,6 +13175,24 @@ function createServer() {
 									pricing_amount: compactPricingAmount(choice?.pricing_amount),
 									has_image: Boolean(choice?.image),
 								})),
+								storage_shape: {
+									field_keys: Object.keys(field ?? {}).sort(),
+									option_keys: Object.keys(field?.options ?? {}).sort(),
+									conditionals: Array.isArray(field?.conditionals)
+										? field.conditionals.map((group: any) => ({
+												group_keys: Object.keys(group ?? {}).sort(),
+												rules: Array.isArray(group?.rules)
+													? group.rules.map((rule: any) => ({
+															condition: rule?.condition ?? null,
+															value: rule?.value ?? null,
+															field: rule?.field ?? null,
+															generated: rule?.generated ?? null,
+															keys: Object.keys(rule ?? {}).sort(),
+														}))
+													: [],
+											}))
+										: [],
+								},
 							};
 						}),
 						read_only: true,
