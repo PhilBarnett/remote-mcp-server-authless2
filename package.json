@@ -12,9 +12,11 @@
 		"start": "wrangler dev",
 		"cf-typegen": "wrangler types",
 		"type-check": "tsc --noEmit",
-		"audit:mcp-tools": "node scripts/audit-mcp-tools.mjs"
+		"audit:mcp-tools": "node scripts/audit-mcp-tools.mjs",
+		"test:mcp-auth": "node scripts/test-mcp-auth.mjs"
 	},
 	"dependencies": {
+		"@cloudflare/workers-oauth-provider": "1.2.3",
 		"@modelcontextprotocol/sdk": "1.30.0",
 		"@modelcontextprotocol/server": "2.0.0",
 		"agents": "^0.20.1",
