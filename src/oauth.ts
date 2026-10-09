@@ -67,6 +67,9 @@ export const authorizationHandler = {
 				const consent = await oauth.beginConsent(parsed);
 				for (const [key, value] of Object.entries(secureHeaders)) consent.headers.set(key, value);
 				consent.headers.set("Content-Type", "text/html; charset=utf-8");
+				// no-referrer makes browsers send Origin: null on a native form POST.
+				// Keep the same-origin POST verifiable without leaking referrers cross-origin.
+				consent.headers.set("Referrer-Policy", "same-origin");
 				return new Response(consentPage(details, consent.handle), { headers: consent.headers });
 			}
 			if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { ...secureHeaders, Allow: "GET, POST" } });

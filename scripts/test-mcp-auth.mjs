@@ -68,6 +68,7 @@ try {
 	const begin = () => call("/authorize?" + new URLSearchParams(authParams));
 	const page = await begin();
 	assert.equal(page.status, 200);
+	assert.equal(page.headers.get("Referrer-Policy"), "same-origin");
 	const html = await page.text();
 	assert.ok(!html.includes('<script>alert("x")</script>'));
 	assert.ok(html.includes("&#60;script&#62;"));
@@ -78,6 +79,7 @@ try {
 	assert.equal((await formPost("/authorize", login, { Origin: "https://evil.example", Cookie: cookie })).status, 403);
 	assert.equal((await formPost("/authorize", { ...login, owner_secret: "wrong" }, { Origin: origin, Cookie: cookie })).status, 401);
 	assert.equal((await formPost("/authorize", login, { Origin: origin })).status, 400);
+	assert.equal((await formPost("/authorize", login, { Origin: "null", Cookie: cookie })).status, 403);
 	const approved = await formPost("/authorize", login, { Origin: origin, Cookie: cookie });
 	assert.equal(approved.status, 302);
 	const redirect = new URL(approved.headers.get("Location"));
