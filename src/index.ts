@@ -1,3 +1,4 @@
+import { authenticatedMcp, type AuthEnv } from "./oauth";
 import { purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult } from "./tools/ga4-purchase-diagnostics";
 import { canonicalItemReporting } from "./tools/ga4-item-reporting";
 import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from "./tools/roller-cohort";
@@ -4810,26 +4811,21 @@ function createServer() {
 		"get_products",
 		{
 			description:
-				"Return Blindmotion WooCommerce products including product ID, SKU, price, status and categories.",
+				"Return WooCommerce products for an explicit site target: blindmotion (default for compatibility) or equinox. Includes product ID, SKU, price, status and categories. Other Blindmotion-specific tools do not switch sites.",
 			inputSchema: z.object({
+				site: z.enum(["blindmotion", "equinox"]).default("blindmotion"),
 				search: z.string().optional(),
 				status: z.string().optional(),
 				category_id: z.number().int().optional(),
 				limit: z.number().int().min(1).max(100),
 			}),
 		},
-		async ({ search, status, category_id, limit }) => {
+		async ({ site, search, status, category_id, limit }) => {
 			try {
-				const response = await wcFetch("products", {
-					search,
-					status,
-					category: category_id,
-					per_page: limit,
-					orderby: "title",
-					order: "asc",
-				});
-
-				const products = await response.json<any[]>();
+				const query = { search, status, category: category_id, per_page: limit, orderby: "title", order: "asc" };
+				const products: any[] = site === "equinox"
+					? (await equinoxRequest("/wc/v3/products", "GET", Object.fromEntries(Object.entries(query).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])))).data
+					: await (await wcFetch("products", query)).json<any[]>();
 
 				const safeProducts = products.map((product) => ({
 					id: product.id,
@@ -14666,16 +14662,17 @@ function createServer() {
 		},
 	);
 
+	registerEquinoxTools(server);
 	return server;
 }
 
-// Equinox has its own authenticated MCP endpoint. Never changes Blindmotion's env.
+// Equinox shares the OAuth-protected MCP connection. Never changes Blindmotion's env.
 const EQUINOX_ORIGIN = "https://equinoxwholesaleblinds.com.au";
 const equinoxEncoder = new TextEncoder();
 
 function equinoxSecret() {
 	const secret = (env as unknown as Record<string, string>).EQUINOX_MCP_TOKEN;
-	if (!secret || secret.length < 32) throw new Error("Set EQUINOX_MCP_TOKEN to a random secret of at least 32 characters before connecting Equinox.");
+	if (!secret || secret.length < 32) throw new Error("Set EQUINOX_MCP_TOKEN to a random secret of at least 32 characters before previewing Equinox writes.");
 	return secret;
 }
 
@@ -14717,7 +14714,12 @@ async function equinoxRequest(path: string, method = "GET", query: Record<string
 		if (/^(?:_method|_jsonp|rest_route|callback)$/i.test(key)) throw new Error("REST routing overrides are not accepted.");
 		url.searchParams.set(key, value);
 	}
-	const headers: Record<string, string> = { Authorization: getWpWriteAuthHeader(), Accept: "application/json" };
+	const credentials = env as unknown as Record<string, string>;
+	const username = credentials.EQUINOX_WP_USERNAME;
+	const password = credentials.EQUINOX_WP_APPLICATION_PASSWORD;
+	if (!username || !password) throw new Error("Set EQUINOX_WP_USERNAME and EQUINOX_WP_APPLICATION_PASSWORD for the explicit Equinox target. Blindmotion credentials are never used as a fallback.");
+	const basic = btoa(String.fromCharCode(...new TextEncoder().encode(username + ":" + password)));
+	const headers: Record<string, string> = { Authorization: "Basic " + basic, Accept: "application/json" };
 	let payload: BodyInit | undefined;
 	if (media) {
 		if (path !== "/wp/v2/media" || method !== "POST" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(media.filename) || !["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(media.mime_type)) throw new Error("Invalid media upload destination, filename or MIME type.");
@@ -14730,7 +14732,8 @@ async function equinoxRequest(path: string, method = "GET", query: Record<string
 		headers["Content-Type"] = "application/json";
 		payload = JSON.stringify(body);
 	}
-	const response = await fetch(url.toString(), { method, headers, body: payload, redirect: "error", signal: AbortSignal.timeout(25000) });
+	const response = await fetch(url.toString(), { method, headers, body: payload, redirect: "manual", signal: AbortSignal.timeout(25000) });
+	if (response.status >= 300 && response.status < 400) throw new Error("Equinox redirected the REST request. Redirects are refused; check the fixed site URL and hosting configuration.");
 	const raw = await response.text();
 	let data: any;
 	try { data = JSON.parse(raw); } catch { throw new Error("Equinox returned non-JSON content (HTTP " + response.status + "). Check connectivity and WordPress REST availability."); }
@@ -14787,11 +14790,11 @@ async function equinoxPlan(operation: EquinoxOperation) {
 	return { operation_sha256: await sha256Hex(equinoxEncoder.encode(equinoxCanonical(operation))), before };
 }
 
-function createEquinoxServer() {
-	const server = new McpServer({ name: "Equinox Wholesale Management", version: "1.0.0" });
+function registerEquinoxTools(server: McpServer) {
 	server.registerTool("manage_equinox", {
 		description: "Authenticated Equinox-only WordPress/WooCommerce/Wholesale Suite management. Discover installed REST routes and schemas, read resources, preview and apply creates, edits, publication, settings, customer and order changes, media uploads and deletions. No Blindmotion targets. Capability creation is not permission to send marketing, charge/refund payments, grant access or delete records: obtain task-specific user authorization. Unsupported plugin controls are reported explicitly. Every write uses the identical operation and a 10-minute signed preview token, with no automatic retries. Inspect route schemas first. Token can be replayed within its lifetime for collection creates: do not repeat an uncertain write; reconcile by reading first.",
 		inputSchema: z.object({
+			site: z.literal("equinox"),
 			action: z.enum(["discover", "read", "preview", "apply"]),
 			path: z.string().max(250).optional(),
 			query: z.record(z.string(), z.string()).default({}),
@@ -14843,28 +14846,6 @@ function createEquinoxServer() {
 	return server;
 }
 
-const equinoxHandler = createMcpHandler(createEquinoxServer);
-
-async function routeEquinoxRequest(request: Request, runtimeEnv: Env, ctx: ExecutionContext) {
-	let secret: string;
-	try { secret = equinoxSecret(); } catch { return new Response("Equinox endpoint is not configured.", { status: 503 }); }
-	const supplied = request.headers.get("Authorization") ?? "";
-	if (!equinoxEqual(supplied, "Bearer " + secret)) return new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": "Bearer" } });
-	const url = new URL(request.url);
-	url.pathname = "/mcp";
-	return equinoxHandler(new Request(url, request), runtimeEnv, ctx);
-}
-
-
 const handler = createMcpHandler(createServer);
 
-export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		if (new URL(request.url).pathname === "/equinox/mcp") {
-			return routeEquinoxRequest(request, env, ctx);
-		}
-		return handler(request, env, ctx);
-	},
-} satisfies ExportedHandler<Env>;
-
-
+export default authenticatedMcp<Env & AuthEnv>(handler);

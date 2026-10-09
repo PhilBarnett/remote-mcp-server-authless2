@@ -1,6 +1,6 @@
 # Building a Remote MCP Server on Cloudflare (Without Auth)
 
-This example allows you to deploy a stateless remote MCP server that doesn't require authentication on Cloudflare Workers. It implements the MCP 2026-07-28 specification while remaining compatible with legacy clients for ordinary tool calls.
+This business MCP server requires OAuth authentication on Cloudflare Workers. It implements the MCP 2026-07-28 specification while remaining compatible with legacy clients for ordinary tool calls.
 
 ## Get started:
 
@@ -402,32 +402,73 @@ The result includes activation status, retrieval time, the SHA-256 of the origin
 Run `node --test scripts/test-production-sample-routing-read.mjs` for the fixed-origin read, identity, redaction, error-body and response-size regression checks. After deployment, use this read together with staging `inspect_routing` to finish PR #47's current-source comparison before any live email changes.
 
 
-## Equinox wholesale management endpoint
+## OAuth connection and explicit Equinox target
 
-Equinox has a separate `/equinox/mcp` endpoint on this Worker, exposing one
-`manage_equinox` tool with discover/read/preview/apply actions. The existing
-Blindmotion endpoint and its environment selection remain unchanged.
+The existing `/mcp` URL now requires OAuth for every MCP request. Cloudflare's
+`@cloudflare/workers-oauth-provider` owns discovery, dynamic client registration,
+PKCE authorization codes, token validation, refresh and revocation. The owner signs
+in on the Worker's own consent page with `MCP_OWNER_SECRET`. This is a single-owner
+connection with full `business:manage` access, not multi-user account management.
+The old static-Bearer `/equinox/mcp` route returns 410 and cannot bypass OAuth.
 
-### Deployment and authentication
+### Deploy and reconnect in this order
 
-1. Merge/deploy this change.
-2. Store a cryptographically random secret (at least 32 characters) as the encrypted
-   Cloudflare binding `EQUINOX_MCP_TOKEN`. Do not put it in source or chat.
-3. Configure an MCP client that supports a Bearer Authorization header to use the
-   Worker's `/equinox/mcp` endpoint with this secret. If the client's connector
-   requires OAuth, implement OAuth or use a supported authenticated gateway before
-   connecting; this patch does not implement OAuth.
-4. Call discover. It verifies Equinox's REST index identity and authenticates against
-   users/me using the existing `WP_USERNAME` and `WP_APPLICATION_PASSWORD`.
-   This reuse was explicitly requested by the site owner. These must actually be
-   valid on Equinox; a shared interactive password does not establish application
-   password validity. Credentials never leave the Worker except to the fixed HTTPS
-   Equinox origin. Redirects are refused.
+1. Before merging, set the encrypted Worker secret `MCP_OWNER_SECRET` to a NEW
+   password-manager-generated random value (recommended 64 random characters;
+   accepted length 32–512). In Cloudflare open this Worker → Settings → Variables
+   and Secrets → Add → Secret. Keep it in your password manager; do not paste it
+   into GitHub, chat, URLs, or an MCP tool argument. This is the owner sign-in
+   password, not a WordPress password and not an OAuth client secret.
+2. Deploy. `wrangler.jsonc` declares `OAUTH_KV`; current Wrangler automatically
+   provisions its KV namespace or reuses the deployed binding. The deploy API
+   token must have Workers KV Storage edit permission. If it does not, create the
+   namespace through Cloudflare and bind it as `OAUTH_KV` before deployment.
+   Do not use a production KV namespace in a preview deployment.
+3. Verify unauthenticated POST `/mcp` returns 401 with `WWW-Authenticate` including
+   `resource_metadata`. Discovery at `/.well-known/oauth-authorization-server`
+   advertises `/authorize`, `/oauth/token`, and `/oauth/register`.
+4. Reconnect the existing ChatGPT custom MCP connection with authentication set
+   to OAuth and the SAME URL:
+   `https://remote-mcp-server-authless2.phil-cd4.workers.dev/mcp`.
+   Leave OAuth client ID/secret blank for dynamic registration when offered.
+   If the existing connection's authentication mode cannot be edited, recreate
+   its registration using this URL and OAuth. Enter the owner password only on
+   this Worker's `/authorize` page after checking the requesting client and
+   redirect hostname. Approve the connection. No Auth0 account is required.
+5. Confirm an authenticated Blindmotion read succeeds before configuring Equinox.
+6. Set `EQUINOX_WP_USERNAME` and encrypted `EQUINOX_WP_APPLICATION_PASSWORD` using
+   an application password created on Equinox. There is NO fallback to the
+   Blindmotion `WP_USERNAME`, `WP_APPLICATION_PASSWORD` or WooCommerce keys.
+   Keep the existing `EQUINOX_MCP_TOKEN` (random, 32+ characters) for signing write
+   previews only; it is no longer an MCP access credential.
+7. Call `manage_equinox` with `site: "equinox", action: "discover"`, then
+   `get_products` with `site: "equinox", limit: 1`. Discovery verifies the REST
+   site's identity and application-password acceptance before any management.
 
-Missing/short endpoint secrets return 503; absent/wrong Bearer credentials return
-401. No Equinox tool is registered on the original unauthenticated MCP endpoint.
-The target is fixed to https://equinoxwholesaleblinds.com.au; no arbitrary origin,
-credential override or Blindmotion environment mutation is supported.
+`get_products.site` accepts `blindmotion` (default for old calls) and `equinox`.
+`manage_equinox.site` requires the explicit literal `equinox` and exposes
+`discover/read/preview/apply`. Other domain-specific Blindmotion tools remain
+Blindmotion-only. No arbitrary URL or global environment switching is accepted.
+Equinox credentials are sent only to `https://equinoxwholesaleblinds.com.au`;
+redirects are refused. Existing hosting/REST connectivity issues may still need
+resolution independently of ChatGPT authentication.
+
+Access tokens expire after one hour and are renewed automatically by the client.
+Each successful refresh extends the connection by another 30 days; there is no
+fixed monthly sign-in while refreshes continue. A connection with no successful
+refresh for 30 days expires and needs owner sign-in again. Revocation, lost client
+credentials or client-side connection failures can also require reconnection.
+Re-authorizing the same client/resource replaces its old grant. For emergency
+revocation delete its grants using the OAuth provider, or clear this dedicated
+`OAUTH_KV` namespace to revoke ALL connections. Rotating `MCP_OWNER_SECRET` only
+changes future sign-ins; it does not itself revoke issued tokens. Do not roll
+back to the old unauthenticated Worker as an authentication recovery procedure.
+
+The literal-name source audit ceiling is 98, including the previously separate
+Equinox management tool. That regex audit does not count six dynamically
+registered tools; the runtime test verifies the actual 104-tool list has unique
+names (103 existing Blindmotion tools plus Equinox management).
+`npm run test:mcp-auth` exercises the real Worker in Cloudflare's local runtime.
 
 ### Scope
 
@@ -473,3 +514,4 @@ authentication, fixed origin, rejected path/routing overrides, no redirects,
 non-mutating previews, tampered tokens/operations, stale-resource rejection,
 write/read-back, redaction and unsupported routes. Live Equinox connectivity,
 installed plugin routes and application-password acceptance remain deployment checks.
+
