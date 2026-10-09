@@ -69,6 +69,7 @@ try {
 	const page = await begin();
 	assert.equal(page.status, 200);
 	assert.equal(page.headers.get("Referrer-Policy"), "same-origin");
+	assert.ok(page.headers.get("Content-Security-Policy").includes("form-action 'self' https://chatgpt.com;"));
 	const html = await page.text();
 	assert.ok(!html.includes('<script>alert("x")</script>'));
 	assert.ok(html.includes("&#60;script&#62;"));
@@ -81,7 +82,7 @@ try {
 	assert.equal((await formPost("/authorize", login, { Origin: origin })).status, 400);
 	assert.equal((await formPost("/authorize", login, { Origin: "null", Cookie: cookie })).status, 403);
 	const approved = await formPost("/authorize", login, { Origin: origin, Cookie: cookie });
-	assert.equal(approved.status, 302);
+	assert.equal(approved.status, 303);
 	const redirect = new URL(approved.headers.get("Location"));
 	assert.equal(redirect.origin, "https://chatgpt.com");
 	assert.equal(redirect.searchParams.get("state"), "test-state");

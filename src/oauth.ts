@@ -64,12 +64,19 @@ export const authorizationHandler = {
 					return new Response("Unsupported permission requested.", { status: 400, headers: secureHeaders });
 				}
 				const details = await oauth.describeConsent(parsed);
+				// Chrome applies form-action to the OAuth redirect after the POST too.
+				// Only include the origin of the callback already validated by the provider.
+				const callbackOrigin = new URL(details.redirectUri).origin;
+				if (!/^https?:\/\/[a-zA-Z0-9.\[\]:-]+$/.test(callbackOrigin)) {
+					return new Response("Unsupported callback origin", { status: 400, headers: secureHeaders });
+				}
 				const consent = await oauth.beginConsent(parsed);
 				for (const [key, value] of Object.entries(secureHeaders)) consent.headers.set(key, value);
 				consent.headers.set("Content-Type", "text/html; charset=utf-8");
 				// no-referrer makes browsers send Origin: null on a native form POST.
 				// Keep the same-origin POST verifiable without leaking referrers cross-origin.
 				consent.headers.set("Referrer-Policy", "same-origin");
+				consent.headers.set("Content-Security-Policy", secureHeaders["Content-Security-Policy"].replace("form-action 'self'", "form-action 'self' " + callbackOrigin));
 				return new Response(consentPage(details, consent.handle), { headers: consent.headers });
 			}
 			if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { ...secureHeaders, Allow: "GET, POST" } });
@@ -81,7 +88,7 @@ export const authorizationHandler = {
 			const handle = form.get("handle") ?? "";
 			if (form.get("decision") !== "approve") {
 				const denied = await oauth.denyConsent(request, handle);
-				return new Response(null, { status: 302, headers: denied.headers });
+				return new Response(null, { status: 303, headers: denied.headers });
 			}
 			const secret = form.get("owner_secret") ?? "";
 			if (secret.length > 512 || !await matchesOwnerSecret(secret, env.MCP_OWNER_SECRET)) {
@@ -99,7 +106,7 @@ export const authorizationHandler = {
 			approved.headers.set("Location", redirectTo);
 			approved.headers.set("Cache-Control", "no-store");
 			approved.headers.set("Referrer-Policy", "no-referrer");
-			return new Response(null, { status: 302, headers: approved.headers });
+			return new Response(null, { status: 303, headers: approved.headers });
 		} catch (error) {
 			// Do not redirect from reconstructed form values or expose credential data.
 			if (error instanceof AuthorizationError || error instanceof CimdFetchError) {
