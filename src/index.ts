@@ -189,7 +189,7 @@ async function readProductionSampleRouting(
 	if (
 		snippet?.id !== 11 || typeof snippet.code !== "string" ||
 		typeof snippet.active !== "boolean" ||
-		!/\bclass\s+BM_Sample_Routing\b/.test(snippet.code)
+		!/\bclass\s+BM_Sample_Routing(?:_V[0-9]+)?\b/.test(snippet.code)
 	) throw new Error("Production snippet 11 failed routing identity verification.");
 	const sanitized = redactRoutingAuditSource(snippet.code);
 	return {
@@ -206,6 +206,57 @@ async function readProductionSampleRouting(
 		write_performed: false,
 	};
 }
+
+async function cleanupProductionSampleRouting(site: string, authorization: string, request: typeof fetch = fetch) {
+	const expectedOriginal = "01118f44ba0fae2428ab6957c4a69b9e9c2957407b83c97996d9a400f27000bf";
+	const before = await readProductionSampleRouting(site, authorization, request);
+	if (before.source_sha256 !== expectedOriginal || before.source_redactions !== 0) {
+		throw new Error("Routing source changed since cleanup review; no write performed.");
+	}
+	const boundary = before.source.indexOf("/** Blindmotion sample selection sync v1.0.2.");
+	if (boundary < 1 || !before.source.startsWith("/** Blindmotion sample selection sync v1.0.3.")) {
+		throw new Error("Unexpected routing version boundaries; no write performed.");
+	}
+	const cleaned = before.source.slice(0, boundary).trimEnd() + "\n";
+	if (
+		!cleaned.endsWith("BM_Sample_Routing_V103::init();\n") ||
+		(cleaned.match(/final class /g) || []).length !== 1 ||
+		!cleaned.includes("final class BM_Sample_Routing_V103")
+	) throw new Error("Cleanup must preserve exactly the reviewed current class; no write performed.");
+	const expectedClean = await sha256Hex(new TextEncoder().encode(cleaned));
+	async function write(code: string, active: boolean) {
+		const response = await request("https://online.blindmotion.com.au/wp-json/code-snippets/v1/snippets/11", {
+			method: "POST",
+			headers: { Authorization: authorization, Accept: "application/json", "Content-Type": "application/json" },
+			redirect: "manual", signal: AbortSignal.timeout(15_000),
+			body: JSON.stringify({ code, active }),
+		});
+		if (!response.ok) throw new Error("Routing cleanup write failed: HTTP " + response.status);
+	}
+	try {
+		await write(cleaned, before.active);
+		const after = await readProductionSampleRouting(site, authorization, request);
+		if (after.source_sha256 !== expectedClean || after.active !== before.active) throw new Error("Routing cleanup read-back verification failed.");
+		return { environment: "live", snippet_id: 11, active: after.active, original_source_sha256: expectedOriginal,
+			source_sha256: after.source_sha256, removed_legacy_versions: true, routing_version: "1.0.3",
+			write_performed: true, contact_sync_performed: false, email_settings_changed: false };
+	} catch {
+		// Only restore when current bytes are either our exact replacement or the reviewed original.
+		try {
+			const current = await readProductionSampleRouting(site, authorization, request);
+			if (current.source_sha256 !== expectedClean && current.source_sha256 !== expectedOriginal) {
+				throw new Error("Concurrent source change prevents automatic rollback.");
+			}
+			await write(before.source, before.active);
+			const restored = await readProductionSampleRouting(site, authorization, request);
+			if (restored.source_sha256 !== expectedOriginal || restored.active !== before.active) throw new Error("Rollback verification failed.");
+		} catch {
+			throw new Error("Routing cleanup did not verify and automatic rollback could not be confirmed; inspect snippet 11 before further changes.");
+		}
+		throw new Error("Routing cleanup did not verify; reviewed original code and activation state were restored.");
+	}
+}
+
 // End production routing audit.
 
 async function wpAuthenticatedFetch(path: string) {
@@ -4064,9 +4115,9 @@ function createServer() {
 		"get_blindmotion_mcp_source_file",
 		{
 			description:
-				"Read one permitted Blindmotion MCP source file from the exact current main commit, or use path=production-sample-routing for the fixed live routing snippet 11. Production reads are GET-only, identity-checked, credential-redacted and hashed; they cannot execute PHP, update routing, activate snippets, change contacts or send email.",
+				"Read one permitted Blindmotion MCP source file from the exact current main commit, or use path=production-sample-routing for the fixed live routing snippet 11. Production reads are GET-only, identity-checked, credential-redacted and hashed. MUTATION: path=production-sample-routing-cleanup removes only reviewed legacy blocks from live snippet 11, requires the exact reviewed source hash, preserves routing version and activation, verifies read-back and attempts guarded rollback on failure. It does not sync contacts or change email settings.",
 			inputSchema: z.object({
-				path: z.enum(["src/index.ts", "README.md", "production-sample-routing"]),
+				path: z.enum(["src/index.ts", "README.md", "production-sample-routing", "production-sample-routing-cleanup"]),
 				expected_main_sha: z
 					.string()
 					.regex(/^[0-9a-f]{40}$/)
@@ -4075,6 +4126,11 @@ function createServer() {
 		},
 		async ({ path, expected_main_sha }) => {
 			try {
+				if (path === "production-sample-routing-cleanup") {
+					if (expected_main_sha !== undefined) throw new Error("expected_main_sha does not apply to cleanup.");
+					const workerEnv = env as unknown as Record<string, string>;
+					return toolResult(await cleanupProductionSampleRouting(workerEnv.WC_SITE, getWpWriteAuthHeader()));
+				}
 				if (path === "production-sample-routing") {
 					if (expected_main_sha !== undefined) throw new Error("expected_main_sha applies only to repository source reads.");
 					const workerEnv = env as unknown as Record<string, string>;
