@@ -67,7 +67,7 @@ export const authorizationHandler = {
 				// Chrome applies form-action to the OAuth redirect after the POST too.
 				// Only include the origin of the callback already validated by the provider.
 				const callbackOrigin = new URL(details.redirectUri).origin;
-				if (!/^https?:\/\/[a-zA-Z0-9.\[\]:-]+$/.test(callbackOrigin)) {
+				if (!/^https?:\/\/[a-zA-Z0-9.[\]:-]+$/.test(callbackOrigin)) {
 					return new Response("Unsupported callback origin", { status: 400, headers: secureHeaders });
 				}
 				const consent = await oauth.beginConsent(parsed);
