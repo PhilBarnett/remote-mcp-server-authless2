@@ -9610,6 +9610,122 @@ function createServer() {
 		},
 	);
 
+	/* Staging-only publication control. Live products are never addressable here. */
+	server.registerTool(
+		"set_staging_product_publication_guarded",
+		{
+			description:
+				"Change only the publication status of one exactly identified staging WooCommerce product. Requires the expected current state, hidden/content hash guards and explicit confirmation; preserves catalogue visibility and every product field, verifies read-back and attempts rollback on failure. Cannot target live.",
+			inputSchema: z
+				.object({
+					product_id: z.number().int().positive(),
+					expected_product_name: z.string().trim().min(1).max(500),
+					expected_current_status: z.enum(["draft", "publish"]),
+					new_status: z.enum(["draft", "publish"]),
+					expected_catalog_visibility: z.enum(["visible", "catalog", "search", "hidden"]),
+					expected_meta_data_id: z.number().int().positive(),
+					expected_field_group_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+					confirmation: z.literal("CONFIRM STAGING PRODUCT PUBLICATION CHANGE"),
+				})
+				.refine((value) => value.expected_current_status !== value.new_status, {
+					message: "new_status must differ from expected_current_status.",
+				}),
+		},
+		async ({
+			product_id,
+			expected_product_name,
+			expected_current_status,
+			new_status,
+			expected_catalog_visibility,
+			expected_meta_data_id,
+			expected_field_group_sha256,
+		}) => {
+			let writeAttempted = false;
+			try {
+				const before = await (await productImageWcFetch("staging", "products/" + product_id)).json<any>();
+				if (
+					Number(before.id) !== product_id ||
+					String(before.name) !== expected_product_name ||
+					String(before.status) !== expected_current_status ||
+					String(before.catalog_visibility) !== expected_catalog_visibility
+				) {
+					throw new Error("Staging product identity or expected publication state changed; no write performed.");
+				}
+				const wapfMatches = (before.meta_data ?? []).filter(
+					(meta: any) => String(meta?.key) === "_wapf_fieldgroup",
+				);
+				if (
+					wapfMatches.length !== 1 ||
+					Number(wapfMatches[0]?.id) !== expected_meta_data_id
+				) {
+					throw new Error("Staging product WAPF metadata identity changed; no write performed.");
+				}
+				const beforeFieldGroupHash = await sha256Hex(
+					new TextEncoder().encode(JSON.stringify(wapfMatches[0].value)),
+				);
+				if (beforeFieldGroupHash !== expected_field_group_sha256) {
+					throw new Error("Staging product WAPF field group changed; re-inspect before publishing.");
+				}
+
+				writeAttempted = true;
+				await productImageWcWrite("staging", "products/" + product_id, { status: new_status });
+				const after = await (await productImageWcFetch("staging", "products/" + product_id)).json<any>();
+				const afterWapfMatches = (after.meta_data ?? []).filter(
+					(meta: any) => String(meta?.key) === "_wapf_fieldgroup",
+				);
+				const afterFieldGroupHash =
+					afterWapfMatches.length === 1
+						? await sha256Hex(new TextEncoder().encode(JSON.stringify(afterWapfMatches[0].value)))
+						: "";
+				if (
+					Number(after.id) !== product_id ||
+					String(after.name) !== expected_product_name ||
+					String(after.status) !== new_status ||
+					String(after.catalog_visibility) !== expected_catalog_visibility ||
+					afterWapfMatches.length !== 1 ||
+					Number(afterWapfMatches[0]?.id) !== expected_meta_data_id ||
+					afterFieldGroupHash !== expected_field_group_sha256
+				) {
+					throw new Error("Staging publication change failed read-back verification.");
+				}
+				return toolResult({
+					updated: true,
+					environment: "staging",
+					product_id,
+					product_name: after.name,
+					previous_status: expected_current_status,
+					status: after.status,
+					catalog_visibility: after.catalog_visibility,
+					meta_data_id: expected_meta_data_id,
+					field_group_sha256: afterFieldGroupHash,
+					live_target_available: false,
+				});
+			} catch (error) {
+				if (writeAttempted) {
+					try {
+						await productImageWcWrite("staging", "products/" + product_id, {
+							status: expected_current_status,
+						});
+						const restored = await (await productImageWcFetch("staging", "products/" + product_id)).json<any>();
+						if (
+							Number(restored.id) !== product_id ||
+							String(restored.name) !== expected_product_name ||
+							String(restored.status) !== expected_current_status ||
+							String(restored.catalog_visibility) !== expected_catalog_visibility
+						) {
+							throw new Error("Rollback read-back verification failed.");
+						}
+					} catch {
+						return toolError(
+							new Error("Staging publication change failed and rollback could not be verified; inspect the product before continuing."),
+						);
+					}
+				}
+				return toolError(error);
+			}
+		},
+	);
+
 	/* Generic, parameter-driven WAPF option inspection and guarded copy. */
 	const genericWapfId = z.number().int().positive();
 	const genericWapfIndex = z.number().int().min(0);
