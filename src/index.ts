@@ -240,7 +240,7 @@ async function cleanupProductionSampleRouting(site: string, authorization: strin
 		return { environment: "live", snippet_id: 11, active: after.active, original_source_sha256: expectedOriginal,
 			source_sha256: after.source_sha256, removed_legacy_versions: true, routing_version: "1.0.3",
 			write_performed: true, contact_sync_performed: false, email_settings_changed: false };
-	} catch (error) {
+	} catch {
 		// Only restore when current bytes are either our exact replacement or the reviewed original.
 		try {
 			const current = await readProductionSampleRouting(site, authorization, request);
