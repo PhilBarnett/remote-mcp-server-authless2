@@ -90,8 +90,19 @@ live sample product is never used as the write target.
   and a failed write is rolled back to the exact original WAPF value.
 
 No product IDs, product names, WAPF field IDs or fabric names are hardcoded in
-the reusable setup tools. Publishing the completed sample product remains a
-separate manual review decision.
+the reusable setup tools. Publishing the completed sample product remains a separate guarded review decision.
+The staging-only publication control below can perform that final status change
+without giving the MCP any live publication capability.
+
+## Guarded staging product publication
+
+`set_staging_product_publication_guarded` changes only the `draft`/`publish`
+status of one exactly identified product on the fixed Blindmotion staging origin.
+It requires the expected product name, current status, catalogue visibility, WAPF
+metadata ID and complete field-group SHA-256 plus the exact confirmation phrase
+`CONFIRM STAGING PRODUCT PUBLICATION CHANGE`. Catalogue visibility and WAPF
+content must remain unchanged. The tool verifies the result, attempts rollback
+on failure and has no live-site target.
 
 ## Guarded ZipGrip Performance Max builder
 

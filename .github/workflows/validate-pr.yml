@@ -54,7 +54,4 @@ jobs:
         run: npm run test:mcp-auth
 
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 98
-
-
-
+        run: npm run audit:mcp-tools -- --max 99

@@ -106,10 +106,11 @@ try {
 	const toolsText = await toolsResponse.text();
 	assert.ok(toolsText.includes("get_products"));
 	assert.ok(toolsText.includes("manage_equinox"));
+	assert.ok(toolsText.includes("set_staging_product_publication_guarded"));
 	const decode = text => JSON.parse(text.startsWith("event:") ? text.split("\n").find(line => line.startsWith("data: ")).slice(6) : text);
 	const listedTools = decode(toolsText).result.tools;
-	assert.equal(listedTools.length, 104);
-	assert.equal(new Set(listedTools.map(tool => tool.name)).size, 104);
+	assert.equal(listedTools.length, 105);
+	assert.equal(new Set(listedTools.map(tool => tool.name)).size, 105);
 	const management = listedTools.find(tool => tool.name === "manage_equinox");
 	assert.ok(management.inputSchema.required.includes("site"));
 	for (const [site, expected] of [["equinox", "Equinox test product"], ["blindmotion", "Blindmotion test product"]]) {
