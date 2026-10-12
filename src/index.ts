@@ -15,6 +15,7 @@ import { registerProductPromotionTools } from "./tools/product-promotion";
 import { registerFabricSampleOrderTool } from "./tools/fabric-sample-orders";
 import { registerChatgptAdsTools } from "./tools/chatgpt-ads";
 import { stagingWorkSchemas, runStagingWork } from "./tools/staging-work";
+import { assertProductImageEditAllowed, assertSameProductImageState, sameOptionValue, changeWapfChoiceLabels } from "./tools/product-option-edits";
 
 const COMMERCIAL_START_DATE = "2024-07-01";
 const GENUINE_ORDER_MIN_TOTAL = 20;
@@ -5956,7 +5957,7 @@ function createServer() {
 		"replace_product_option_image_guarded",
 		{
 			description:
-				"Upload a new WordPress attachment and replace exactly one product-option image reference on the caller-selected live or staging site, preserving the original attachment and a durable rollback record. Staging writes require draft/hidden state. Cannot delete media.",
+				"Upload a new WordPress attachment and replace exactly one product-option image reference, preserving the original attachment and rollback record. Staging requires hidden products; published staging products allow only exact WAPF choice-image paths. Revalidates current state and verifies the complete edited metadata, publication state and prices. Cannot delete media.",
 			inputSchema: z
 				.object({
 					environment: z.enum(["live", "staging"]).default("live"),
@@ -6014,9 +6015,7 @@ function createServer() {
 			try {
 				const productResponse = await productImageWcFetch(environment, `products/${product_id}`);
 				const product = await productResponse.json<any>();
-				if (environment === "staging" && (product.status !== "draft" || product.catalog_visibility !== "hidden")) {
-					throw new Error("Staging product must remain draft/hidden; no image uploaded or product write performed.");
-				}
+				assertProductImageEditAllowed(environment, product, custom_field_key, custom_field_path);
 				const matchingMeta = (product.meta_data ?? []).filter(
 					(item: any) =>
 						item.key === custom_field_key &&
@@ -6144,6 +6143,15 @@ function createServer() {
 					new_source_url: uploaded.source_url,
 				};
 				backups.push(backup);
+				const freshProduct = await (await productImageWcFetch(environment, `products/${product_id}`)).json<any>();
+				assertProductImageEditAllowed(environment, freshProduct, custom_field_key, custom_field_path);
+				assertSameProductImageState(product, freshProduct);
+				const freshMeta = (freshProduct.meta_data ?? []).find((item: any) => item.id === resolvedMetaDataId && item.key === custom_field_key);
+				const freshBackups = (freshProduct.meta_data ?? []).find((item: any) => item.key === backupKey)?.value ?? [];
+				if (!freshMeta || !sameOptionValue(meta.value, freshMeta.value) || !sameOptionValue(backupMeta?.value ?? [], freshBackups)) {
+					throw new Error("Product image metadata changed before write; uploaded media retained but product not modified.");
+				}
+				try {
 				const updateResponse = await productImageWcWrite(environment, `products/${product_id}`, {
 					meta_data: [
 						{
@@ -6179,6 +6187,10 @@ function createServer() {
 						"WooCommerce returned without verifying the paired WAPF attachment ID.",
 					);
 				}
+				const verifiedProduct = await (await productImageWcFetch(environment, `products/${product_id}`)).json<any>();
+				assertSameProductImageState(product, verifiedProduct);
+				const verifiedMeta = (verifiedProduct.meta_data ?? []).find((item: any) => item.id === resolvedMetaDataId && item.key === custom_field_key);
+				if (!verifiedMeta || !sameOptionValue(verifiedMeta.value, parsedValue)) throw new Error("Complete image-only metadata verification failed.");
 
 				return toolResult({
 					replaced: true,
@@ -6193,7 +6205,23 @@ function createServer() {
 					paired_attachment_updated: hasPairedAttachment,
 					backup,
 					original_attachment_deleted: false,
+					product_state_preserved: true,
+					complete_metadata_verified: true,
 				});
+				} catch (writeError) {
+					try {
+						await productImageWcWrite(environment, `products/${product_id}`, {meta_data: [
+							{id: resolvedMetaDataId, key: custom_field_key, value: meta.value},
+							{...(backupMeta?.id ? {id: backupMeta.id} : {}), key: backupKey, value: backupMeta?.value ?? []},
+						]});
+						const restored = await (await productImageWcFetch(environment, `products/${product_id}`)).json<any>();
+						const restoredMeta = (restored.meta_data ?? []).find((item: any) => item.id === resolvedMetaDataId && item.key === custom_field_key);
+						if (!restoredMeta || !sameOptionValue(restoredMeta.value, meta.value)) throw new Error("Original image metadata rollback verification failed.");
+					} catch (rollbackError) {
+						throw Object.assign(new Error("Image update failed and rollback was incomplete: " + String(writeError) + " | " + String(rollbackError)), {cause: rollbackError});
+					}
+					throw Object.assign(new Error("Image update failed; original metadata restored: " + String(writeError)), {cause: writeError});
+				}
 			} catch (error) {
 				return toolError(error);
 			}
@@ -10622,6 +10650,7 @@ function createServer() {
 	 * remain byte-for-byte equivalent in the parsed group. */
 	const wapfLabelField = z.object({
 		field_id: z.string().trim().min(1).max(120),
+		choice_slug: z.string().trim().min(1).max(120).optional(),
 		expected_label: z.string().min(1).max(300),
 		new_label: z.string().min(1).max(300),
 	});
@@ -10663,18 +10692,7 @@ function createServer() {
 		}
 		const wapf = genericWapf(product);
 		const originalHash = await genericWapfHashOf(wapf.meta.value);
-		const ids = args.fields.map((item) => item.field_id);
-		if (new Set(ids).size !== ids.length) throw new Error("Duplicate selected WAPF field ID.");
-		const changed = structuredClone(wapf.group);
-		const fieldResults = args.fields.map((item) => {
-			if (item.expected_label === item.new_label) throw new Error("Selected label is unchanged.");
-			const matches = changed.fields.filter((field: any) => genericWapfFieldId(field) === item.field_id);
-			if (matches.length !== 1 || matches[0].type !== "number" || matches[0].label !== item.expected_label) {
-				throw new Error("Selected field ID, number type, or exact old label no longer matches: " + item.field_id);
-			}
-			matches[0].label = item.new_label;
-			return { field_id: item.field_id, before: item.expected_label, after: item.new_label };
-		});
+		const {changed, results: fieldResults} = changeWapfChoiceLabels(wapf.group, args.fields);
 		const updatedValue = typeof wapf.meta.value === "string" ? JSON.stringify(changed) : changed;
 		const updatedHash = await genericWapfHashOf(updatedValue);
 		return { product, wapf, originalHash, updatedValue, updatedHash, fieldResults };
@@ -11022,7 +11040,7 @@ function createServer() {
 		"copy_wapf_product_option_fields_guarded",
 		{
 			description:
-				"Copy selected WAPF fields between products or preview/apply exact number-field label changes on one live or staging product. Both guarded writes change only _wapf_fieldgroup, verify the result and roll back on failure; label edits preserve field IDs, pricing, calculations and conditions.",
+				"Copy selected WAPF fields or preview/apply exact number-field labels and selected choice labels on live or staging. Supply choice_slug for a choice label. Writes preserve IDs, slugs, prices, images, calculations, conditions and product publication; complete-group verification and rollback apply.",
 			inputSchema: z.union([z.object({
 				source_product_id: genericWapfId,
 				source_product_name: z.string().trim().min(1).max(500),

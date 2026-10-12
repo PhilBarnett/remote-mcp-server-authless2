@@ -39,8 +39,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Test product image and choice-label guards
+        run: node --experimental-strip-types scripts/test-product-option-edits.mjs
+
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 98
+        run: npm run audit:mcp-tools -- --max 99
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
