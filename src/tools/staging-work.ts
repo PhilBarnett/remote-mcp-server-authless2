@@ -11,6 +11,7 @@ const content = z
 const product = { product_id: z.number().int().positive() };
 const edit = { ...product, expected_sha256: digest, changes: content };
 export const stagingWorkSchemas = [
+	z.object({ action: z.literal("inspect_tracking") }).strict(),
 	z
 		.object({
 			action: z.literal("read_source"),
@@ -50,7 +51,12 @@ export async function runStagingWork(
 	write: boolean,
 ) {
 	try {
-		const result = await request(input);
+		const parsed = stagingWorkSchema.parse(input);
+		const result = await request(parsed);
+		if (parsed.action === "inspect_tracking" &&
+			(result.diagnostic_version !== 1 || result.evidence_kind !== "server_configuration_only" ||
+			result.browser_events_verified !== false || result.production_isolation_verified !== false))
+			throw new Error("Unsupported tracking diagnostic or unverified evidence claims.");
 		if (
 			result.environment !== "staging" ||
 			result.host !== "staging-online.blindmotion.com.au" ||
