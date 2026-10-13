@@ -1,4 +1,5 @@
 import { authenticatedMcp, type AuthEnv } from "./oauth";
+import { EQUINOX_PRICING_PATHS, verifyEquinoxPricing, assertEquinoxPricingReadOnly } from "./equinox-pricing";
 import { purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult } from "./tools/ga4-purchase-diagnostics";
 import { canonicalItemReporting } from "./tools/ga4-item-reporting";
 import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from "./tools/roller-cohort";
@@ -14893,12 +14894,14 @@ function equinoxRedact(value: any): any {
 }
 
 function equinoxPath(path: string) {
+	if (EQUINOX_PRICING_PATHS.some(allowed => allowed === path)) return path;
 	if (!/^\/(?:wp\/v2|wc\/v3|wwp[^/]*\/v\d+|wholesale[^/]*\/v\d+)(?:\/[A-Za-z0-9_.~-]+)*$/.test(path) || path.includes("..")) throw new Error("Use a discovered WordPress, WooCommerce or Wholesale Suite REST route, not a URL.");
 	if (/application-passwords|\/batch(?:\/|$)/i.test(path)) throw new Error("Credential and batch routes are not available; use individual resource operations.");
 	return path;
 }
 
 async function equinoxRequest(path: string, method = "GET", query: Record<string, string> = {}, body?: any, media?: { filename: string; mime_type: string; base64: string }) {
+	assertEquinoxPricingReadOnly(path, method, body, media);
 	const url = new URL("/wp-json" + path, EQUINOX_ORIGIN);
 	for (const [key, value] of Object.entries(query)) {
 		if (/^(?:_method|_jsonp|rest_route|callback)$/i.test(key)) throw new Error("REST routing overrides are not accepted.");
@@ -14985,15 +14988,39 @@ function registerEquinoxTools(server: McpServer) {
 		description: "Authenticated Equinox-only WordPress/WooCommerce/Wholesale Suite management. Discover installed REST routes and schemas, read resources, preview and apply creates, edits, publication, settings, customer and order changes, media uploads and deletions. No Blindmotion targets. Capability creation is not permission to send marketing, charge/refund payments, grant access or delete records: obtain task-specific user authorization. Unsupported plugin controls are reported explicitly. Every write uses the identical operation and a 10-minute signed preview token, with no automatic retries. Inspect route schemas first. Token can be replayed within its lifetime for collection creates: do not repeat an uncertain write; reconcile by reading first.",
 		inputSchema: z.object({
 			site: z.literal("equinox"),
-			action: z.enum(["discover", "read", "preview", "apply"]),
+			action: z.enum(["discover", "read", "preview", "apply", "pricing_storage", "pricing_details"]),
 			path: z.string().max(250).optional(),
 			query: z.record(z.string(), z.string()).default({}),
 			operation: equinoxOperationSchema.optional(),
+			lookup_names: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,100}$/)).max(10).default([]),
+			acf_field_group_id: z.number().int().positive().optional(),
+			expected_acf_field_group_title: z.string().trim().min(1).max(200).optional(),
 			preview_token: z.string().max(2500).optional(),
 			confirmation: z.literal("CONFIRM EQUINOX WRITE").optional(),
 		}),
 	}, async args => {
 		try {
+			if (args.action === "pricing_storage" || args.action === "pricing_details") {
+		try {
+			if (new Set(args.lookup_names).size !== args.lookup_names.length) throw new Error("Duplicate lookup names are not allowed.");
+			if (Boolean(args.acf_field_group_id) !== Boolean(args.expected_acf_field_group_title)) throw new Error("ACF group ID and exact title must be supplied together.");
+			const details = args.action === "pricing_details";
+			if (!details && (args.lookup_names.length || args.acf_field_group_id)) throw new Error("Storage discovery does not accept detail selections.");
+			if (details && !args.lookup_names.length && !args.acf_field_group_id) throw new Error("Select at least one lookup or an exact ACF pricing group.");
+			const path = EQUINOX_PRICING_PATHS[details ? 1 : 0];
+			const index = await equinoxCatalog();
+			if (!index.routes?.[path]) throw new Error("Install/activate the authenticated Blindmotion WAPF Pricing Bridge on Equinox before reading pricing tables. No Blindmotion fallback is used.");
+			equinoxRoute(index, path, "GET");
+			const query: Record<string, string> = details ? { lookup_names: args.lookup_names.join(",") } : { include_value_shapes: "true" };
+			if (args.acf_field_group_id) {
+				query.acf_field_group_id = String(args.acf_field_group_id);
+				query.expected_acf_field_group_title = args.expected_acf_field_group_title!;
+			}
+			const result = verifyEquinoxPricing((await equinoxRequest(path, "GET", query)).data, args.lookup_names, details);
+			if (details && args.acf_field_group_id && (result.acf_field_group?.id !== args.acf_field_group_id || result.acf_field_group?.title !== args.expected_acf_field_group_title)) throw new Error("Equinox returned a different ACF pricing group.");
+			return toolResult({ site: EQUINOX_ORIGIN, ...equinoxRedact(result) });
+		} catch (error) { return toolError(error); }
+			}
 			if (args.action === "discover") {
 				const index = await equinoxCatalog();
 				const me = await equinoxRequest("/wp/v2/users/me", "GET", { context: "edit" });
