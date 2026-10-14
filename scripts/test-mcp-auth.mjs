@@ -110,7 +110,8 @@ try {
 	const decode = text => JSON.parse(text.startsWith("event:") ? text.split("\n").find(line => line.startsWith("data: ")).slice(6) : text);
 	const listedTools = decode(toolsText).result.tools;
 	assert.equal(listedTools.length, 105);
-	assert.equal(new Set(listedTools.map(tool => tool.name)).size, 105);
+	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 105);
+	assert.ok(listedTools.find(tool => tool.name === "manage_equinox").inputSchema.properties.action.enum.includes("pricing_details"));
 	const management = listedTools.find(tool => tool.name === "manage_equinox");
 	assert.ok(management.inputSchema.required.includes("site"));
 	for (const [site, expected] of [["equinox", "Equinox test product"], ["blindmotion", "Blindmotion test product"]]) {
