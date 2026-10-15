@@ -259,6 +259,270 @@ async function cleanupProductionSampleRouting(site: string, authorization: strin
 	}
 }
 
+
+const SITE_BANNER_OVERRIDE_SNIPPET_NAME = "Blindmotion MCP Site Banner Override";
+const SITE_BANNER_CHANGE_CONFIRMATION = "CONFIRM CHANGE LIVE SITE BANNER";
+
+function normaliseSiteBannerText(value: string) {
+	return decodeBasicHtmlEntities(
+		value
+			.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+			.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+			.replace(/<[^>]+>/g, " "),
+	)
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function bannerHeadingCandidates(html: string) {
+	const candidates: string[] = [];
+	for (const match of html.slice(0, 180_000).matchAll(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/gi)) {
+		const text = normaliseSiteBannerText(match[1]);
+		if (text.length >= 8 && text.length <= 240 && !candidates.includes(text)) candidates.push(text);
+		if (candidates.length >= 40) break;
+	}
+	return candidates;
+}
+
+function siteBannerTextOccurrenceCount(html: string, expected: string) {
+	const haystack = normaliseSiteBannerText(html);
+	const needle = normaliseSiteBannerText(expected);
+	if (!needle) return 0;
+	let count = 0;
+	let offset = 0;
+	while ((offset = haystack.indexOf(needle, offset)) !== -1) {
+		count++;
+		offset += needle.length;
+	}
+	return count;
+}
+
+async function liveSiteBannerHomepage(request: typeof fetch = fetch) {
+	const response = await request("https://online.blindmotion.com.au/?_bm_banner_read=1", {
+		method: "GET",
+		headers: { Accept: "text/html", "Cache-Control": "no-cache, no-store" },
+		redirect: "manual",
+		signal: AbortSignal.timeout(15_000),
+	});
+	if (!response.ok) throw new Error("Live homepage read failed: HTTP " + response.status);
+	const html = await response.text();
+	if (html.length > 2_000_000) throw new Error("Live homepage exceeds banner inspection size limit.");
+	return html;
+}
+
+async function codeSnippetsRequest(
+	path: string,
+	options: { method?: "GET" | "POST"; body?: unknown } = {},
+	request: typeof fetch = fetch,
+) {
+	const method = options.method ?? "GET";
+	const response = await request("https://online.blindmotion.com.au/wp-json/code-snippets/v1/" + path, {
+		method,
+		headers: {
+			Authorization: getWpWriteAuthHeader(),
+			Accept: "application/json",
+			...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+		},
+		...(method === "POST" ? { body: JSON.stringify(options.body ?? {}) } : {}),
+		redirect: "manual",
+		signal: AbortSignal.timeout(15_000),
+	});
+	if (!response.ok) throw new Error("Code Snippets request failed: HTTP " + response.status);
+	return response.json<any>();
+}
+
+function snippetCollectionRows(payload: any) {
+	if (Array.isArray(payload)) return payload;
+	if (Array.isArray(payload?.snippets)) return payload.snippets;
+	if (Array.isArray(payload?.data)) return payload.data;
+	return [];
+}
+
+async function readManagedSiteBannerSnippet(request: typeof fetch = fetch) {
+	const collection = await codeSnippetsRequest("snippets", {}, request);
+	const matches = snippetCollectionRows(collection).filter(
+		(item: any) => String(item?.name ?? item?.title ?? "") === SITE_BANNER_OVERRIDE_SNIPPET_NAME,
+	);
+	if (matches.length > 1) throw new Error("Multiple managed site-banner snippets exist; no write is safe.");
+	if (!matches.length) return null;
+	const id = Number(matches[0]?.id);
+	if (!Number.isInteger(id) || id < 1) throw new Error("Managed site-banner snippet has an invalid ID.");
+	const snippet = await codeSnippetsRequest("snippets/" + id, {}, request);
+	if (Number(snippet?.id) !== id || String(snippet?.name ?? snippet?.title ?? "") !== SITE_BANNER_OVERRIDE_SNIPPET_NAME) {
+		throw new Error("Managed site-banner snippet identity verification failed.");
+	}
+	if (typeof snippet?.code !== "string" || typeof snippet?.active !== "boolean") {
+		throw new Error("Managed site-banner snippet response is incomplete.");
+	}
+	return {
+		id,
+		name: SITE_BANNER_OVERRIDE_SNIPPET_NAME,
+		code: snippet.code,
+		active: snippet.active,
+		scope: snippet.scope ?? null,
+		code_sha256: await sha256Hex(new TextEncoder().encode(snippet.code)),
+	};
+}
+
+function buildSiteBannerOverrideCode(expectedText: string, replacementText: string) {
+	const expectedB64 = btoa(unescape(encodeURIComponent(normaliseSiteBannerText(expectedText))));
+	const replacementB64 = btoa(unescape(encodeURIComponent(normaliseSiteBannerText(replacementText))));
+	return `/** Blindmotion MCP site banner override v1.0.0.
+ * Managed only by manage_live_site_banner_guarded.
+ */
+if ( ! defined( 'ABSPATH' ) ) { exit; }
+
+add_filter( 'elementor/widget/render_content', function ( $content, $widget ) {
+	$expected = base64_decode( '${expectedB64}' );
+	$replacement = base64_decode( '${replacementB64}' );
+	$plain = html_entity_decode( wp_strip_all_tags( (string) $content ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+	$plain = preg_replace( '/\\s+/u', ' ', trim( $plain ) );
+	if ( $plain !== $expected ) {
+		return $content;
+	}
+	return '<div class="blindmotion-mcp-site-banner" style="text-align:center;font-weight:700;">' . esc_html( $replacement ) . '</div>';
+}, 20, 2 );
+`;
+}
+
+async function buildLiveSiteBannerPlan(expectedCurrentText: string, newText: string, request: typeof fetch = fetch) {
+	const expected = normaliseSiteBannerText(expectedCurrentText);
+	const replacement = normaliseSiteBannerText(newText);
+	if (expected.length < 8 || expected.length > 240 || replacement.length < 8 || replacement.length > 180) {
+		throw new Error("Banner text length is outside the guarded limits.");
+	}
+	if (expected === replacement) throw new Error("New banner text must differ from the current banner text.");
+	const html = await liveSiteBannerHomepage(request);
+	const occurrenceCount = siteBannerTextOccurrenceCount(html, expected);
+	if (occurrenceCount !== 1) {
+		throw new Error("Expected current banner text must appear exactly once on the live homepage; found " + occurrenceCount + ".");
+	}
+	const managed = await readManagedSiteBannerSnippet(request);
+	const code = buildSiteBannerOverrideCode(expected, replacement);
+	const codeSha256 = await sha256Hex(new TextEncoder().encode(code));
+	const pageSha256 = await sha256Hex(new TextEncoder().encode(html));
+	const core = {
+		host: "online.blindmotion.com.au",
+		expected_current_text: expected,
+		new_text: replacement,
+		current_page_sha256: pageSha256,
+		managed_snippet_id: managed?.id ?? null,
+		managed_snippet_code_sha256: managed?.code_sha256 ?? null,
+		managed_snippet_active: managed?.active ?? null,
+		new_override_code_sha256: codeSha256,
+	};
+	const planSha256 = await sha256Hex(new TextEncoder().encode(JSON.stringify(core)));
+	return { core, planSha256, code, managed, heading_candidates: bannerHeadingCandidates(html) };
+}
+
+async function applyLiveSiteBannerPlan(
+	expectedCurrentText: string,
+	newText: string,
+	expectedPlanSha256: string,
+	request: typeof fetch = fetch,
+) {
+	const plan = await buildLiveSiteBannerPlan(expectedCurrentText, newText, request);
+	if (plan.planSha256 !== expectedPlanSha256) {
+		throw new Error("Banner state changed since preview. Preview again; no write performed.");
+	}
+	let snippetId: number;
+	let created = false;
+	try {
+		if (plan.managed) {
+			snippetId = plan.managed.id;
+			await codeSnippetsRequest(
+				"snippets/" + snippetId,
+				{ method: "POST", body: { code: plan.code, active: true } },
+				request,
+			);
+		} else {
+			const createdSnippet = await codeSnippetsRequest(
+				"snippets",
+				{
+					method: "POST",
+					body: {
+						name: SITE_BANNER_OVERRIDE_SNIPPET_NAME,
+						code: plan.code,
+						scope: "front-end",
+						active: true,
+					},
+				},
+				request,
+			);
+			snippetId = Number(createdSnippet?.id);
+			if (!Number.isInteger(snippetId) || snippetId < 1) {
+				throw new Error("Code Snippets create did not return a valid snippet ID.");
+			}
+			created = true;
+		}
+		const verifiedSnippet = await codeSnippetsRequest("snippets/" + snippetId, {}, request);
+		const verifiedCodeSha256 = await sha256Hex(
+			new TextEncoder().encode(String(verifiedSnippet?.code ?? "")),
+		);
+		if (
+			Number(verifiedSnippet?.id) !== snippetId ||
+			String(verifiedSnippet?.name ?? verifiedSnippet?.title ?? "") !== SITE_BANNER_OVERRIDE_SNIPPET_NAME ||
+			verifiedSnippet?.active !== true ||
+			verifiedCodeSha256 !== plan.core.new_override_code_sha256
+		) {
+			throw new Error("Managed site-banner snippet read-back verification failed.");
+		}
+		const afterHtml = await request(
+			"https://online.blindmotion.com.au/?_bm_banner_verify=" + crypto.randomUUID(),
+			{
+				method: "GET",
+				headers: { Accept: "text/html", "Cache-Control": "no-cache, no-store" },
+				redirect: "manual",
+				signal: AbortSignal.timeout(15_000),
+			},
+		).then(async (response) => {
+			if (!response.ok) throw new Error("Post-write homepage verification failed: HTTP " + response.status);
+			return response.text();
+		});
+		if (
+			siteBannerTextOccurrenceCount(afterHtml, plan.core.new_text) < 1 ||
+			siteBannerTextOccurrenceCount(afterHtml, plan.core.expected_current_text) !== 0
+		) {
+			throw new Error("Public homepage did not verify the new banner text.");
+		}
+		return {
+			updated: true,
+			environment: "live",
+			host: plan.core.host,
+			snippet_id: snippetId,
+			created_managed_snippet: created,
+			previous_text: plan.core.expected_current_text,
+			new_text: plan.core.new_text,
+			plan_sha256: plan.planSha256,
+			snippet_code_sha256: verifiedCodeSha256,
+			public_homepage_verified: true,
+			rollback_protected: true,
+		};
+	} catch (error) {
+		if (typeof snippetId === "number" && Number.isInteger(snippetId)) {
+			try {
+				if (plan.managed) {
+					await codeSnippetsRequest(
+						"snippets/" + snippetId,
+						{ method: "POST", body: { code: plan.managed.code, active: plan.managed.active } },
+						request,
+					);
+				} else if (created) {
+					await codeSnippetsRequest(
+						"snippets/" + snippetId,
+						{ method: "POST", body: { active: false } },
+						request,
+					);
+				}
+			} catch {
+				throw new Error("Banner update failed and automatic rollback could not be confirmed; inspect the managed site-banner snippet before further changes.");
+			}
+		}
+		throw new Error("Banner update failed; prior managed snippet state was restored or the newly created override was deactivated. " + (error instanceof Error ? error.message : String(error)));
+	}
+}
+
+
 // End production routing audit.
 
 async function wpAuthenticatedFetch(path: string) {
@@ -4353,6 +4617,81 @@ function createServer() {
 	/*
 	 * Existing test tools
 	 */
+
+
+	server.registerTool(
+		"manage_live_site_banner_guarded",
+		{
+			description: `Inspect, preview or apply one exact live Blindmotion site-banner replacement through a fixed managed WordPress Code Snippet. Preview requires the exact currently rendered banner text and produces a hash-locked plan. Apply revalidates the public homepage and current managed snippet, changes only the dedicated banner override snippet, verifies snippet read-back and public rendering, and attempts rollback on failure. It cannot change coupons, prices, products or arbitrary Elementor content. Apply requires exact confirmation: ${SITE_BANNER_CHANGE_CONFIRMATION}`,
+			inputSchema: z
+				.object({
+					action: z.enum(["inspect", "preview", "apply"]),
+					expected_current_text: z.string().trim().min(8).max(240).optional(),
+					new_text: z.string().trim().min(8).max(180).optional(),
+					expected_plan_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+					confirmation: z.string().optional(),
+				})
+				.superRefine((value, ctx) => {
+					if (value.action === "inspect") return;
+					if (!value.expected_current_text || !value.new_text) {
+						ctx.addIssue({ code: z.ZodIssueCode.custom, message: "preview/apply require expected_current_text and new_text." });
+					}
+					if (value.action === "apply") {
+						if (!value.expected_plan_sha256) {
+							ctx.addIssue({ code: z.ZodIssueCode.custom, message: "apply requires expected_plan_sha256 from preview." });
+						}
+						if (value.confirmation !== SITE_BANNER_CHANGE_CONFIRMATION) {
+							ctx.addIssue({ code: z.ZodIssueCode.custom, message: "apply requires the exact confirmation phrase." });
+						}
+					}
+				}),
+		},
+		async ({ action, expected_current_text, new_text, expected_plan_sha256 }) => {
+			try {
+				if (action === "inspect") {
+					const [html, managed] = await Promise.all([
+						liveSiteBannerHomepage(),
+						readManagedSiteBannerSnippet(),
+					]);
+					return toolResult({
+						write_performed: false,
+						environment: "live",
+						host: "online.blindmotion.com.au",
+						heading_candidates: bannerHeadingCandidates(html),
+						managed_override: managed
+							? {
+									present: true,
+									snippet_id: managed.id,
+									active: managed.active,
+									code_sha256: managed.code_sha256,
+								}
+							: { present: false },
+					});
+				}
+				const plan = await buildLiveSiteBannerPlan(expected_current_text!, new_text!);
+				if (action === "preview") {
+					return toolResult({
+						write_performed: false,
+						environment: "live",
+						...plan.core,
+						plan_sha256: plan.planSha256,
+						heading_candidates: plan.heading_candidates,
+						confirmation_required: SITE_BANNER_CHANGE_CONFIRMATION,
+					});
+				}
+				return toolResult(
+					await applyLiveSiteBannerPlan(
+						expected_current_text!,
+						new_text!,
+						expected_plan_sha256!,
+					),
+				);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 
 	server.registerTool(
 		"get_recent_orders",
