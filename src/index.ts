@@ -311,7 +311,7 @@ async function acfOptionsRequest(
 	request: typeof fetch = fetch,
 ) {
 	const response = await request(
-		"https://online.blindmotion.com.au/wp-json/acf/v3/options/options",
+		"https://online.blindmotion.com.au/wp-json/acf/v3/options/global-prices-banners",
 		{
 			method,
 			headers: {
