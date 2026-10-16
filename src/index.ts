@@ -260,7 +260,12 @@ async function cleanupProductionSampleRouting(site: string, authorization: strin
 }
 
 
-const SITE_BANNER_OVERRIDE_SNIPPET_NAME = "Blindmotion MCP Site Banner Override";
+const SITE_BANNER_ACF_GROUP_ID = 7140;
+const SITE_BANNER_ACF_GROUP_TITLE = "Global Prices";
+const SITE_BANNER_OPTIONS_PAGE_ID = 7142;
+const SITE_BANNER_OPTIONS_PAGE_TITLE = "Global Prices & Banners";
+const SITE_BANNER_FIELD_NAME = "offer_banner_1";
+const SITE_BANNER_FIELD_KEY = "field_675939fdb3e5c";
 const SITE_BANNER_CHANGE_CONFIRMATION = "CONFIRM CHANGE LIVE SITE BANNER";
 
 function normaliseSiteBannerText(value: string) {
@@ -272,29 +277,6 @@ function normaliseSiteBannerText(value: string) {
 	)
 		.replace(/\s+/g, " ")
 		.trim();
-}
-
-function bannerHeadingCandidates(html: string) {
-	const candidates: string[] = [];
-	for (const match of html.slice(0, 180_000).matchAll(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/gi)) {
-		const text = normaliseSiteBannerText(match[1]);
-		if (text.length >= 8 && text.length <= 240 && !candidates.includes(text)) candidates.push(text);
-		if (candidates.length >= 40) break;
-	}
-	return candidates;
-}
-
-function siteBannerTextOccurrenceCount(html: string, expected: string) {
-	const haystack = normaliseSiteBannerText(html);
-	const needle = normaliseSiteBannerText(expected);
-	if (!needle) return 0;
-	let count = 0;
-	let offset = 0;
-	while ((offset = haystack.indexOf(needle, offset)) !== -1) {
-		count++;
-		offset += needle.length;
-	}
-	return count;
 }
 
 async function liveSiteBannerHomepage(request: typeof fetch = fetch) {
@@ -310,164 +292,134 @@ async function liveSiteBannerHomepage(request: typeof fetch = fetch) {
 	return html;
 }
 
-async function codeSnippetsRequest(
-	path: string,
-	options: { method?: "GET" | "POST"; body?: unknown } = {},
+function siteBannerTextOccurrenceCount(html: string, expected: string) {
+	const haystack = normaliseSiteBannerText(html);
+	const needle = normaliseSiteBannerText(expected);
+	if (!needle) return 0;
+	let count = 0;
+	let offset = 0;
+	while ((offset = haystack.indexOf(needle, offset)) !== -1) {
+		count++;
+		offset += needle.length;
+	}
+	return count;
+}
+
+async function acfOptionsRequest(
+	method: "GET" | "POST",
+	body?: unknown,
 	request: typeof fetch = fetch,
 ) {
-	const method = options.method ?? "GET";
-	const response = await request("https://online.blindmotion.com.au/wp-json/code-snippets/v1/" + path, {
-		method,
-		headers: {
-			Authorization: getWpWriteAuthHeader(),
-			Accept: "application/json",
-			...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+	const response = await request(
+		"https://online.blindmotion.com.au/wp-json/acf/v3/options/options",
+		{
+			method,
+			headers: {
+				Authorization: getWpWriteAuthHeader(),
+				Accept: "application/json",
+				...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+			},
+			...(method === "POST" ? { body: JSON.stringify(body ?? {}) } : {}),
+			redirect: "manual",
+			signal: AbortSignal.timeout(15_000),
 		},
-		...(method === "POST" ? { body: JSON.stringify(options.body ?? {}) } : {}),
-		redirect: "manual",
-		signal: AbortSignal.timeout(15_000),
-	});
-	if (!response.ok) throw new Error("Code Snippets request failed: HTTP " + response.status);
+	);
+	if (!response.ok) {
+		throw new Error("ACF options request failed: HTTP " + response.status);
+	}
 	return response.json<any>();
 }
 
-function snippetCollectionRows(payload: any) {
-	if (Array.isArray(payload)) return payload;
-	if (Array.isArray(payload?.snippets)) return payload.snippets;
-	if (Array.isArray(payload?.data)) return payload.data;
-	return [];
-}
-
-async function readManagedSiteBannerSnippet(request: typeof fetch = fetch) {
-	const collection = await codeSnippetsRequest("snippets", {}, request);
-	const matches = snippetCollectionRows(collection).filter(
-		(item: any) => String(item?.name ?? item?.title ?? "") === SITE_BANNER_OVERRIDE_SNIPPET_NAME,
-	);
-	if (matches.length > 1) throw new Error("Multiple managed site-banner snippets exist; no write is safe.");
-	if (!matches.length) return null;
-	const id = Number(matches[0]?.id);
-	if (!Number.isInteger(id) || id < 1) throw new Error("Managed site-banner snippet has an invalid ID.");
-	const snippet = await codeSnippetsRequest("snippets/" + id, {}, request);
-	if (Number(snippet?.id) !== id || String(snippet?.name ?? snippet?.title ?? "") !== SITE_BANNER_OVERRIDE_SNIPPET_NAME) {
-		throw new Error("Managed site-banner snippet identity verification failed.");
+async function readLiveSiteBannerField(request: typeof fetch = fetch) {
+	const payload = await acfOptionsRequest("GET", undefined, request);
+	const fields = payload?.acf ?? payload?.fields;
+	if (!fields || typeof fields !== "object") {
+		throw new Error("ACF options endpoint did not return a readable fields object.");
 	}
-	if (typeof snippet?.code !== "string" || typeof snippet?.active !== "boolean") {
-		throw new Error("Managed site-banner snippet response is incomplete.");
+	const value = fields[SITE_BANNER_FIELD_NAME];
+	if (typeof value !== "string") {
+		throw new Error("ACF options endpoint did not return the exact Offer Banner 1 text field.");
 	}
 	return {
-		id,
-		name: SITE_BANNER_OVERRIDE_SNIPPET_NAME,
-		code: snippet.code,
-		active: snippet.active,
-		scope: snippet.scope ?? null,
-		code_sha256: await sha256Hex(new TextEncoder().encode(snippet.code)),
+		field_group_id: SITE_BANNER_ACF_GROUP_ID,
+		field_group_title: SITE_BANNER_ACF_GROUP_TITLE,
+		options_page_id: SITE_BANNER_OPTIONS_PAGE_ID,
+		options_page_title: SITE_BANNER_OPTIONS_PAGE_TITLE,
+		field_name: SITE_BANNER_FIELD_NAME,
+		field_key: SITE_BANNER_FIELD_KEY,
+		value,
+		value_sha256: await sha256Hex(new TextEncoder().encode(value)),
 	};
 }
 
-function buildSiteBannerOverrideCode(expectedText: string, replacementText: string) {
-	const expectedB64 = btoa(unescape(encodeURIComponent(normaliseSiteBannerText(expectedText))));
-	const replacementB64 = btoa(unescape(encodeURIComponent(normaliseSiteBannerText(replacementText))));
-	return `/** Blindmotion MCP site banner override v1.0.0.
- * Managed only by manage_live_site_banner_guarded.
- */
-if ( ! defined( 'ABSPATH' ) ) { exit; }
-
-add_filter( 'elementor/widget/render_content', function ( $content, $widget ) {
-	$expected = base64_decode( '${expectedB64}' );
-	$replacement = base64_decode( '${replacementB64}' );
-	$plain = html_entity_decode( wp_strip_all_tags( (string) $content ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
-	$plain = preg_replace( '/\\s+/u', ' ', trim( $plain ) );
-	if ( $plain !== $expected ) {
-		return $content;
+async function buildLiveSiteBannerPlan(
+	expectedCurrentValue: string,
+	newValue: string,
+	request: typeof fetch = fetch,
+) {
+	const current = await readLiveSiteBannerField(request);
+	if (current.value !== expectedCurrentValue) {
+		throw new Error("Offer Banner 1 changed since review; no write performed.");
 	}
-	return '<div class="blindmotion-mcp-site-banner" style="text-align:center;font-weight:700;">' . esc_html( $replacement ) . '</div>';
-}, 20, 2 );
-`;
-}
-
-async function buildLiveSiteBannerPlan(expectedCurrentText: string, newText: string, request: typeof fetch = fetch) {
-	const expected = normaliseSiteBannerText(expectedCurrentText);
-	const replacement = normaliseSiteBannerText(newText);
-	if (expected.length < 8 || expected.length > 240 || replacement.length < 8 || replacement.length > 180) {
-		throw new Error("Banner text length is outside the guarded limits.");
+	if (newValue === current.value) throw new Error("New banner value must differ from the current field value.");
+	if (newValue.length < 8 || newValue.length > 1200) {
+		throw new Error("New banner HTML is outside the guarded size limits.");
 	}
-	if (expected === replacement) throw new Error("New banner text must differ from the current banner text.");
+	const currentText = normaliseSiteBannerText(current.value);
+	const newText = normaliseSiteBannerText(newValue);
+	if (newText.length < 8 || newText.length > 180) {
+		throw new Error("Rendered new banner text is outside the guarded length limits.");
+	}
 	const html = await liveSiteBannerHomepage(request);
-	const occurrenceCount = siteBannerTextOccurrenceCount(html, expected);
-	if (occurrenceCount !== 1) {
-		throw new Error("Expected current banner text must appear exactly once on the live homepage; found " + occurrenceCount + ".");
+	if (siteBannerTextOccurrenceCount(html, currentText) !== 1) {
+		throw new Error("The current Offer Banner 1 text must render exactly once on the live homepage.");
 	}
-	const managed = await readManagedSiteBannerSnippet(request);
-	const code = buildSiteBannerOverrideCode(expected, replacement);
-	const codeSha256 = await sha256Hex(new TextEncoder().encode(code));
 	const pageSha256 = await sha256Hex(new TextEncoder().encode(html));
+	const newValueSha256 = await sha256Hex(new TextEncoder().encode(newValue));
 	const core = {
 		host: "online.blindmotion.com.au",
-		expected_current_text: expected,
-		new_text: replacement,
+		field_group_id: current.field_group_id,
+		field_group_title: current.field_group_title,
+		options_page_id: current.options_page_id,
+		options_page_title: current.options_page_title,
+		field_name: current.field_name,
+		field_key: current.field_key,
+		expected_current_value_sha256: current.value_sha256,
+		new_value_sha256: newValueSha256,
+		current_rendered_text: currentText,
+		new_rendered_text: newText,
 		current_page_sha256: pageSha256,
-		managed_snippet_id: managed?.id ?? null,
-		managed_snippet_code_sha256: managed?.code_sha256 ?? null,
-		managed_snippet_active: managed?.active ?? null,
-		new_override_code_sha256: codeSha256,
 	};
 	const planSha256 = await sha256Hex(new TextEncoder().encode(JSON.stringify(core)));
-	return { core, planSha256, code, managed, heading_candidates: bannerHeadingCandidates(html) };
+	return { current, core, planSha256 };
 }
 
 async function applyLiveSiteBannerPlan(
-	expectedCurrentText: string,
-	newText: string,
+	expectedCurrentValue: string,
+	newValue: string,
 	expectedPlanSha256: string,
 	request: typeof fetch = fetch,
 ) {
-	const plan = await buildLiveSiteBannerPlan(expectedCurrentText, newText, request);
+	const plan = await buildLiveSiteBannerPlan(expectedCurrentValue, newValue, request);
 	if (plan.planSha256 !== expectedPlanSha256) {
 		throw new Error("Banner state changed since preview. Preview again; no write performed.");
 	}
-	let snippetId: number;
-	let created = false;
 	try {
-		if (plan.managed) {
-			snippetId = plan.managed.id;
-			await codeSnippetsRequest(
-				"snippets/" + snippetId,
-				{ method: "POST", body: { code: plan.code, active: true } },
-				request,
-			);
-		} else {
-			const createdSnippet = await codeSnippetsRequest(
-				"snippets",
-				{
-					method: "POST",
-					body: {
-						name: SITE_BANNER_OVERRIDE_SNIPPET_NAME,
-						code: plan.code,
-						scope: "front-end",
-						active: true,
-					},
-				},
-				request,
-			);
-			snippetId = Number(createdSnippet?.id);
-			if (!Number.isInteger(snippetId) || snippetId < 1) {
-				throw new Error("Code Snippets create did not return a valid snippet ID.");
-			}
-			created = true;
-		}
-		const verifiedSnippet = await codeSnippetsRequest("snippets/" + snippetId, {}, request);
-		const verifiedCodeSha256 = await sha256Hex(
-			new TextEncoder().encode(String(verifiedSnippet?.code ?? "")),
+		await acfOptionsRequest(
+			"POST",
+			{ fields: { [SITE_BANNER_FIELD_NAME]: newValue } },
+			request,
 		);
+		const verified = await readLiveSiteBannerField(request);
 		if (
-			Number(verifiedSnippet?.id) !== snippetId ||
-			String(verifiedSnippet?.name ?? verifiedSnippet?.title ?? "") !== SITE_BANNER_OVERRIDE_SNIPPET_NAME ||
-			verifiedSnippet?.active !== true ||
-			verifiedCodeSha256 !== plan.core.new_override_code_sha256
+			verified.field_name !== SITE_BANNER_FIELD_NAME ||
+			verified.field_key !== SITE_BANNER_FIELD_KEY ||
+			verified.value !== newValue ||
+			verified.value_sha256 !== plan.core.new_value_sha256
 		) {
-			throw new Error("Managed site-banner snippet read-back verification failed.");
+			throw new Error("Offer Banner 1 ACF read-back verification failed.");
 		}
-		const afterHtml = await request(
+		const response = await request(
 			"https://online.blindmotion.com.au/?_bm_banner_verify=" + crypto.randomUUID(),
 			{
 				method: "GET",
@@ -475,50 +427,52 @@ async function applyLiveSiteBannerPlan(
 				redirect: "manual",
 				signal: AbortSignal.timeout(15_000),
 			},
-		).then(async (response) => {
-			if (!response.ok) throw new Error("Post-write homepage verification failed: HTTP " + response.status);
-			return response.text();
-		});
+		);
+		if (!response.ok) throw new Error("Post-write homepage verification failed: HTTP " + response.status);
+		const afterHtml = await response.text();
 		if (
-			siteBannerTextOccurrenceCount(afterHtml, plan.core.new_text) < 1 ||
-			siteBannerTextOccurrenceCount(afterHtml, plan.core.expected_current_text) !== 0
+			siteBannerTextOccurrenceCount(afterHtml, plan.core.new_rendered_text) < 1 ||
+			siteBannerTextOccurrenceCount(afterHtml, plan.core.current_rendered_text) !== 0
 		) {
-			throw new Error("Public homepage did not verify the new banner text.");
+			throw new Error("Public homepage did not verify the new Offer Banner 1 text.");
 		}
 		return {
 			updated: true,
 			environment: "live",
 			host: plan.core.host,
-			snippet_id: snippetId,
-			created_managed_snippet: created,
-			previous_text: plan.core.expected_current_text,
-			new_text: plan.core.new_text,
+			field_group_id: SITE_BANNER_ACF_GROUP_ID,
+			options_page_id: SITE_BANNER_OPTIONS_PAGE_ID,
+			field_name: SITE_BANNER_FIELD_NAME,
+			field_key: SITE_BANNER_FIELD_KEY,
+			previous_value_sha256: plan.core.expected_current_value_sha256,
+			new_value_sha256: plan.core.new_value_sha256,
+			new_rendered_text: plan.core.new_rendered_text,
 			plan_sha256: plan.planSha256,
-			snippet_code_sha256: verifiedCodeSha256,
+			acf_readback_verified: true,
 			public_homepage_verified: true,
 			rollback_protected: true,
 		};
 	} catch (error) {
-		if (typeof snippetId === "number" && Number.isInteger(snippetId)) {
-			try {
-				if (plan.managed) {
-					await codeSnippetsRequest(
-						"snippets/" + snippetId,
-						{ method: "POST", body: { code: plan.managed.code, active: plan.managed.active } },
-						request,
-					);
-				} else if (created) {
-					await codeSnippetsRequest(
-						"snippets/" + snippetId,
-						{ method: "POST", body: { active: false } },
-						request,
-					);
-				}
-			} catch {
-				throw new Error("Banner update failed and automatic rollback could not be confirmed; inspect the managed site-banner snippet before further changes.");
+		try {
+			await acfOptionsRequest(
+				"POST",
+				{ fields: { [SITE_BANNER_FIELD_NAME]: plan.current.value } },
+				request,
+			);
+			const restored = await readLiveSiteBannerField(request);
+			if (
+				restored.value !== plan.current.value ||
+				restored.value_sha256 !== plan.current.value_sha256
+			) {
+				throw new Error("Offer Banner 1 rollback read-back verification failed.");
 			}
+		} catch {
+			throw new Error("Banner update failed and automatic ACF rollback could not be confirmed; inspect Global Prices & Banners before further changes.");
 		}
-		throw new Error("Banner update failed; prior managed snippet state was restored or the newly created override was deactivated. " + (error instanceof Error ? error.message : String(error)));
+		throw new Error(
+			"Banner update failed; the previous Offer Banner 1 value was restored. " +
+				(error instanceof Error ? error.message : String(error)),
+		);
 	}
 }
 
@@ -4622,19 +4576,19 @@ function createServer() {
 	server.registerTool(
 		"manage_live_site_banner_guarded",
 		{
-			description: `Inspect, preview or apply one exact live Blindmotion site-banner replacement through a fixed managed WordPress Code Snippet. Preview requires the exact currently rendered banner text and produces a hash-locked plan. Apply revalidates the public homepage and current managed snippet, changes only the dedicated banner override snippet, verifies snippet read-back and public rendering, and attempts rollback on failure. It cannot change coupons, prices, products or arbitrary Elementor content. Apply requires exact confirmation: ${SITE_BANNER_CHANGE_CONFIRMATION}`,
+			description: `Inspect, preview or apply one exact live Blindmotion Offer Banner 1 change. The tool is fixed to ACF field offer_banner_1 (field_675939fdb3e5c) on the Global Prices & Banners options page. Preview requires the exact current stored HTML, hash-locks the field and rendered homepage state, and performs no write. Apply revalidates the field, writes only that ACF option, verifies exact ACF read-back plus public homepage rendering, and restores the prior value if verification fails. It cannot change coupons, prices, products, other ACF fields or arbitrary Elementor content. Apply requires exact confirmation: ${SITE_BANNER_CHANGE_CONFIRMATION}`,
 			inputSchema: z
 				.object({
 					action: z.enum(["inspect", "preview", "apply"]),
-					expected_current_text: z.string().trim().min(8).max(240).optional(),
-					new_text: z.string().trim().min(8).max(180).optional(),
+					expected_current_value: z.string().max(1200).optional(),
+					new_value: z.string().min(8).max(1200).optional(),
 					expected_plan_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 					confirmation: z.string().optional(),
 				})
 				.superRefine((value, ctx) => {
 					if (value.action === "inspect") return;
-					if (!value.expected_current_text || !value.new_text) {
-						ctx.addIssue({ code: z.ZodIssueCode.custom, message: "preview/apply require expected_current_text and new_text." });
+					if (value.expected_current_value === undefined || value.new_value === undefined) {
+						ctx.addIssue({ code: z.ZodIssueCode.custom, message: "preview/apply require expected_current_value and new_value." });
 					}
 					if (value.action === "apply") {
 						if (!value.expected_plan_sha256) {
@@ -4646,43 +4600,37 @@ function createServer() {
 					}
 				}),
 		},
-		async ({ action, expected_current_text, new_text, expected_plan_sha256 }) => {
+		async ({ action, expected_current_value, new_value, expected_plan_sha256 }) => {
 			try {
 				if (action === "inspect") {
-					const [html, managed] = await Promise.all([
+					const [field, html] = await Promise.all([
+						readLiveSiteBannerField(),
 						liveSiteBannerHomepage(),
-						readManagedSiteBannerSnippet(),
 					]);
+					const renderedText = normaliseSiteBannerText(field.value);
 					return toolResult({
 						write_performed: false,
 						environment: "live",
 						host: "online.blindmotion.com.au",
-						heading_candidates: bannerHeadingCandidates(html),
-						managed_override: managed
-							? {
-									present: true,
-									snippet_id: managed.id,
-									active: managed.active,
-									code_sha256: managed.code_sha256,
-								}
-							: { present: false },
+						...field,
+						rendered_text: renderedText,
+						public_render_occurrences: siteBannerTextOccurrenceCount(html, renderedText),
 					});
 				}
-				const plan = await buildLiveSiteBannerPlan(expected_current_text!, new_text!);
+				const plan = await buildLiveSiteBannerPlan(expected_current_value!, new_value!);
 				if (action === "preview") {
 					return toolResult({
 						write_performed: false,
 						environment: "live",
 						...plan.core,
 						plan_sha256: plan.planSha256,
-						heading_candidates: plan.heading_candidates,
 						confirmation_required: SITE_BANNER_CHANGE_CONFIRMATION,
 					});
 				}
 				return toolResult(
 					await applyLiveSiteBannerPlan(
-						expected_current_text!,
-						new_text!,
+						expected_current_value!,
+						new_value!,
 						expected_plan_sha256!,
 					),
 				);
