@@ -548,7 +548,20 @@ async function buildLiveSiteBannerPlan(
 		new_rendered_text: newText,
 		current_page_sha256: pageSha256,
 	};
-	const planSha256 = await sha256Hex(new TextEncoder().encode(JSON.stringify(core)));
+	const stablePlanCore = {
+		host: core.host,
+		field_group_id: core.field_group_id,
+		options_page_id: core.options_page_id,
+		field_name: core.field_name,
+		field_key: core.field_key,
+		expected_current_value_sha256: core.expected_current_value_sha256,
+		new_value_sha256: core.new_value_sha256,
+		current_rendered_text: core.current_rendered_text,
+		new_rendered_text: core.new_rendered_text,
+	};
+	const planSha256 = await sha256Hex(
+		new TextEncoder().encode(JSON.stringify(stablePlanCore)),
+	);
 	return { current, core, planSha256 };
 }
 
