@@ -259,6 +259,224 @@ async function cleanupProductionSampleRouting(site: string, authorization: strin
 	}
 }
 
+
+const SITE_BANNER_ACF_GROUP_ID = 7140;
+const SITE_BANNER_ACF_GROUP_TITLE = "Global Prices";
+const SITE_BANNER_OPTIONS_PAGE_ID = 7142;
+const SITE_BANNER_OPTIONS_PAGE_TITLE = "Global Prices & Banners";
+const SITE_BANNER_FIELD_NAME = "offer_banner_1";
+const SITE_BANNER_FIELD_KEY = "field_675939fdb3e5c";
+const SITE_BANNER_CHANGE_CONFIRMATION = "CONFIRM CHANGE LIVE SITE BANNER";
+
+function normaliseSiteBannerText(value: string) {
+	return decodeBasicHtmlEntities(
+		value
+			.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+			.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+			.replace(/<[^>]+>/g, " "),
+	)
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+async function liveSiteBannerHomepage(request: typeof fetch = fetch) {
+	const response = await request("https://online.blindmotion.com.au/?_bm_banner_read=1", {
+		method: "GET",
+		headers: { Accept: "text/html", "Cache-Control": "no-cache, no-store" },
+		redirect: "manual",
+		signal: AbortSignal.timeout(15_000),
+	});
+	if (!response.ok) throw new Error("Live homepage read failed: HTTP " + response.status);
+	const html = await response.text();
+	if (html.length > 2_000_000) throw new Error("Live homepage exceeds banner inspection size limit.");
+	return html;
+}
+
+function siteBannerTextOccurrenceCount(html: string, expected: string) {
+	const haystack = normaliseSiteBannerText(html);
+	const needle = normaliseSiteBannerText(expected);
+	if (!needle) return 0;
+	let count = 0;
+	let offset = 0;
+	while ((offset = haystack.indexOf(needle, offset)) !== -1) {
+		count++;
+		offset += needle.length;
+	}
+	return count;
+}
+
+async function acfOptionsRequest(
+	method: "GET" | "POST",
+	body?: unknown,
+	request: typeof fetch = fetch,
+) {
+	const response = await request(
+		"https://online.blindmotion.com.au/wp-json/acf/v3/options/options",
+		{
+			method,
+			headers: {
+				Authorization: getWpWriteAuthHeader(),
+				Accept: "application/json",
+				...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+			},
+			...(method === "POST" ? { body: JSON.stringify(body ?? {}) } : {}),
+			redirect: "manual",
+			signal: AbortSignal.timeout(15_000),
+		},
+	);
+	if (!response.ok) {
+		throw new Error("ACF options request failed: HTTP " + response.status);
+	}
+	return response.json<any>();
+}
+
+async function readLiveSiteBannerField(request: typeof fetch = fetch) {
+	const payload = await acfOptionsRequest("GET", undefined, request);
+	const fields = payload?.acf ?? payload?.fields;
+	if (!fields || typeof fields !== "object") {
+		throw new Error("ACF options endpoint did not return a readable fields object.");
+	}
+	const value = fields[SITE_BANNER_FIELD_NAME];
+	if (typeof value !== "string") {
+		throw new Error("ACF options endpoint did not return the exact Offer Banner 1 text field.");
+	}
+	return {
+		field_group_id: SITE_BANNER_ACF_GROUP_ID,
+		field_group_title: SITE_BANNER_ACF_GROUP_TITLE,
+		options_page_id: SITE_BANNER_OPTIONS_PAGE_ID,
+		options_page_title: SITE_BANNER_OPTIONS_PAGE_TITLE,
+		field_name: SITE_BANNER_FIELD_NAME,
+		field_key: SITE_BANNER_FIELD_KEY,
+		value,
+		value_sha256: await sha256Hex(new TextEncoder().encode(value)),
+	};
+}
+
+async function buildLiveSiteBannerPlan(
+	expectedCurrentValue: string,
+	newValue: string,
+	request: typeof fetch = fetch,
+) {
+	const current = await readLiveSiteBannerField(request);
+	if (current.value !== expectedCurrentValue) {
+		throw new Error("Offer Banner 1 changed since review; no write performed.");
+	}
+	if (newValue === current.value) throw new Error("New banner value must differ from the current field value.");
+	if (newValue.length < 8 || newValue.length > 1200) {
+		throw new Error("New banner HTML is outside the guarded size limits.");
+	}
+	const currentText = normaliseSiteBannerText(current.value);
+	const newText = normaliseSiteBannerText(newValue);
+	if (newText.length < 8 || newText.length > 180) {
+		throw new Error("Rendered new banner text is outside the guarded length limits.");
+	}
+	const html = await liveSiteBannerHomepage(request);
+	if (siteBannerTextOccurrenceCount(html, currentText) !== 1) {
+		throw new Error("The current Offer Banner 1 text must render exactly once on the live homepage.");
+	}
+	const pageSha256 = await sha256Hex(new TextEncoder().encode(html));
+	const newValueSha256 = await sha256Hex(new TextEncoder().encode(newValue));
+	const core = {
+		host: "online.blindmotion.com.au",
+		field_group_id: current.field_group_id,
+		field_group_title: current.field_group_title,
+		options_page_id: current.options_page_id,
+		options_page_title: current.options_page_title,
+		field_name: current.field_name,
+		field_key: current.field_key,
+		expected_current_value_sha256: current.value_sha256,
+		new_value_sha256: newValueSha256,
+		current_rendered_text: currentText,
+		new_rendered_text: newText,
+		current_page_sha256: pageSha256,
+	};
+	const planSha256 = await sha256Hex(new TextEncoder().encode(JSON.stringify(core)));
+	return { current, core, planSha256 };
+}
+
+async function applyLiveSiteBannerPlan(
+	expectedCurrentValue: string,
+	newValue: string,
+	expectedPlanSha256: string,
+	request: typeof fetch = fetch,
+) {
+	const plan = await buildLiveSiteBannerPlan(expectedCurrentValue, newValue, request);
+	if (plan.planSha256 !== expectedPlanSha256) {
+		throw new Error("Banner state changed since preview. Preview again; no write performed.");
+	}
+	try {
+		await acfOptionsRequest(
+			"POST",
+			{ fields: { [SITE_BANNER_FIELD_NAME]: newValue } },
+			request,
+		);
+		const verified = await readLiveSiteBannerField(request);
+		if (
+			verified.field_name !== SITE_BANNER_FIELD_NAME ||
+			verified.field_key !== SITE_BANNER_FIELD_KEY ||
+			verified.value !== newValue ||
+			verified.value_sha256 !== plan.core.new_value_sha256
+		) {
+			throw new Error("Offer Banner 1 ACF read-back verification failed.");
+		}
+		const response = await request(
+			"https://online.blindmotion.com.au/?_bm_banner_verify=" + crypto.randomUUID(),
+			{
+				method: "GET",
+				headers: { Accept: "text/html", "Cache-Control": "no-cache, no-store" },
+				redirect: "manual",
+				signal: AbortSignal.timeout(15_000),
+			},
+		);
+		if (!response.ok) throw new Error("Post-write homepage verification failed: HTTP " + response.status);
+		const afterHtml = await response.text();
+		if (
+			siteBannerTextOccurrenceCount(afterHtml, plan.core.new_rendered_text) < 1 ||
+			siteBannerTextOccurrenceCount(afterHtml, plan.core.current_rendered_text) !== 0
+		) {
+			throw new Error("Public homepage did not verify the new Offer Banner 1 text.");
+		}
+		return {
+			updated: true,
+			environment: "live",
+			host: plan.core.host,
+			field_group_id: SITE_BANNER_ACF_GROUP_ID,
+			options_page_id: SITE_BANNER_OPTIONS_PAGE_ID,
+			field_name: SITE_BANNER_FIELD_NAME,
+			field_key: SITE_BANNER_FIELD_KEY,
+			previous_value_sha256: plan.core.expected_current_value_sha256,
+			new_value_sha256: plan.core.new_value_sha256,
+			new_rendered_text: plan.core.new_rendered_text,
+			plan_sha256: plan.planSha256,
+			acf_readback_verified: true,
+			public_homepage_verified: true,
+			rollback_protected: true,
+		};
+	} catch (error) {
+		try {
+			await acfOptionsRequest(
+				"POST",
+				{ fields: { [SITE_BANNER_FIELD_NAME]: plan.current.value } },
+				request,
+			);
+			const restored = await readLiveSiteBannerField(request);
+			if (
+				restored.value !== plan.current.value ||
+				restored.value_sha256 !== plan.current.value_sha256
+			) {
+				throw new Error("Offer Banner 1 rollback read-back verification failed.");
+			}
+		} catch {
+			throw new Error("Banner update failed and automatic ACF rollback could not be confirmed; inspect Global Prices & Banners before further changes.");
+		}
+		throw new Error(
+			"Banner update failed; the previous Offer Banner 1 value was restored. " +
+				(error instanceof Error ? error.message : String(error)),
+		);
+	}
+}
+
+
 // End production routing audit.
 
 async function wpAuthenticatedFetch(path: string) {
@@ -4353,6 +4571,75 @@ function createServer() {
 	/*
 	 * Existing test tools
 	 */
+
+
+	server.registerTool(
+		"manage_live_site_banner_guarded",
+		{
+			description: `Inspect, preview or apply one exact live Blindmotion Offer Banner 1 change. The tool is fixed to ACF field offer_banner_1 (field_675939fdb3e5c) on the Global Prices & Banners options page. Preview requires the exact current stored HTML, hash-locks the field and rendered homepage state, and performs no write. Apply revalidates the field, writes only that ACF option, verifies exact ACF read-back plus public homepage rendering, and restores the prior value if verification fails. It cannot change coupons, prices, products, other ACF fields or arbitrary Elementor content. Apply requires exact confirmation: ${SITE_BANNER_CHANGE_CONFIRMATION}`,
+			inputSchema: z
+				.object({
+					action: z.enum(["inspect", "preview", "apply"]),
+					expected_current_value: z.string().max(1200).optional(),
+					new_value: z.string().min(8).max(1200).optional(),
+					expected_plan_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+					confirmation: z.string().optional(),
+				})
+				.superRefine((value, ctx) => {
+					if (value.action === "inspect") return;
+					if (value.expected_current_value === undefined || value.new_value === undefined) {
+						ctx.addIssue({ code: z.ZodIssueCode.custom, message: "preview/apply require expected_current_value and new_value." });
+					}
+					if (value.action === "apply") {
+						if (!value.expected_plan_sha256) {
+							ctx.addIssue({ code: z.ZodIssueCode.custom, message: "apply requires expected_plan_sha256 from preview." });
+						}
+						if (value.confirmation !== SITE_BANNER_CHANGE_CONFIRMATION) {
+							ctx.addIssue({ code: z.ZodIssueCode.custom, message: "apply requires the exact confirmation phrase." });
+						}
+					}
+				}),
+		},
+		async ({ action, expected_current_value, new_value, expected_plan_sha256 }) => {
+			try {
+				if (action === "inspect") {
+					const [field, html] = await Promise.all([
+						readLiveSiteBannerField(),
+						liveSiteBannerHomepage(),
+					]);
+					const renderedText = normaliseSiteBannerText(field.value);
+					return toolResult({
+						write_performed: false,
+						environment: "live",
+						host: "online.blindmotion.com.au",
+						...field,
+						rendered_text: renderedText,
+						public_render_occurrences: siteBannerTextOccurrenceCount(html, renderedText),
+					});
+				}
+				const plan = await buildLiveSiteBannerPlan(expected_current_value!, new_value!);
+				if (action === "preview") {
+					return toolResult({
+						write_performed: false,
+						environment: "live",
+						...plan.core,
+						plan_sha256: plan.planSha256,
+						confirmation_required: SITE_BANNER_CHANGE_CONFIRMATION,
+					});
+				}
+				return toolResult(
+					await applyLiveSiteBannerPlan(
+						expected_current_value!,
+						new_value!,
+						expected_plan_sha256!,
+					),
+				);
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 
 	server.registerTool(
 		"get_recent_orders",
