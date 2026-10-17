@@ -4448,6 +4448,105 @@ function toolError(error: unknown) {
 	};
 }
 
+// Staging maintenance uses the existing application-password connection, never browser cookies.
+function createStagingRollerMaintenance() {
+ const schema = z.object({
+  action: z.enum(['inspect','preview','apply']),
+  resource: z.enum(['wapf','snippet']),
+  id: z.number().int().positive(),
+  expected_name: z.string().min(1).max(500),
+  expected_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  plan_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  replacements: z.array(z.object({find:z.string().min(1).max(20000),replace:z.string().max(20000)}).strict()).max(30).optional(),
+  field_updates: z.array(z.object({field_id:z.string().min(1),property:z.enum(['label','required','conditionals','pricing','options']),value_json:z.string().max(50000)}).strict()).max(30).optional(),
+  confirmation: z.literal('CONFIRM APPLY STAGING ROLLER MAINTENANCE').optional(),
+ }).strict();
+ return {schema, run: async (input: z.infer<typeof schema>) => {
+  try {
+   const hash = async (value:unknown) => sha256Hex(new TextEncoder().encode(JSON.stringify(value)));
+   const snippetRequest = async (body?:unknown) => {
+    const access=stagingProductImageAccess();
+    const r=await fetch(access.baseUrl+'/wp-json/code-snippets/v1/snippets/'+input.id,{
+     method:body ? 'PUT':'GET',redirect:'error',signal:AbortSignal.timeout(15000),headers:{Authorization:access.auth,Accept:'application/json','Content-Type':'application/json','Cache-Control':'no-cache'},
+     ...(body ? {body:JSON.stringify(body)} : {}),
+    });
+    if(!r.ok) throw new Error('Staging snippet API HTTP '+r.status+'; no browser login fallback requested.');
+    return r.json<any>();
+   };
+   const read = async () => {
+    if(input.resource==='snippet') {
+     const s=await snippetRequest();
+     if(s.id!==input.id || s.name!==input.expected_name || typeof s.code!=='string' || typeof s.active!=='boolean' || !/roller|width|measurement|sample/i.test(s.name)) throw new Error('Snippet identity or maintenance scope mismatch.');
+     return {identity:{id:s.id,name:s.name,active:s.active,scope:s.scope},value:s.code};
+    }
+    const p=await(await productImageWcFetch('staging','products/'+input.id)).json<any>();
+    if(p.id!==input.id || p.name!==input.expected_name || !/roller|fabric sample/i.test(p.name) || !['draft','publish'].includes(p.status)) throw new Error('Product identity or maintenance scope mismatch.');
+    const rows=(p.meta_data??[]).filter((m:any)=>m.key==='_wapf_fieldgroup');
+    if(rows.length!==1 || !Number.isInteger(rows[0].id)) throw new Error('WAPF metadata identity ambiguous.');
+    return {identity:{id:p.id,name:p.name,status:p.status,catalog_visibility:p.catalog_visibility,regular_price:p.regular_price,sale_price:p.sale_price,meta_id:rows[0].id},value:rows[0].value};
+   };
+   const before=await read(); const beforeHash=await hash(before);
+   if(input.action==='inspect') return toolResult({environment:'staging',write_performed:false,sha256:beforeHash,backup:before});
+   if(input.expected_sha256!==beforeHash) throw new Error('State changed; inspect and preview again.');
+   let next:any=structuredClone(before.value);
+   if(input.resource==='snippet') {
+    if(!input.replacements?.length || input.field_updates?.length) throw new Error('Snippet requires only exact replacements.');
+    for(const r of input.replacements) {
+     if(r.find===r.replace || next.split(r.find).length!==2) throw new Error('Each source replacement must match exactly once and change content.');
+     next=next.replace(r.find,()=>r.replace);
+    }
+   } else {
+    if(!input.field_updates?.length || input.replacements?.length) throw new Error('WAPF requires only field updates.');
+    const group=typeof next==='string'?JSON.parse(next):next;
+    if(!Array.isArray(group?.fields)) throw new Error('Unsupported WAPF group.');
+    const seen=new Set<string>();
+    for(const u of input.field_updates) {
+     const key=u.field_id+':'+u.property;
+     if(seen.has(key)) throw new Error('Duplicate field update.'); seen.add(key);
+     const matches=group.fields.filter((f:any)=>f.id===u.field_id);
+     if(matches.length!==1) throw new Error('Field identity missing or ambiguous.');
+     const f=matches[0], v=JSON.parse(u.value_json);
+     if(u.property==='required' && typeof v!=='boolean') throw new Error('Required must be boolean.');
+     if(u.property==='label' && (typeof v!=='string'||!v.trim())) throw new Error('Label must be nonempty.');
+     if(u.property==='conditionals' && !Array.isArray(v)) throw new Error('Conditions must be an array.');
+     if(['options','pricing'].includes(u.property) && (!v||typeof v!=='object'||Array.isArray(v))) throw new Error('Settings must be an object.');
+     if(u.property==='options') {
+      // Options edits cannot add, remove, reorder or rename persisted choice IDs.
+      const slugs=(o:any)=>(o?.choices??[]).map((c:any)=>c.slug);
+      if(JSON.stringify(slugs(f.options))!==JSON.stringify(slugs(v))) throw new Error('Choice identities must remain unchanged.');
+     }
+     f[u.property]=v;
+    }
+    next=typeof before.value==='string'?JSON.stringify(group):group;
+   }
+   if(JSON.stringify(next)===JSON.stringify(before.value)) throw new Error('No change.');
+   const afterExpected={identity:before.identity,value:next};
+   const planHash=await hash({resource:input.resource,before_sha256:beforeHash,after:afterExpected});
+   if(input.action==='preview') return toolResult({environment:'staging',write_performed:false,plan_sha256:planHash,backup:before,proposed:afterExpected,browser_verified:false});
+   if(input.confirmation!=='CONFIRM APPLY STAGING ROLLER MAINTENANCE'||input.plan_sha256!==planHash) throw new Error('Exact preview plan and confirmation required.');
+   const write=async(value:any)=> {
+    if(input.resource==='snippet') await snippetRequest({code:value});
+    else await productImageWcWrite('staging','products/'+input.id,{meta_data:[{id:(before.identity as any).meta_id,key:'_wapf_fieldgroup',value}]});
+   };
+   if(await hash(await read())!==beforeHash) throw new Error('Concurrent edit detected before write.');
+   try {
+    await write(next);
+    if(await hash(await read())!==await hash(afterExpected)) throw new Error('Read-back verification failed.');
+   } catch(_error) {
+    const current=await read();
+    if(await hash(current)===beforeHash) throw new Error('Write failed; original state verified.');
+    if(await hash(current)!==await hash(afterExpected)) throw new Error('Write outcome differs from both known states; refusing to overwrite a possible concurrent edit. Inspect staging.');
+    await write(before.value);
+    if(await hash(await read())!==beforeHash) throw new Error('Rollback could not be verified; inspect staging.');
+    throw new Error('Write failed; rollback verified.');
+   }
+   return toolResult({environment:'staging',write_performed:true,verified:true,sha256:await hash(afterExpected),backup:before,browser_verified:false});
+  } catch(error) {return toolError(error);}
+ }};
+}
+
+
+
 function createServer() {
 	const server = new McpServer({
 		name: "Blindmotion WooCommerce",
@@ -4466,6 +4565,8 @@ function createServer() {
 		// Keep the native Cloudflare fetch receiver out of the dependency object.
 		fetch: (input, init) => fetch(input, init),
 	});
+
+	const rollerMaintenance = createStagingRollerMaintenance();
 
 	server.registerTool(
 		"get_blindmotion_github_app_status",
@@ -5851,9 +5952,10 @@ function createServer() {
 		"manage_staging_blindmotion_plugin_deployment",
 		{
 			description:
-				"Inspect, install or update one reviewed allowlisted Blindmotion WordPress plugin on the exact staging origin. Inspection is read-only. Deployment hash-locks ZIP bytes, verifies current version and fixed identity, activates and verifies with transactional rollback. Also reads bounded plugin source, dry-runs sample routing and inspects/previews/applies hash-locked product descriptions with verified rollback. Cannot target live, pricing, publication status or arbitrary plugins.",
+				"Inspect, install or update one reviewed allowlisted Blindmotion WordPress plugin on the exact staging origin. Inspection is read-only. Deployment hash-locks ZIP bytes, verifies current version and fixed identity, activates and verifies with transactional rollback. Also reads bounded plugin source, dry-runs sample routing and inspects/previews/applies hash-locked product descriptions with verified rollback. Also supports roller_maintenance inspect/preview/apply for staging WAPF settings and exact existing snippet replacements, preserving IDs and publication. Cannot target live or arbitrary plugins.",
 			inputSchema: z.discriminatedUnion("action", [
                 ...stagingWorkSchemas,
+                z.object({ action: z.literal("roller_maintenance"), request: rollerMaintenance.schema }).strict(),
 				z.object({
 					action: z.literal("inspect"),
 					plugin_slug: STAGING_PLUGIN_SLUG_SCHEMA,
@@ -5873,6 +5975,7 @@ function createServer() {
 		},
 		async (input) => {
 			try {
+                if (input.action === "roller_maintenance") return rollerMaintenance.run(input.request);
                 if (input.action !== "inspect" && input.action !== "deploy") {
                     return runStagingWork(stagingPluginDeploymentRequest, input, input.action === "apply_content");
                 }
