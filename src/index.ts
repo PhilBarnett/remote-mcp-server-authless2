@@ -4465,7 +4465,7 @@ function createStagingRollerMaintenance() {
   try {
    const hash = async (value:unknown) => sha256Hex(new TextEncoder().encode(JSON.stringify(value)));
    const snippetRequest = async (body?:unknown) => {
-    const access=stagingProductImageAccess();
+    const access=stagingPluginDeploymentAccess();
     const r=await fetch(access.baseUrl+'/wp-json/code-snippets/v1/snippets/'+input.id,{
      method:body ? 'PUT':'GET',redirect:'manual',signal:AbortSignal.timeout(15000),headers:{Authorization:access.auth,Accept:'application/json','Content-Type':'application/json','Cache-Control':'no-cache'},
      ...(body ? {body:JSON.stringify(body)} : {}),
