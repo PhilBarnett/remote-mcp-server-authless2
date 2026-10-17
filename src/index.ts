@@ -4467,7 +4467,7 @@ function createStagingRollerMaintenance() {
    const snippetRequest = async (body?:unknown) => {
     const access=stagingProductImageAccess();
     const r=await fetch(access.baseUrl+'/wp-json/code-snippets/v1/snippets/'+input.id,{
-     method:body ? 'PUT':'GET',redirect:'error',signal:AbortSignal.timeout(15000),headers:{Authorization:access.auth,Accept:'application/json','Content-Type':'application/json','Cache-Control':'no-cache'},
+     method:body ? 'PUT':'GET',redirect:'manual',signal:AbortSignal.timeout(15000),headers:{Authorization:access.auth,Accept:'application/json','Content-Type':'application/json','Cache-Control':'no-cache'},
      ...(body ? {body:JSON.stringify(body)} : {}),
     });
     if(!r.ok) throw new Error('Staging snippet API HTTP '+r.status+'; no browser login fallback requested.');
