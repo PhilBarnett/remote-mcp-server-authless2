@@ -4470,7 +4470,15 @@ function createStagingRollerMaintenance() {
      method:body ? 'PUT':'GET',redirect:'manual',signal:AbortSignal.timeout(15000),headers:{Authorization:access.auth,Accept:'application/json','Content-Type':'application/json','Cache-Control':'no-cache'},
      ...(body ? {body:JSON.stringify(body)} : {}),
     });
-    if(!r.ok) throw new Error('Staging snippet API HTTP '+r.status+'; no browser login fallback requested.');
+    if(!r.ok) {
+     const contentType=(r.headers.get('content-type')||'').split(';')[0];
+     let wpCode='unavailable';
+     if(contentType==='application/json') {
+      const error=await r.json<any>().catch(()=>null);
+      if(typeof error?.code==='string' && /^[a-zA-Z0-9_-]{1,100}$/.test(error.code)) wpCode=error.code;
+     }
+     throw new Error('Staging snippet API HTTP '+r.status+'; response_type='+contentType+'; wordpress_code='+wpCode+'; no credentials or response body exposed.');
+    }
     return r.json<any>();
    };
    const read = async () => {
