@@ -526,3 +526,15 @@ non-mutating previews, tampered tokens/operations, stale-resource rejection,
 write/read-back, redaction and unsupported routes. Live Equinox connectivity,
 installed plugin routes and application-password acceptance remain deployment checks.
 
+
+## Staging roller maintenance without browser login
+
+The existing `manage_staging_blindmotion_plugin_deployment` tool accepts `action: "roller_maintenance"` and a nested `request`. No registered tool is added. Requests use `action: inspect | preview | apply`, `resource: wapf | snippet`, an exact `id` and `expected_name`. Only the fixed staging origin is addressable, through the existing `WP_STAGING_USERNAME` and application password.
+
+WAPF maintenance updates existing field labels, required flags, conditionals, pricing or options. Field IDs and ordered choice slugs cannot change. Snippet maintenance replaces uniquely matching source fragments in existing roller/width/measurement/sample snippets, preserving activation and scope. It cannot create/delete snippets. Review and syntax-check PHP before applying; an active snippet edit can affect staging immediately.
+
+Inspect returns a current-state SHA-256 and original backup. Preview takes that digest and changes (`field_updates` with `field_id`, `property`, `value_json`, or `replacements` with `find`, `replace`), returning an exact plan digest and proposed state. Apply repeats these inputs with `plan_sha256` and `confirmation: "CONFIRM APPLY STAGING ROLLER MAINTENANCE"`. Preserve preview backups in the task record before applying. The tool re-reads immediately before writing, verifies afterward and attempts rollback only when the observed state still matches the known proposed state. Unknown outcomes or concurrent edits stop explicitly; there is no server-side transactional lock and rollback is not guaranteed during outages.
+
+Deployment checks: existing staging deployment bridge 1.1.27 was confirmed active on 17 October 2026. That uses dedicated deployment credentials; it does NOT establish that the separate staging WordPress credential can edit Code Snippets. After deployment, inspect the exact WAPF product and snippet first. HTTP 401/403 or a missing snippet REST route requires permission/route repair; do not silently fall back to another browser login. No WordPress plugin upgrade is introduced by this patch. A connector schema refresh may be needed. OAuth expiry/revocation and cloud-browser takeover remain independent of these server changes. Production changes and browser/cart behaviour are not verified by a successful API write.
+
+Validation: TypeScript passes; lint has no errors; the configured 100-tool source ceiling passes unchanged. Mocked execution checks cover non-writing inspect/preview, current-state and plan guards, preserved choices/publication/activation, concurrent-edit refusal, staging-only addressing, and exact snippet replacements. Existing staging-work tests pass. Server permissions, real writes, cart quantity totals and 2400-to-2396 width behaviour remain post-deployment checks. Release follows the existing externally reviewed merge and Cloudflare workflow.
