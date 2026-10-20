@@ -44,7 +44,8 @@ function setup() {
 		},
 		post: async (path, params) => {
 			calls.push({ method: "POST", path, params });
-			account.spend_cap = params.spend_cap;
+			if (params.spend_cap_action === "reset") account.amount_spent = "0";
+ else account.spend_cap = params.spend_cap;
 			return { success: true };
 		},
 	};
@@ -184,4 +185,57 @@ test("uncertain writes and failed verification are explicit and never retried or
 	s2.deps.post = async () => ({ success: true });
 	const r2 = await s2.run(apply(p2));
 	assert.equal(r2.outcome, "UNVERIFIED");
+});
+
+const resetApply = p => ({ mode: "apply_reset", expected_account_name: "Blindmotion", preview_token: p.preview_token, confirmation: "CONFIRM META AMOUNT SPENT RESET" });
+async function resetPreview(s) {
+ s.account.amount_spent = "100000";
+ return s.run({ mode: "preview_reset", expected_account_name: "Blindmotion" });
+}
+test("reset preview preserves cap; apply posts only reset and rejects replay and cross-action tokens", async () => {
+ const s = setup(), p = await resetPreview(s);
+ assert.equal(s.writes().length, 0);
+ assert.equal(p.unchanged_limit_aud, 1000);
+ assert.equal(p.proposed_remaining_allowance_aud, 1000);
+ await assert.rejects(s.run(apply(p)));
+ const r = await s.run(resetApply(p));
+ assert.equal(r.verified, true);
+ assert.equal(r.unchanged_limit_aud, 1000);
+ assert.equal(r.spend_counted_against_limit_aud, 0);
+ assert.deepEqual(s.writes(), [{method: "POST", path:"act_123", params:{spend_cap_action:"reset"}}]);
+ await assert.rejects(s.run(resetApply(p)));
+ assert.equal(s.writes().length, 1);
+ const s2 = setup(), p2 = await preview(s2);
+ s2.account.amount_spent = "100000";
+ await assert.rejects(s2.run(resetApply(p2)));
+ assert.equal(s2.writes().length, 0);
+});
+test("reset blocks stale approval, changed identity/cap/spend, missing confirmation and tampering", async () => {
+ for (const alter of [
+ s=>s.advance(900001), s=>s.account.spend_cap="110000",
+ s=>s.account.amount_spent="100001", s=>s.account.name="Other",
+ s=>s.account.currency="USD", s=>s.account.account_status=2
+ ]) {
+  const s=setup(), p=await resetPreview(s); alter(s);
+  await assert.rejects(s.run(resetApply(p))); assert.equal(s.writes().length,0);
+ }
+ const s=setup(),p=await resetPreview(s);
+ await assert.rejects(s.run({...resetApply(p),preview_token:p.preview_token+"x"}));
+ assert.equal(schema.safeParse({...resetApply(p),confirmation:undefined}).success,false);
+ assert.equal(schema.safeParse({...resetApply(p),new_limit_aud:5500}).success,false);
+});
+test("reset uncertain outcomes never retry; unchanged spend or changed cap cannot verify", async()=>{
+ for(const outcome of ["throw","unchanged","cap_changed","new_spend"]){
+  const s=setup(),p=await resetPreview(s);let attempts=0;
+  s.deps.post=async()=>{
+   attempts++;
+   if(outcome==="throw")throw Error("private");
+   if(outcome==="cap_changed"){s.account.spend_cap="200000";s.account.amount_spent="0";}
+   if(outcome==="new_spend")s.account.amount_spent="1";
+   return {success:true};
+  };
+  const r=await s.run(resetApply(p));
+  assert.equal(r.verified,false);assert.equal(attempts,1);
+  assert.equal(r.outcome,outcome==="throw"?"UNKNOWN":"UNVERIFIED");
+ }
 });

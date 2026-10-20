@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const CONFIRMATION = "CONFIRM META ACCOUNT SPEND LIMIT CHANGE";
+const RESET_CONFIRMATION = "CONFIRM META AMOUNT SPENT RESET";
 const TTL = 15 * 60 * 1000;
 const enc = new TextEncoder();
 const money = z
@@ -11,6 +12,8 @@ const money = z
 	.refine((v) => Math.abs(v * 100 - Math.round(v * 100)) < 0.000001, "Use whole cents.");
 export const metaSpendLimitSchema = z.discriminatedUnion("mode", [
 	z.object({ mode: z.literal("read") }).strict(),
+ z.object({ mode: z.literal("preview_reset"), expected_account_name: z.string().min(1) }).strict(),
+ z.object({ mode: z.literal("apply_reset"), expected_account_name: z.string().min(1), preview_token: z.string().max(6000), confirmation: z.literal(RESET_CONFIRMATION) }).strict(),
 	z
 		.object({
 			mode: z.literal("preview"),
@@ -199,7 +202,9 @@ export async function manageMetaSpendLimit(deps: Deps, input: unknown) {
 		current.disable_reason === null
 	)
 		throw new Error("Account financial/status fields are missing or invalid; refusing change.");
-	const proposed = Math.round(args.new_limit_aud * 100);
+	if (args.mode === "preview_reset" || args.mode === "apply_reset")
+        return manageReset(deps, config, current, args, now);
+ const proposed = Math.round(args.new_limit_aud * 100);
 	if (proposed <= current.spent)
 		throw new Error("New finite limit must exceed the current counted spend.");
 	const plan = {
@@ -320,4 +325,63 @@ export async function manageMetaSpendLimit(deps: Deps, input: unknown) {
 				"Meta accepted the request but verification failed. Read the account before any further change. No retry or rollback was attempted.",
 		};
 	}
+}
+
+async function manageReset(
+ deps: Deps, config: ReturnType<Deps["getConfig"]>,
+ current: ReturnType<typeof accountSnapshot>,
+ args: { mode: "preview_reset" | "apply_reset"; preview_token?: string }, now: number,
+) {
+ if (current.cap === null || current.cap <= 0 || current.spent === null || current.spent < current.cap)
+  throw new Error("Reset requires an exhausted finite account limit; refusing to replenish a running account.");
+ const plan = { version: 2, action: "reset_amount_spent", account: current, issued_at: now, expires_at: now + TTL };
+ if (args.mode === "preview_reset") {
+  const payload = JSON.stringify(plan);
+  const signed = await sign(payload, config.accessToken);
+  return {
+   write_performed: false, action: plan.action, account_id: current.id, account_name: current.name,
+   currency: "AUD", timezone: current.timezone, unchanged_limit_aud: current.cap / 100,
+   previous_counted_spend_aud: current.spent / 100, proposed_counted_spend_aud: 0,
+   proposed_remaining_allowance_aud: current.cap / 100,
+   preview_token: btoa(unescape(encodeURIComponent(payload))) + "." + hex(signed.signature),
+   expires_at: new Date(plan.expires_at).toISOString(), required_confirmation: RESET_CONFIRMATION,
+   note: "Approve resetting counted spend to zero while retaining this exact cap. Active campaigns may immediately resume spending. This does not erase charges or historical reporting.",
+  };
+ }
+ let approved: typeof plan;
+ try {
+  const [encoded, signature, extra] = args.preview_token!.split(".");
+  if (extra !== undefined || !/^[a-f0-9]{64}$/.test(signature ?? "")) throw new Error();
+  const payload = decodeURIComponent(escape(atob(encoded)));
+  const { key } = await sign(payload, config.accessToken);
+  const bytes = Uint8Array.from(signature.match(/../g)!, x => parseInt(x, 16));
+  if (!(await crypto.subtle.verify("HMAC", key, bytes, enc.encode(payload)))) throw new Error();
+  approved = JSON.parse(payload);
+ } catch { throw new Error("Invalid or tampered Meta reset preview token."); }
+ if (approved.version !== 2 || approved.action !== plan.action ||
+     approved.expires_at <= now || approved.issued_at > now ||
+     approved.expires_at - approved.issued_at !== TTL ||
+     JSON.stringify(approved.account) !== JSON.stringify(current))
+  throw new Error("Expired reset preview or changed account state; request a fresh preview.");
+ // Never retry: reset is non-idempotent and may immediately authorise more spending.
+ try {
+  const result = await deps.post(config.adAccountId, { spend_cap_action: "reset" });
+  if (result?.success !== true) throw new Error();
+ } catch {
+  return { action: plan.action, write_attempted: true, verified: false, outcome: "UNKNOWN",
+   instruction: "Read the account before any further action. Reset may have applied; never retry automatically." };
+ }
+ try {
+  const after = accountSnapshot(await safeGet(deps, config.adAccountId, { fields }), config.adAccountId);
+  if (after.cap !== current.cap || after.name !== current.name || after.timezone !== current.timezone ||
+      after.status !== current.status || after.disable_reason !== current.disable_reason ||
+      after.spent === null || after.spent !== 0) throw new Error();
+  return { action: plan.action, updated: true, verified: true, account_id: after.id,
+   unchanged_limit_aud: after.cap! / 100, previous_counted_spend_aud: current.spent / 100,
+   spend_counted_against_limit_aud: 0, remaining_allowance_aud: after.cap! / 100,
+   note: "Counted spend reset to zero; cap preserved. Delivery resumption requires separate verification." };
+ } catch {
+  return { action: plan.action, write_attempted: true, verified: false, outcome: "UNVERIFIED",
+   instruction: "Meta accepted reset but exact zero spend and unchanged cap were not verified. New spend may already have accrued. Read the account; never retry automatically." };
+ }
 }

@@ -7472,7 +7472,7 @@ function createServer() {
 		"get_meta_budget_settings",
 		{
 			description:
-				"Inspect Meta budgets or manage the configured AUD account spending limit. Omit account_spend_limit for existing campaign/ad-set budget reads. account_spend_limit mode=read reports cap, counted spend, remaining allowance, status, timezone and early warnings. mode=preview is read-only and produces a signed 15-minute preview; mode=apply requires exact approved account name, amount, token and confirmation. Only a finite spend_cap can be set; no reset/removal or campaign changes. Read warnings require scheduled polling for proactive alerts.",
+				"Inspect Meta budgets or manage the configured AUD account spending limit. Omit account_spend_limit for existing campaign/ad-set budget reads. account_spend_limit mode=read reports cap, counted spend, remaining allowance, status, timezone and early warnings. mode=preview is read-only and produces a signed 15-minute preview; mode=apply requires exact approved account name, amount, token and confirmation. mode=preview_reset previews resetting counted spend to zero while preserving an exhausted finite cap; mode=apply_reset requires the signed reset preview and exact reset confirmation. Reset may immediately resume spending. No limit removal or campaign changes. Read warnings require scheduled polling for proactive alerts.",
 			annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
 			inputSchema: z.object({
 				status: z.enum(["ACTIVE", "PAUSED", "ALL"]).default("ACTIVE"),

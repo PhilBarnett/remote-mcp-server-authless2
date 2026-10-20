@@ -542,7 +542,7 @@ Validation: TypeScript passes; lint has no errors; the configured 100-tool sourc
 ## Meta account spending limit
 
 `get_meta_budget_settings` preserves its existing `status`/`limit` budget reads.
-Its optional `account_spend_limit` object adds `read`, `preview` and `apply` modes
+Its optional `account_spend_limit` object adds `read`, `preview`, `apply`, `preview_reset` and `apply_reset` modes
 without increasing the 100-tool surface. It targets only the configured AUD Meta
 ad account; it reuses the existing Meta token and API version. Account-level read
 and write access must be granted to that system user by Meta. No new secrets are
@@ -577,11 +577,27 @@ Apply rejects tampered/expired tokens, changed identity/currency/timezone/status
 changed current cap and a decreased spent counter. Normal growth in spent is
 allowed, with the requested cap rechecked against current spend. Only a positive
 finite cap above counted spend can be set (whole cents, up to A$1 million).
-Only `spend_cap` is posted: no reset action, removal, campaign budget or status
-writes. The account is reread afterward and the actual cap verified. If an API
+Cap changes post only `spend_cap`; resets use the separate flow below. Neither
+flow removes the limit or changes campaign budgets or statuses. The account is reread afterward and the actual cap verified. If an API
 write or verification is uncertain, the result explicitly instructs a read before
 any retry; no automatic retry or rollback occurs. Repeating an approved request
 when the cap is already at its target is a verified no-op.
+
+### Reset amount spent
+
+For an exhausted finite cap, call `preview_reset` with the exact account name.
+The preview shows the unchanged cap, existing counted spend, proposed zero counter
+and restored allowance. Approve this exact reset and its potential to resume active
+campaign spending, then call `apply_reset` with the account name, preview token and
+`confirmation: "CONFIRM META AMOUNT SPENT RESET"`. No new limit is supplied.
+The distinct signed reset token expires after 15 minutes and binds all observed
+account state, including exact counted spend. Any state change requires a fresh
+preview. Apply sends only `spend_cap_action=reset`. It verifies counted spend is
+zero and the cap remains unchanged. Historical reporting and charges are not
+erased. If spend has already accrued or the response is uncertain, report
+UNVERIFIED/UNKNOWN and reread; never retry automatically. A successful reset
+makes the account ineligible for another reset until its finite cap is exhausted.
+Live reset permission and behavior remain unverified until an authorized reset.
 
 ### Early-warning delivery
 
