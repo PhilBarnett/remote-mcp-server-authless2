@@ -1,3 +1,4 @@
+import { metaSpendLimitSchema, manageMetaSpendLimit } from "./tools/meta-spend-limit";
 import { authenticatedMcp, type AuthEnv } from "./oauth";
 import { EQUINOX_PRICING_PATHS, verifyEquinoxPricing, assertEquinoxPricingReadOnly } from "./equinox-pricing";
 import { purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult } from "./tools/ga4-purchase-diagnostics";
@@ -7471,14 +7472,17 @@ function createServer() {
 		"get_meta_budget_settings",
 		{
 			description:
-				"Inspect current Meta campaign and ad-set budgets. Read-only; use this before any budget update.",
+				"Inspect Meta budgets or manage the configured AUD account spending limit. Omit account_spend_limit for existing campaign/ad-set budget reads. account_spend_limit mode=read reports cap, counted spend, remaining allowance, status, timezone and early warnings. mode=preview is read-only and produces a signed 15-minute preview; mode=apply requires exact approved account name, amount, token and confirmation. Only a finite spend_cap can be set; no reset/removal or campaign changes. Read warnings require scheduled polling for proactive alerts.",
+			annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
 			inputSchema: z.object({
 				status: z.enum(["ACTIVE", "PAUSED", "ALL"]).default("ACTIVE"),
 				limit: z.number().int().min(1).max(100).default(50),
+				account_spend_limit: metaSpendLimitSchema.optional(),
 			}),
 		},
-		async ({ status, limit }) => {
+		async ({ status, limit, account_spend_limit }) => {
 			try {
+				if (account_spend_limit) return toolResult(await manageMetaSpendLimit({ getConfig: getMetaConfig, get: metaFetch, post: metaPost }, account_spend_limit));
 				const { adAccountId } = getMetaConfig();
 				const params: Record<string, string | number | undefined> = {
 					fields: "id,name,status,effective_status,daily_budget,lifetime_budget,budget_remaining",

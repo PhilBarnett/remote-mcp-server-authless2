@@ -42,6 +42,9 @@ jobs:
       - name: Test product image and choice-label guards
         run: node --experimental-strip-types scripts/test-product-option-edits.mjs
 
+      - name: Test Meta account spending-limit guards
+        run: node --test scripts/test-meta-spend-limit.mjs
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 100
 
