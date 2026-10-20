@@ -538,3 +538,67 @@ Inspect returns a current-state SHA-256 and original backup. Preview takes that 
 Deployment checks: existing staging deployment bridge 1.1.27 was confirmed active on 17 October 2026. That uses dedicated deployment credentials; it does NOT establish that the separate staging WordPress credential can edit Code Snippets. After deployment, inspect the exact WAPF product and snippet first. HTTP 401/403 or a missing snippet REST route requires permission/route repair; do not silently fall back to another browser login. No WordPress plugin upgrade is introduced by this patch. A connector schema refresh may be needed. OAuth expiry/revocation and cloud-browser takeover remain independent of these server changes. Production changes and browser/cart behaviour are not verified by a successful API write.
 
 Validation: TypeScript passes; lint has no errors; the configured 100-tool source ceiling passes unchanged. Mocked execution checks cover non-writing inspect/preview, current-state and plan guards, preserved choices/publication/activation, concurrent-edit refusal, staging-only addressing, and exact snippet replacements. Existing staging-work tests pass. Server permissions, real writes, cart quantity totals and 2400-to-2396 width behaviour remain post-deployment checks. Release follows the existing externally reviewed merge and Cloudflare workflow.
+
+## Meta account spending limit
+
+`get_meta_budget_settings` preserves its existing `status`/`limit` budget reads.
+Its optional `account_spend_limit` object adds `read`, `preview` and `apply` modes
+without increasing the 100-tool surface. It targets only the configured AUD Meta
+ad account; it reuses the existing Meta token and API version. Account-level read
+and write access must be granted to that system user by Meta. No new secrets are
+required. Deployment itself never changes a spending limit.
+
+Read:
+```json
+{"account_spend_limit":{"mode":"read"}}
+```
+Returns current finite limit (or explicit unlimited/unknown state), spend counted
+against the cap, remaining allowance, account status/disable reason and timezone.
+Missing monetary fields remain unknown. Minor units from the account API are
+converted to AUD; Insights spend is already in AUD. Forecast uses the last seven
+complete days in the returned account timezone, not UTC or the caller's timezone.
+Warnings trigger when remaining allowance is at or below the largest of A$500,
+20% of the finite limit, or three days of average recent spend. An exhausted cap
+is explicit. The estimate can understate future spending after a delivery outage.
+Meta-imposed daily restrictions and payment failures are separate from this cap.
+
+Preview:
+```json
+{"account_spend_limit":{"mode":"preview","expected_account_name":"<exact name from read>","new_limit_aud":5000}}
+```
+Shows before/after cap and allowance, plus a signed 15-minute token. Present the
+exact account, proposed finite cap and potential resumption of active campaign
+spending to the user and obtain approval before applying. Apply repeats those
+exact inputs with `mode: "apply"`, `preview_token`, and
+`confirmation: "CONFIRM META ACCOUNT SPEND LIMIT CHANGE"`. A generic instruction
+to install this capability does not approve any financial change.
+
+Apply rejects tampered/expired tokens, changed identity/currency/timezone/status,
+changed current cap and a decreased spent counter. Normal growth in spent is
+allowed, with the requested cap rechecked against current spend. Only a positive
+finite cap above counted spend can be set (whole cents, up to A$1 million).
+Only `spend_cap` is posted: no reset action, removal, campaign budget or status
+writes. The account is reread afterward and the actual cap verified. If an API
+write or verification is uncertain, the result explicitly instructs a read before
+any retry; no automatic retry or rollback occurs. Repeating an approved request
+when the cap is already at its target is a verified no-op.
+
+### Early-warning delivery
+
+The read tool computes warnings; it does not run a background timer or send mail.
+After deployment, a daily read-only scheduled check should call the read mode and
+notify Phil for `APPROACHING_LIMIT` or `EXHAUSTED`, showing allowance and estimated
+runway. `UNKNOWN` requires investigation, never a healthy assertion. That check
+must not preview/apply financial changes automatically. The existing weekly
+marketing review can include the same read. No proactive alert schedule is
+installed by this source change.
+
+Tests: `node --test scripts/test-meta-spend-limit.mjs`. The suite covers AUD units,
+local dates, missing data, warnings, approval/token integrity, state drift,
+verification and uncertain-write handling. Live account access remains a
+post-deployment read-only check; never test a write without a separately approved
+amount.
+
+API references: [Meta AdAccount reference](https://developers.facebook.com/docs/marketing-api/reference/ad-account/),
+[Meta's account update example](https://www.postman.com/meta/facebook-marketing-api/request/wkoohbd/updating-adaccount-basic-details-l4),
+[Meta account spending-limit help](https://www.facebook.com/business/help/203321833042958).

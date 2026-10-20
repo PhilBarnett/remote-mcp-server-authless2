@@ -56,5 +56,8 @@ jobs:
       - name: Test MCP OAuth and site isolation
         run: npm run test:mcp-auth
 
+      - name: Test Meta account spending-limit guards
+        run: node --test scripts/test-meta-spend-limit.mjs
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 100
