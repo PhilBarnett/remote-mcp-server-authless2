@@ -952,10 +952,10 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 			description:
 				"Transfer a hash-verified contiguous video part of up to 16 MB into an existing Meta resumable upload, automatically satisfying as many consecutive Meta-requested chunk ranges as the part contains. Intended for locally extracted ChatGPT attachments/ZIP files so the caller does not need one tool call per Meta chunk. Returns the exact next offset and how many supplied bytes were consumed.",
 			inputSchema: z.object({
-				video_id: z.string().regex(/^\\d+$/),
-				upload_session_id: z.string().regex(/^\\d+$/),
-				start_offset: z.string().regex(/^\\d+$/),
-				end_offset: z.string().regex(/^\\d+$/),
+				video_id: z.string().regex(/^\d+$/),
+				upload_session_id: z.string().regex(/^\d+$/),
+				start_offset: z.string().regex(/^\d+$/),
+				end_offset: z.string().regex(/^\d+$/),
 				part_base64: z.string().min(4).max(22_000_000),
 				expected_part_sha256: z.string().regex(/^[a-f0-9]{64}$/),
 				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
@@ -1007,8 +1007,8 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					const nextStartOffset = String(payload?.start_offset ?? "");
 					const nextEndOffset = String(payload?.end_offset ?? "");
 					if (
-						!/^\\d+$/.test(nextStartOffset) ||
-						!/^\\d+$/.test(nextEndOffset) ||
+						!/^\d+$/.test(nextStartOffset) ||
+						!/^\d+$/.test(nextEndOffset) ||
 						nextStartOffset !== String(currentEnd) ||
 						Number(nextEndOffset) < Number(nextStartOffset)
 					) {
