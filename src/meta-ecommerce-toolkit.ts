@@ -781,8 +781,12 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				if (source_file.mime_type && source_file.mime_type !== mime_type) {
 					throw new Error("ChatGPT file MIME type does not match mime_type.");
 				}
-				if (source_file.file_name && source_file.file_name.toLowerCase() !== filename.toLowerCase()) {
-					throw new Error("ChatGPT file name does not match filename.");
+				if (source_file.file_name) {
+					const sourceExtension = source_file.file_name.toLowerCase().split(".").pop();
+					const expectedExtension = mime_type === "video/mp4" ? "mp4" : "mov";
+					if (sourceExtension !== expectedExtension) {
+						throw new Error("ChatGPT file extension does not match mime_type.");
+					}
 				}
 				const trustedSource = assertTrustedVideoSourceUrl(source_file.download_url);
 				const existing = (await listAccountVideos()).filter(
