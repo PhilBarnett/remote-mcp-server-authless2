@@ -823,8 +823,8 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				let currentStart = Number(started?.start_offset ?? NaN);
 				let currentEnd = Number(started?.end_offset ?? NaN);
 				if (
-					!/^\\d+$/.test(videoId) ||
-					!/^\\d+$/.test(uploadSessionId) ||
+					!/^\d+$/.test(videoId) ||
+					!/^\d+$/.test(uploadSessionId) ||
 					!Number.isSafeInteger(currentStart) ||
 					!Number.isSafeInteger(currentEnd) ||
 					currentEnd <= currentStart
@@ -854,8 +854,8 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					const nextStart = String(payload?.start_offset ?? "");
 					const nextEnd = String(payload?.end_offset ?? "");
 					if (
-						!/^\\d+$/.test(nextStart) ||
-						!/^\\d+$/.test(nextEnd) ||
+						!/^\d+$/.test(nextStart) ||
+						!/^\d+$/.test(nextEnd) ||
 						nextStart !== String(currentEnd) ||
 						Number(nextEnd) < Number(nextStart)
 					) {
