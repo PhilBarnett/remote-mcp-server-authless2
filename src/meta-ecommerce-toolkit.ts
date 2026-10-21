@@ -5,6 +5,7 @@ import { z } from "zod";
 const META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION = "CONFIRM UPLOAD META VIDEO BATCH";
 const META_MAX_RESUMABLE_CHUNK_BYTES = 8_000_000;
 const META_MAX_RESUMABLE_PART_BYTES = 16_000_000;
+const META_MAX_HOST_VIDEO_FILE_BYTES = 80_000_000;
 const META_ECOMMERCE_AD_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ECOMMERCE AD";
 const META_AD_STATUS_CONFIRMATION = "CONFIRM META AD STATUS CHANGE";
 const META_ECOMMERCE_LAUNCH_CONFIRMATION = "CONFIRM LAUNCH META ECOMMERCE CAMPAIGN";
@@ -753,6 +754,158 @@ const websiteAdCopySchema = {
 };
 
 export function registerMetaEcommerceToolkit(server: McpServer) {
+	server.registerTool(
+		"upload_meta_ad_video_from_host_file_guarded",
+		{
+			description:
+				"Upload one MP4 or QuickTime video directly from a host-provided uploaded-file reference. The host may resolve a local ChatGPT attachment path to a short-lived HTTPS URL before this tool runs. The Worker verifies trusted OpenAI hosting, exact byte length and whole-file SHA-256, then performs Meta's complete resumable upload and finish sequence. It cannot create or activate ads or campaigns.",
+			inputSchema: z.object({
+				title: z.string().trim().min(1).max(255),
+				filename: z.string().trim().min(5).max(200),
+				mime_type: z.enum(["video/mp4", "video/quicktime"]),
+				file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
+				expected_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+				source_file_url: z.string().url(),
+				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
+			}),
+		},
+		async ({ title, filename, mime_type, file_size, expected_sha256, source_file_url }) => {
+			try {
+				const safeFilename = safeVideoFilename(filename, mime_type);
+				const trustedSource = assertTrustedVideoSourceUrl(source_file_url);
+				const existing = (await listAccountVideos()).filter(
+					(item: any) => String(item?.title ?? "") === title,
+				);
+				if (existing.length) {
+					throw new Error(
+						`Refusing host-file upload: ${existing.length} ad-account video(s) already use this exact title.`,
+					);
+				}
+				const sourceResponse = await fetch(trustedSource, {
+					headers: { Accept: "video/mp4,video/quicktime,application/octet-stream" },
+					redirect: "follow",
+				});
+				if (!sourceResponse.ok) {
+					await sourceResponse.body?.cancel().catch(() => undefined);
+					throw new Error(`Host video source fetch failed: HTTP ${sourceResponse.status}.`);
+				}
+				const sourceType = (sourceResponse.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+				if (
+					sourceType &&
+					!["video/mp4", "video/quicktime", "application/octet-stream"].includes(sourceType)
+				) {
+					await sourceResponse.body?.cancel().catch(() => undefined);
+					throw new Error(`Host video source returned unsupported MIME type ${sourceType}.`);
+				}
+				const declaredLength = sourceResponse.headers.get("content-length");
+				if (declaredLength && Number(declaredLength) !== file_size) {
+					await sourceResponse.body?.cancel().catch(() => undefined);
+					throw new Error("Host video source Content-Length does not match file_size.");
+				}
+				const buffer = await sourceResponse.arrayBuffer();
+				const bytes = new Uint8Array(buffer);
+				if (bytes.length !== file_size) {
+					throw new Error(
+						`Host video source byte length ${bytes.length} does not match expected file_size ${file_size}.`,
+					);
+				}
+				const actualSha256 = await toolkitSha256Hex(bytes);
+				if (actualSha256 !== expected_sha256) {
+					throw new Error("Host video source SHA-256 does not match expected_sha256; no Meta upload was started.");
+				}
+				const { accessToken, apiVersion, adAccountId } = getToolkitMetaConfig();
+				const started = await toolkitMetaPost(`${adAccountId}/advideos`, {
+					upload_phase: "start",
+					file_size,
+				});
+				const videoId = String(started?.video_id ?? "");
+				const uploadSessionId = String(started?.upload_session_id ?? "");
+				let currentStart = Number(started?.start_offset ?? NaN);
+				let currentEnd = Number(started?.end_offset ?? NaN);
+				if (
+					!/^\d+$/.test(videoId) ||
+					!/^\d+$/.test(uploadSessionId) ||
+					!Number.isSafeInteger(currentStart) ||
+					!Number.isSafeInteger(currentEnd) ||
+					currentEnd <= currentStart
+				) {
+					throw new Error("Meta did not return a valid resumable upload session.");
+				}
+				let transferCount = 0;
+				while (currentEnd > currentStart) {
+					const required = currentEnd - currentStart;
+					if (required > META_MAX_RESUMABLE_CHUNK_BYTES) {
+						throw new Error(
+							`Meta requested a ${required}-byte chunk, above the guarded ${META_MAX_RESUMABLE_CHUNK_BYTES}-byte limit.`,
+						);
+					}
+					if (currentEnd > bytes.length) {
+						throw new Error("Meta requested bytes beyond the verified host video file.");
+					}
+					const chunk = bytes.subarray(currentStart, currentEnd);
+					const payload = await transferMetaVideoChunk(
+						adAccountId,
+						accessToken,
+						apiVersion,
+						uploadSessionId,
+						String(currentStart),
+						chunk,
+					);
+					const nextStart = String(payload?.start_offset ?? "");
+					const nextEnd = String(payload?.end_offset ?? "");
+					if (
+						!/^\d+$/.test(nextStart) ||
+						!/^\d+$/.test(nextEnd) ||
+						nextStart !== String(currentEnd) ||
+						Number(nextEnd) < Number(nextStart)
+					) {
+						throw new Error("Meta returned unexpected resumable upload offsets after transfer.");
+					}
+					currentStart = Number(nextStart);
+					currentEnd = Number(nextEnd);
+					transferCount += 1;
+					if (transferCount > 100) throw new Error("Meta upload exceeded the guarded transfer-count limit.");
+				}
+				if (currentStart !== file_size || currentEnd !== file_size) {
+					throw new Error("Meta offsets do not prove the complete verified host file was transferred.");
+				}
+				const finished = await toolkitMetaPost(`${adAccountId}/advideos`, {
+					upload_phase: "finish",
+					upload_session_id: uploadSessionId,
+					title,
+				});
+				if (finished?.success !== true) {
+					throw new Error("Meta did not confirm host-file resumable upload completion.");
+				}
+				const visibleVideo = (await listAccountVideos()).find(
+					(item: any) => String(item?.id) === videoId,
+				);
+				return textResult({
+					uploaded: true,
+					video_id: videoId,
+					upload_session_id: uploadSessionId,
+					transfer_count: transferCount,
+					verified_sha256: actualSha256,
+					verified_file_size: bytes.length,
+					visible_as_owned_ad_account_video: Boolean(visibleVideo),
+					processing_complete: visibleVideo?.status?.processing_phase?.status === "complete",
+					video: visibleVideo ? { ...visibleVideo, derived_dimensions: derivedVideoDimensions(visibleVideo) } : null,
+					source_manifest: {
+						title,
+						filename: safeFilename,
+						mime_type,
+						file_size,
+						expected_sha256,
+					},
+					ad_or_campaign_created: false,
+					activation_performed: false,
+				});
+			} catch (error) {
+				return errorResult(error);
+			}
+		},
+	);
+
 	server.registerTool(
 		"start_meta_ad_video_resumable_upload_guarded",
 		{
