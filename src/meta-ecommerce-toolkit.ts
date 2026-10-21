@@ -757,22 +757,34 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 	server.registerTool(
 		"upload_meta_ad_video_from_host_file_guarded",
 		{
+			_meta: { "openai/fileParams": ["source_file"] },
 			description:
-				"Upload one MP4 or QuickTime video directly from a host-provided uploaded-file argument. Pass the local ChatGPT attachment path in source_file; the host resolves it to a short-lived HTTPS file reference before the remote MCP executes. The Worker then verifies trusted OpenAI hosting, exact byte length and whole-file SHA-256, and performs Meta's complete resumable upload and finish sequence. It cannot create or activate ads or campaigns.",
+				"Upload one MP4 or QuickTime video directly from a ChatGPT file parameter. ChatGPT supplies a temporary download URL plus file metadata in source_file. The Worker verifies trusted OpenAI hosting, exact byte length and whole-file SHA-256, then performs Meta's complete resumable upload and finish sequence. It cannot create or activate ads or campaigns.",
 			inputSchema: z.object({
 				title: z.string().trim().min(1).max(255),
 				filename: z.string().trim().min(5).max(200),
 				mime_type: z.enum(["video/mp4", "video/quicktime"]),
 				file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
 				expected_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				source_file: z.string().trim().min(1).max(4096),
+				source_file: z.object({
+					download_url: z.string().url(),
+					file_id: z.string().min(1),
+					mime_type: z.string().optional(),
+					file_name: z.string().optional(),
+				}),
 				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
 			}),
 		},
 		async ({ title, filename, mime_type, file_size, expected_sha256, source_file }) => {
 			try {
 				const safeFilename = safeVideoFilename(filename, mime_type);
-				const trustedSource = assertTrustedVideoSourceUrl(source_file);
+				if (source_file.mime_type && source_file.mime_type !== mime_type) {
+					throw new Error("ChatGPT file MIME type does not match mime_type.");
+				}
+				if (source_file.file_name && source_file.file_name.toLowerCase() !== filename.toLowerCase()) {
+					throw new Error("ChatGPT file name does not match filename.");
+				}
+				const trustedSource = assertTrustedVideoSourceUrl(source_file.download_url);
 				const existing = (await listAccountVideos()).filter(
 					(item: any) => String(item?.title ?? "") === title,
 				);
