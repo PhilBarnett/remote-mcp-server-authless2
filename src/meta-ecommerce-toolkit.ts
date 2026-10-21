@@ -758,21 +758,21 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"upload_meta_ad_video_from_host_file_guarded",
 		{
 			description:
-				"Upload one MP4 or QuickTime video directly from a host-provided uploaded-file reference. The host may resolve a local ChatGPT attachment path to a short-lived HTTPS URL before this tool runs. The Worker verifies trusted OpenAI hosting, exact byte length and whole-file SHA-256, then performs Meta's complete resumable upload and finish sequence. It cannot create or activate ads or campaigns.",
+				"Upload one MP4 or QuickTime video directly from a host-provided uploaded-file argument. Pass the local ChatGPT attachment path in source_file; the host resolves it to a short-lived HTTPS file reference before the remote MCP executes. The Worker then verifies trusted OpenAI hosting, exact byte length and whole-file SHA-256, and performs Meta's complete resumable upload and finish sequence. It cannot create or activate ads or campaigns.",
 			inputSchema: z.object({
 				title: z.string().trim().min(1).max(255),
 				filename: z.string().trim().min(5).max(200),
 				mime_type: z.enum(["video/mp4", "video/quicktime"]),
 				file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
 				expected_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				source_file_url: z.string().url(),
+				source_file: z.string().trim().min(1).max(4096),
 				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
 			}),
 		},
-		async ({ title, filename, mime_type, file_size, expected_sha256, source_file_url }) => {
+		async ({ title, filename, mime_type, file_size, expected_sha256, source_file }) => {
 			try {
 				const safeFilename = safeVideoFilename(filename, mime_type);
-				const trustedSource = assertTrustedVideoSourceUrl(source_file_url);
+				const trustedSource = assertTrustedVideoSourceUrl(source_file);
 				const existing = (await listAccountVideos()).filter(
 					(item: any) => String(item?.title ?? "") === title,
 				);
