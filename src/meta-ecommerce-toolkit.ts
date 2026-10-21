@@ -4,6 +4,7 @@ import { z } from "zod";
 
 const META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION = "CONFIRM UPLOAD META VIDEO BATCH";
 const META_MAX_RESUMABLE_CHUNK_BYTES = 8_000_000;
+const META_MAX_RESUMABLE_PART_BYTES = 16_000_000;
 const META_ECOMMERCE_AD_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ECOMMERCE AD";
 const META_AD_STATUS_CONFIRMATION = "CONFIRM META AD STATUS CHANGE";
 const META_ECOMMERCE_LAUNCH_CONFIRMATION = "CONFIRM LAUNCH META ECOMMERCE CAMPAIGN";
@@ -152,6 +153,51 @@ function decodeResumableChunk(value: string) {
 	const bytes = new Uint8Array(binary.length);
 	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
 	return bytes;
+}
+
+function decodeResumablePart(value: string) {
+	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
+		throw new Error("part_base64 is not canonical base64 data.");
+	}
+	const binary = atob(value);
+	if (binary.length < 1 || binary.length > META_MAX_RESUMABLE_PART_BYTES) {
+		throw new Error(
+			`Video part must contain between 1 and ${META_MAX_RESUMABLE_PART_BYTES} bytes.`,
+		);
+	}
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+	return bytes;
+}
+
+async function transferMetaVideoChunk(
+	adAccountId: string,
+	accessToken: string,
+	apiVersion: string,
+	uploadSessionId: string,
+	startOffset: string,
+	bytes: Uint8Array,
+) {
+	const form = new FormData();
+	form.set("upload_phase", "transfer");
+	form.set("upload_session_id", uploadSessionId);
+	form.set("start_offset", startOffset);
+	form.set("video_file_chunk", new Blob([bytes], { type: "application/octet-stream" }), "chunk.bin");
+	const response = await fetch(
+		`https://graph.facebook.com/${apiVersion}/${adAccountId}/advideos`,
+		{
+			method: "POST",
+			headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+			body: form,
+		},
+	);
+	const payload: any = await response.json().catch(() => ({}));
+	if (!response.ok || payload?.error) {
+		throw new Error(
+			`Meta resumable chunk transfer failed (${response.status}): ${payload?.error?.message ?? "unknown error"}`,
+		);
+	}
+	return payload;
 }
 
 function safeVideoFilename(filename: string, mimeType: "video/mp4" | "video/quicktime") {
@@ -891,6 +937,109 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					next_start_offset: nextStartOffset,
 					next_end_offset: nextEndOffset,
 					upload_complete: nextStartOffset === nextEndOffset,
+					ad_or_campaign_created: false,
+					activation_performed: false,
+				});
+			} catch (error) {
+				return errorResult(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"transfer_meta_ad_video_resumable_part_guarded",
+		{
+			description:
+				"Transfer a hash-verified contiguous video part of up to 16 MB into an existing Meta resumable upload, automatically satisfying as many consecutive Meta-requested chunk ranges as the part contains. Intended for locally extracted ChatGPT attachments/ZIP files so the caller does not need one tool call per Meta chunk. Returns the exact next offset and how many supplied bytes were consumed.",
+			inputSchema: z.object({
+				video_id: z.string().regex(/^\\d+$/),
+				upload_session_id: z.string().regex(/^\\d+$/),
+				start_offset: z.string().regex(/^\\d+$/),
+				end_offset: z.string().regex(/^\\d+$/),
+				part_base64: z.string().min(4).max(22_000_000),
+				expected_part_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
+			}),
+		},
+		async ({
+			video_id,
+			upload_session_id,
+			start_offset,
+			end_offset,
+			part_base64,
+			expected_part_sha256,
+		}) => {
+			try {
+				let currentStart = Number(start_offset);
+				let currentEnd = Number(end_offset);
+				if (
+					!Number.isSafeInteger(currentStart) ||
+					!Number.isSafeInteger(currentEnd) ||
+					currentEnd <= currentStart
+				) {
+					throw new Error("Invalid resumable upload byte offsets.");
+				}
+				const bytes = decodeResumablePart(part_base64);
+				const actualPartHash = await toolkitSha256Hex(bytes);
+				if (actualPartHash !== expected_part_sha256) {
+					throw new Error("Video part SHA-256 does not match expected_part_sha256; nothing was transferred.");
+				}
+				const { accessToken, apiVersion, adAccountId } = getToolkitMetaConfig();
+				let consumed = 0;
+				let transferCount = 0;
+				while (currentEnd > currentStart) {
+					const required = currentEnd - currentStart;
+					if (required > META_MAX_RESUMABLE_CHUNK_BYTES) {
+						throw new Error(
+							`Meta requested a ${required}-byte chunk, above the guarded ${META_MAX_RESUMABLE_CHUNK_BYTES}-byte limit.`,
+						);
+					}
+					if (required > bytes.length - consumed) break;
+					const chunk = bytes.subarray(consumed, consumed + required);
+					const payload = await transferMetaVideoChunk(
+						adAccountId,
+						accessToken,
+						apiVersion,
+						upload_session_id,
+						String(currentStart),
+						chunk,
+					);
+					const nextStartOffset = String(payload?.start_offset ?? "");
+					const nextEndOffset = String(payload?.end_offset ?? "");
+					if (
+						!/^\\d+$/.test(nextStartOffset) ||
+						!/^\\d+$/.test(nextEndOffset) ||
+						nextStartOffset !== String(currentEnd) ||
+						Number(nextEndOffset) < Number(nextStartOffset)
+					) {
+						throw new Error("Meta returned unexpected resumable upload offsets after transfer.");
+					}
+					consumed += required;
+					transferCount += 1;
+					currentStart = Number(nextStartOffset);
+					currentEnd = Number(nextEndOffset);
+					if (transferCount >= 64 && currentEnd > currentStart) {
+						throw new Error("Video part exceeded the guarded per-call transfer count.");
+					}
+				}
+				if (consumed < 1) {
+					throw new Error(
+						`Supplied video part is too small for Meta's current requested range of ${Number(end_offset) - Number(start_offset)} bytes.`,
+					);
+				}
+				return textResult({
+					transferred: true,
+					video_id,
+					upload_session_id,
+					part_start_offset: start_offset,
+					part_bytes_supplied: bytes.length,
+					part_bytes_consumed: consumed,
+					part_bytes_unused: bytes.length - consumed,
+					part_sha256: actualPartHash,
+					meta_transfer_count: transferCount,
+					next_start_offset: String(currentStart),
+					next_end_offset: String(currentEnd),
+					upload_complete: currentStart === currentEnd,
 					ad_or_campaign_created: false,
 					activation_performed: false,
 				});
