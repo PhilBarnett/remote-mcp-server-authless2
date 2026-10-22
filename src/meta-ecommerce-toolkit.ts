@@ -1,10 +1,13 @@
 import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import { Unzip, UnzipInflate } from "fflate";
 
 const META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION = "CONFIRM UPLOAD META VIDEO BATCH";
 const META_MAX_RESUMABLE_CHUNK_BYTES = 8_000_000;
 const META_MAX_HOST_VIDEO_FILE_BYTES = 80_000_000;
+const META_MAX_HOST_ZIP_FILE_BYTES = 600_000_000;
+const META_MAX_ZIP_VIDEO_COUNT = 20;
 const META_ECOMMERCE_AD_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ECOMMERCE AD";
 const META_AD_STATUS_CONFIRMATION = "CONFIRM META AD STATUS CHANGE";
 const META_ECOMMERCE_LAUNCH_CONFIRMATION = "CONFIRM LAUNCH META ECOMMERCE CAMPAIGN";
@@ -183,6 +186,130 @@ function safeVideoFilename(filename: string, mimeType: "video/mp4" | "video/quic
 		throw new Error("QuickTime uploads must use a .mov filename.");
 	}
 	return clean;
+}
+
+
+function zipVideoIdentity(path: string) {
+	const baseName = path.split("/").pop()?.trim() ?? "";
+	if (!/\.(mp4|mov)$/i.test(baseName)) throw new Error("ZIP entry is not an MP4/MOV video.");
+	const mimeType: "video/mp4" | "video/quicktime" = /\.mov$/i.test(baseName) ? "video/quicktime" : "video/mp4";
+	const extension = mimeType === "video/mp4" ? ".mp4" : ".mov";
+	let stem = baseName
+		.slice(0, -extension.length)
+		.normalize("NFKD")
+		.replace(/[^A-Za-z0-9._ -]+/g, "_")
+		.replace(/^[_ .-]+|[_ .-]+$/g, "");
+	if (!stem) stem = "Blindmotion_Video";
+	const safeFilename = safeVideoFilename(
+		`${stem.slice(0, 190 - extension.length)}${extension}`,
+		mimeType,
+	);
+	return {
+		baseName,
+		title: baseName.slice(0, 255),
+		filename: safeFilename,
+		mimeType,
+	};
+}
+
+async function uploadVerifiedMetaVideoBytes(
+	title: string,
+	filename: string,
+	mimeType: "video/mp4" | "video/quicktime",
+	bytes: Uint8Array,
+) {
+	if (bytes.length < 1 || bytes.length > META_MAX_HOST_VIDEO_FILE_BYTES) {
+		throw new Error(
+			`Video ${filename} is ${bytes.length} bytes; maximum is ${META_MAX_HOST_VIDEO_FILE_BYTES}.`,
+		);
+	}
+	const existing = (await listAccountVideos()).filter(
+		(item: any) => String(item?.title ?? "") === title,
+	);
+	if (existing.length) {
+		throw new Error(
+			`Refusing ZIP upload: ${existing.length} ad-account video(s) already use exact title "${title}".`,
+		);
+	}
+	const actualSha256 = await toolkitSha256Hex(bytes);
+	const { accessToken, apiVersion, adAccountId } = getToolkitMetaConfig();
+	const started = await toolkitMetaPost(`${adAccountId}/advideos`, {
+		upload_phase: "start",
+		file_size: bytes.length,
+	});
+	const videoId = String(started?.video_id ?? "");
+	const uploadSessionId = String(started?.upload_session_id ?? "");
+	let currentStart = Number(started?.start_offset ?? NaN);
+	let currentEnd = Number(started?.end_offset ?? NaN);
+	if (
+		!/^[0-9]+$/.test(videoId) ||
+		!/^[0-9]+$/.test(uploadSessionId) ||
+		!Number.isSafeInteger(currentStart) ||
+		!Number.isSafeInteger(currentEnd) ||
+		currentEnd <= currentStart
+	) {
+		throw new Error("Meta did not return a valid resumable upload session.");
+	}
+	let transferCount = 0;
+	while (currentEnd > currentStart) {
+		const required = currentEnd - currentStart;
+		if (required > META_MAX_RESUMABLE_CHUNK_BYTES) {
+			throw new Error(
+				`Meta requested a ${required}-byte chunk, above the guarded ${META_MAX_RESUMABLE_CHUNK_BYTES}-byte limit.`,
+			);
+		}
+		if (currentEnd > bytes.length) {
+			throw new Error("Meta requested bytes beyond the verified video.");
+		}
+		const chunk = bytes.subarray(currentStart, currentEnd);
+		const payload = await transferMetaVideoChunk(
+			adAccountId,
+			accessToken,
+			apiVersion,
+			uploadSessionId,
+			String(currentStart),
+			chunk,
+		);
+		const nextStart = String(payload?.start_offset ?? "");
+		const nextEnd = String(payload?.end_offset ?? "");
+		if (
+			!/^[0-9]+$/.test(nextStart) ||
+			!/^[0-9]+$/.test(nextEnd) ||
+			nextStart !== String(currentEnd) ||
+			Number(nextEnd) < Number(nextStart)
+		) {
+			throw new Error("Meta returned unexpected resumable upload offsets after transfer.");
+		}
+		currentStart = Number(nextStart);
+		currentEnd = Number(nextEnd);
+		transferCount += 1;
+		if (transferCount > 100) throw new Error("Meta upload exceeded the guarded transfer-count limit.");
+	}
+	if (currentStart !== bytes.length || currentEnd !== bytes.length) {
+		throw new Error("Meta offsets do not prove the complete verified video was transferred.");
+	}
+	const finished = await toolkitMetaPost(`${adAccountId}/advideos`, {
+		upload_phase: "finish",
+		upload_session_id: uploadSessionId,
+		title,
+	});
+	if (finished?.success !== true) {
+		throw new Error("Meta did not confirm resumable upload completion.");
+	}
+	const visibleVideo = (await listAccountVideos()).find(
+		(item: any) => String(item?.id) === videoId,
+	);
+	return {
+		uploaded: true,
+		video_id: videoId,
+		upload_session_id: uploadSessionId,
+		transfer_count: transferCount,
+		verified_sha256: actualSha256,
+		verified_file_size: bytes.length,
+		processing_complete: visibleVideo?.status?.processing_phase?.status === "complete",
+		video: visibleVideo ? { ...visibleVideo, derived_dimensions: derivedVideoDimensions(visibleVideo) } : null,
+		source_manifest: { title, filename, mime_type: mimeType, file_size: bytes.length },
+	};
 }
 
 function toolkitSiteOrigin() {
