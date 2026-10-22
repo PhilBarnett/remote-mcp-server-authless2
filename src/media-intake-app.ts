@@ -63,7 +63,7 @@ small{opacity:.72;display:block;margin-top:10px}
     if(!stem) stem="Blindmotion_Video";
     return (stem.slice(0,190-ext.length)+ext);
   }
-  function titleFor(name){ return name.replace(/\.[^.]+$/,"").slice(0,250); }
+  function titleFor(name){ return name.replace(/[.][^.]+$/,"").slice(0,250); }
   function parseToolJson(result){
     const blocks=Array.isArray(result?.content)?result.content:[];
     const text=blocks.find(x=>x && x.type==="text")?.text;
