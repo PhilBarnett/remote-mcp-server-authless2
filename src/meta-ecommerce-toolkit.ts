@@ -851,6 +851,162 @@ const websiteAdCopySchema = {
 
 export function registerMetaEcommerceToolkit(server: McpServer) {
 	server.registerTool(
+		"upload_meta_ad_videos_from_zip_guarded",
+		{
+			_meta: { "openai/fileParams": ["zip_file"] },
+			description:
+				"Stream one ChatGPT-authorised ZIP of approved creative and upload each contained MP4/MOV to the configured Meta ad account. The Worker processes videos sequentially, limits each video to 80 MB and the ZIP stream to 600 MB, hashes every extracted video, and uses Meta resumable upload guards. It cannot create or activate ads or campaigns.",
+			inputSchema: z.object({
+				zip_file: z.object({
+					download_url: z.string().url(),
+					file_id: z.string().min(1),
+					mime_type: z.string().optional(),
+					file_name: z.string().optional(),
+				}),
+				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
+			}),
+		},
+		async ({ zip_file }) => {
+			try {
+				if (zip_file.file_name && !/\.zip$/i.test(zip_file.file_name)) {
+					throw new Error("Media Intake requires a .zip file.");
+				}
+				if (
+					zip_file.mime_type &&
+					!["application/zip", "application/x-zip-compressed", "application/octet-stream"].includes(
+						zip_file.mime_type.toLowerCase(),
+					)
+				) {
+					throw new Error("ChatGPT file MIME type is not a supported ZIP type.");
+				}
+				const trustedSource = assertTrustedVideoSourceUrl(zip_file.download_url);
+				const response = await fetch(trustedSource, {
+					headers: { Accept: "application/zip,application/octet-stream" },
+					redirect: "follow",
+				});
+				if (!response.ok || !response.body) {
+					await response.body?.cancel().catch(() => undefined);
+					throw new Error(`ZIP source fetch failed: HTTP ${response.status}.`);
+				}
+				const declaredLength = Number(response.headers.get("content-length") ?? 0);
+				if (declaredLength > META_MAX_HOST_ZIP_FILE_BYTES) {
+					await response.body.cancel().catch(() => undefined);
+					throw new Error(
+						`ZIP is ${declaredLength} bytes; maximum is ${META_MAX_HOST_ZIP_FILE_BYTES}.`,
+					);
+				}
+
+				const results: Array<Record<string, unknown>> = [];
+				const seenTitles = new Set<string>();
+				let videoCount = 0;
+				let zipBytesRead = 0;
+				let fatalError: Error | null = null;
+				let pendingUpload: Promise<void> | null = null;
+
+				const unzip = new Unzip((entry) => {
+					const isVideo = /\.(mp4|mov)$/i.test(entry.name) && !/\/$/.test(entry.name);
+					if (!isVideo) {
+						entry.ondata = (error) => {
+							if (error && !fatalError) fatalError = error instanceof Error ? error : new Error(String(error));
+						};
+						entry.start();
+						return;
+					}
+					videoCount += 1;
+					if (videoCount > META_MAX_ZIP_VIDEO_COUNT) {
+						fatalError = new Error(`ZIP contains more than ${META_MAX_ZIP_VIDEO_COUNT} videos.`);
+						return;
+					}
+					const identity = zipVideoIdentity(entry.name);
+					if (seenTitles.has(identity.title)) {
+						fatalError = new Error(`ZIP contains duplicate video title "${identity.title}".`);
+						return;
+					}
+					seenTitles.add(identity.title);
+					const chunks: Uint8Array[] = [];
+					let total = 0;
+					entry.ondata = (error, chunk, final) => {
+						if (error) {
+							if (!fatalError) fatalError = error instanceof Error ? error : new Error(String(error));
+							return;
+						}
+						if (chunk?.length) {
+							total += chunk.length;
+							if (total > META_MAX_HOST_VIDEO_FILE_BYTES) {
+								fatalError = new Error(
+									`Video ${identity.baseName} exceeds ${META_MAX_HOST_VIDEO_FILE_BYTES} bytes.`,
+								);
+								return;
+							}
+							chunks.push(chunk);
+						}
+						if (final && !fatalError) {
+							const bytes = new Uint8Array(total);
+							let offset = 0;
+							for (const part of chunks) {
+								bytes.set(part, offset);
+								offset += part.length;
+							}
+							pendingUpload = uploadVerifiedMetaVideoBytes(
+								identity.title,
+								identity.filename,
+								identity.mimeType,
+								bytes,
+							).then((uploaded) => {
+								results.push({ source_path: entry.name, ...uploaded });
+							});
+						}
+					};
+					entry.start();
+				});
+				unzip.register(UnzipInflate);
+
+				const reader = response.body.getReader();
+				while (true) {
+					const { value, done } = await reader.read();
+					if (value?.length) {
+						zipBytesRead += value.length;
+						if (zipBytesRead > META_MAX_HOST_ZIP_FILE_BYTES) {
+							await reader.cancel().catch(() => undefined);
+							throw new Error(
+								`ZIP stream exceeded ${META_MAX_HOST_ZIP_FILE_BYTES} bytes.`,
+							);
+						}
+						unzip.push(value, false);
+					}
+					if (done) unzip.push(new Uint8Array(0), true);
+					if (fatalError) throw fatalError;
+					if (pendingUpload) {
+						const upload = pendingUpload;
+						pendingUpload = null;
+						await upload;
+					}
+					if (done) break;
+				}
+				if (fatalError) throw fatalError;
+				if (!videoCount) throw new Error("ZIP contains no MP4 or MOV files.");
+				if (results.length !== videoCount) {
+					throw new Error(
+						`ZIP contained ${videoCount} video(s) but only ${results.length} completed Meta upload.`,
+					);
+				}
+				return textResult({
+					uploaded: true,
+					zip_file_id: zip_file.file_id,
+					zip_file_name: zip_file.file_name ?? null,
+					zip_bytes_read: zipBytesRead,
+					video_count: videoCount,
+					videos: results,
+					ad_or_campaign_created: false,
+					activation_performed: false,
+				});
+			} catch (error) {
+				return errorResult(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"upload_meta_ad_video_from_host_file_guarded",
 		{
 			_meta: { "openai/fileParams": ["source_file"] },
