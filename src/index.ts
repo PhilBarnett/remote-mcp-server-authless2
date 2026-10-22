@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { registerMetaEcommerceToolkit } from "./meta-ecommerce-toolkit";
+import { registerMediaIntakeApp } from "./media-intake-app";
 import {
 	registerSearchConsoleTools,
 	type SearchConsoleQueryRequest,
@@ -4563,6 +4564,7 @@ function createServer() {
 	});
 
 	registerMetaEcommerceToolkit(server);
+	registerMediaIntakeApp(server);
 	registerSearchConsoleTools(server, {
 		query: searchConsoleQuery,
 		siteUrl: SEARCH_CONSOLE_SITE_URL,
