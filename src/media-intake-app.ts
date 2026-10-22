@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-const MEDIA_INTAKE_URI = "ui://blindmotion/media-intake-v5.html";
+const MEDIA_INTAKE_URI = "ui://blindmotion/media-intake-v6.html";
 
 const MEDIA_INTAKE_HTML = `<!doctype html>
 <html>
@@ -24,7 +24,7 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
 <body>
 <div class="wrap"><div class="card">
 <h1>Blindmotion Media Intake</h1>
-<p>Choose one ZIP from your computer. Media Intake extracts MP4/MOV files locally in the browser, then streams each video to Meta in exact resumable-upload chunks. No ChatGPT file-export step is used.</p>
+<p>Choose one ZIP from your computer. Media Intake extracts MP4/MOV files locally in the browser, then uploads each video directly to the guarded Blindmotion Worker endpoint for Meta ingestion. No ChatGPT file-export step is used.</p>
 <div class="actions">
 <label class="filebtn">Choose ZIP<input id="zipInput" type="file" accept=".zip,application/zip"></label>
 </div>
@@ -107,29 +107,38 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
     return stem.slice(0,190-ext.length)+ext;
   }
   async function uploadVideo(name,bytes,state,completed){
-    if(!openai?.uploadFile || !openai?.getFileDownloadUrl || !openai?.callTool){
-      throw new Error("Required ChatGPT file/tool bridge is unavailable.");
-    }
+    if(!openai?.callTool) throw new Error("ChatGPT tool bridge unavailable.");
     if(bytes.length>80000000) throw new Error(name+" exceeds 80 MB.");
     const title=baseName(name).replace(/[.][^.]+$/,"").slice(0,255);
     const filename=safeFilename(baseName(name));
     const mime=/[.]mov$/i.test(filename)?"video/quicktime":"video/mp4";
     state.textContent="Authorising";
-    const file=new File([bytes],filename,{type:mime});
-    const uploaded=await openai.uploadFile(file);
-    const fileId=uploaded?.fileId||uploaded?.file_id;
-    if(!fileId) throw new Error("ChatGPT did not return a file ID for "+name);
-    const dl=await openai.getFileDownloadUrl({fileId});
-    const sourceUrl=dl?.downloadUrl||dl?.download_url;
-    if(!sourceUrl) throw new Error("ChatGPT did not return a download URL for "+name);
-    state.textContent="Sending to Meta";
-    const result=parseTool(await openai.callTool("upload_meta_ad_video_from_url_guarded",{
-      title,filename,mime_type:mime,file_size:bytes.length,source_url:sourceUrl,
+    const permit=parseTool(await openai.callTool("upload_meta_ad_video_from_url_guarded",{
+      action:"permit",title,filename,mime_type:mime,file_size:bytes.length,
       confirmation:"CONFIRM UPLOAD META VIDEO BATCH"
     }));
-    if(result?.uploaded!==true) throw new Error(result?.message||"Meta URL upload failed for "+name);
+    if(permit?.action==="existing"&&permit?.uploaded===true&&permit?.video_id){
+      state.textContent="Already in Meta "+permit.video_id; state.className="state ok";
+      completed.push({source_name:name,meta_video_id:String(permit.video_id),processing_complete:Boolean(permit.processing_complete),file_size:bytes.length,existing:true});
+      return;
+    }
+    if(!permit?.upload_url||!permit?.upload_token) throw new Error(permit?.message||"Upload permit failed for "+name);
+    state.textContent="Uploading to Meta";
+    const response=await fetch(permit.upload_url,{
+      method:"POST",
+      headers:{
+        "Authorization":"Bearer "+permit.upload_token,
+        "Content-Type":mime
+      },
+      body:bytes
+    });
+    let result={};
+    try{result=await response.json()}catch{}
+    if(!response.ok||result?.uploaded!==true||!result?.video_id){
+      throw new Error(result?.error||("Direct upload failed (HTTP "+response.status+") for "+name));
+    }
     state.textContent="Meta "+result.video_id; state.className="state ok";
-    completed.push({source_name:name,meta_video_id:String(result.video_id),processing_complete:Boolean(result.processing_complete),file_size:bytes.length});
+    completed.push({source_name:name,meta_video_id:String(result.video_id),processing_complete:false,file_size:bytes.length,existing:false});
     if(openai?.setWidgetState){
       openai.setWidgetState({modelContent:"Blindmotion Media Intake uploaded "+completed.length+" video(s): "+JSON.stringify(completed),privateContent:{completed}});
     }
@@ -201,7 +210,13 @@ export function registerMediaIntakeApp(server: McpServer) {
 				mimeType: "text/html;profile=mcp-app",
 				text: MEDIA_INTAKE_HTML,
 				_meta: {
-					ui: { prefersBorder: true },
+					ui: {
+						prefersBorder: true,
+						csp: {
+							connectDomains: ["https://remote-mcp-server-authless2.phil-cd4.workers.dev"],
+							resourceDomains: [],
+						},
+					},
 					"openai/widgetDescription":
 						"Blindmotion Media Intake locally extracts ZIP creative and streams each video through a guarded Meta resumable-upload session.",
 				},
@@ -223,8 +238,8 @@ export function registerMediaIntakeApp(server: McpServer) {
 			},
 		},
 		async () => ({
-			structuredContent: { ready: true, purpose: "blindmotion_media_intake_v5" },
-			content: [{ type: "text" as const, text: "Blindmotion Media Intake v5 is ready. Choose the ZIP in the app." }],
+			structuredContent: { ready: true, purpose: "blindmotion_media_intake_v6" },
+			content: [{ type: "text" as const, text: "Blindmotion Media Intake v6 is ready. Choose the ZIP in the app." }],
 		}),
 	);
 }

@@ -17,6 +17,134 @@ export interface AuthEnv {
 }
 
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => `&#${char.charCodeAt(0)};`);
+const MEDIA_UPLOAD_PATH = "/media-intake/video";
+const MEDIA_UPLOAD_KEY_PREFIX = "media-intake-upload:";
+const MEDIA_UPLOAD_MAX_BYTES = 80_000_000;
+
+const mediaUploadCorsHeaders = {
+	"Access-Control-Allow-Origin": "*",
+	"Access-Control-Allow-Headers": "Authorization, Content-Type",
+	"Access-Control-Allow-Methods": "POST, OPTIONS",
+	"Cache-Control": "no-store",
+	"Referrer-Policy": "no-referrer",
+	"X-Content-Type-Options": "nosniff",
+};
+
+async function handleMediaIntakeUpload(request: Request, env: AuthEnv): Promise<Response> {
+	if (request.method === "OPTIONS") {
+		return new Response(null, { status: 204, headers: mediaUploadCorsHeaders });
+	}
+	if (request.method !== "POST") {
+		return new Response("Method not allowed", { status: 405, headers: { ...mediaUploadCorsHeaders, Allow: "POST, OPTIONS" } });
+	}
+	const auth = request.headers.get("Authorization") ?? "";
+	const match = auth.match(/^Bearer ([a-f0-9]{64})$/);
+	if (!match) return new Response("Unauthorized", { status: 401, headers: mediaUploadCorsHeaders });
+	const key = MEDIA_UPLOAD_KEY_PREFIX + match[1];
+	const rawPermit = await env.OAUTH_KV.get(key);
+	if (!rawPermit) return new Response("Upload permit is invalid or expired.", { status: 401, headers: mediaUploadCorsHeaders });
+	let permit: {
+		title: string;
+		filename: string;
+		mime_type: "video/mp4" | "video/quicktime";
+		file_size: number;
+		created_at: number;
+	};
+	try {
+		permit = JSON.parse(rawPermit);
+	} catch {
+		await env.OAUTH_KV.delete(key);
+		return new Response("Upload permit is invalid.", { status: 401, headers: mediaUploadCorsHeaders });
+	}
+	if (
+		!permit ||
+		typeof permit.title !== "string" ||
+		typeof permit.filename !== "string" ||
+		!["video/mp4", "video/quicktime"].includes(permit.mime_type) ||
+		!Number.isInteger(permit.file_size) ||
+		permit.file_size <= 0 ||
+		permit.file_size > MEDIA_UPLOAD_MAX_BYTES ||
+		!Number.isFinite(permit.created_at) ||
+		Date.now() - permit.created_at > 600_000 ||
+		Date.now() < permit.created_at - 30_000
+	) {
+		await env.OAUTH_KV.delete(key);
+		return new Response("Upload permit is invalid or expired.", { status: 401, headers: mediaUploadCorsHeaders });
+	}
+	const requestType = (request.headers.get("Content-Type") ?? "").split(";")[0].trim().toLowerCase();
+	if (requestType !== permit.mime_type) {
+		return new Response("Video MIME type does not match upload permit.", { status: 415, headers: mediaUploadCorsHeaders });
+	}
+	const lengthHeader = request.headers.get("Content-Length");
+	if (lengthHeader && Number(lengthHeader) !== permit.file_size) {
+		return new Response("Video size does not match upload permit.", { status: 400, headers: mediaUploadCorsHeaders });
+	}
+	const bytes = await request.arrayBuffer();
+	if (bytes.byteLength !== permit.file_size) {
+		return new Response("Video size does not match upload permit.", { status: 400, headers: mediaUploadCorsHeaders });
+	}
+	// Consume before forwarding so an uncertain client retry cannot duplicate a Meta upload.
+	await env.OAUTH_KV.delete(key);
+
+	const workerEnv = env as unknown as Record<string, string | undefined>;
+	const accessToken = workerEnv.META_ACCESS_TOKEN?.trim();
+	const configuredAccountId = workerEnv.META_AD_ACCOUNT_ID?.trim();
+	const apiVersion = workerEnv.META_API_VERSION?.trim();
+	if (!accessToken || !configuredAccountId || !apiVersion || !/^v\d+\.\d+$/.test(apiVersion)) {
+		return new Response("Meta video upload is not configured.", { status: 503, headers: mediaUploadCorsHeaders });
+	}
+	const accountId = configuredAccountId.replace(/^act_/, "");
+	if (!/^\d+$/.test(accountId)) {
+		return new Response("Meta video upload account is invalid.", { status: 503, headers: mediaUploadCorsHeaders });
+	}
+	const form = new FormData();
+	form.set("title", permit.title);
+	form.set("source", new File([bytes], permit.filename, { type: permit.mime_type }));
+	const metaResponse = await fetch(`https://graph.facebook.com/${apiVersion}/act_${accountId}/advideos`, {
+		method: "POST",
+		headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+		body: form,
+		signal: AbortSignal.timeout(120_000),
+	});
+	const responseText = await metaResponse.text();
+	let payload: any = {};
+	try { payload = responseText ? JSON.parse(responseText) : {}; } catch { payload = {}; }
+	if (!metaResponse.ok || payload?.error) {
+		console.error("Meta direct video upload failed", {
+			status: metaResponse.status,
+			code: payload?.error?.code,
+			subcode: payload?.error?.error_subcode,
+			trace: payload?.error?.fbtrace_id,
+		});
+		return new Response(JSON.stringify({
+			uploaded: false,
+			error: "Meta rejected the video upload.",
+			meta_code: payload?.error?.code ?? null,
+			meta_subcode: payload?.error?.error_subcode ?? null,
+		}), {
+			status: 502,
+			headers: { ...mediaUploadCorsHeaders, "Content-Type": "application/json; charset=utf-8" },
+		});
+	}
+	const videoId = String(payload?.id ?? payload?.video_id ?? "");
+	if (!/^\d+$/.test(videoId)) {
+		return new Response(JSON.stringify({ uploaded: false, error: "Meta did not return a video ID." }), {
+			status: 502,
+			headers: { ...mediaUploadCorsHeaders, "Content-Type": "application/json; charset=utf-8" },
+		});
+	}
+	return new Response(JSON.stringify({
+		uploaded: true,
+		video_id: videoId,
+		title: permit.title,
+		filename: permit.filename,
+		file_size: permit.file_size,
+	}), {
+		status: 200,
+		headers: { ...mediaUploadCorsHeaders, "Content-Type": "application/json; charset=utf-8" },
+	});
+}
+
 const secureHeaders = {
 	"Cache-Control": "no-store",
 	"Content-Type": "text/plain; charset=utf-8",
@@ -51,6 +179,7 @@ async function matchesOwnerSecret(supplied: string, expected: string) {
 export const authorizationHandler = {
 	async fetch(request: Request, env: AuthEnv): Promise<Response> {
 		const url = new URL(request.url);
+		if (url.pathname === MEDIA_UPLOAD_PATH) return handleMediaIntakeUpload(request, env);
 		if (url.pathname === "/equinox/mcp") return new Response("Use the authenticated /mcp connection.", { status: 410, headers: secureHeaders });
 		if (url.pathname !== "/authorize") return new Response("Not found", { status: 404, headers: secureHeaders });
 		if (!env.MCP_OWNER_SECRET || env.MCP_OWNER_SECRET.length < 32 || env.MCP_OWNER_SECRET.length > 512) {
