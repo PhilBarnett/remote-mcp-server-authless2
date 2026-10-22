@@ -710,6 +710,19 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				const existing = (await listAccountVideos()).filter(
 					(item: any) => String(item?.title ?? "") === args.title,
 				);
+				if (args.action === "permit" && existing.length === 1) {
+					return textResult({
+						action: "existing",
+						uploaded: true,
+						video_id: String(existing[0]?.id ?? ""),
+						processing_complete: existing[0]?.status?.processing_phase?.status === "complete",
+						filename: safeFilename,
+						mime_type: args.mime_type,
+						file_size: args.file_size,
+						ad_or_campaign_created: false,
+						activation_performed: false,
+					});
+				}
 				if (existing.length) {
 					throw new Error(`Refusing upload: ${existing.length} owned video(s) already use this exact title.`);
 				}
