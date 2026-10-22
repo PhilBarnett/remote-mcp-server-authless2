@@ -77,7 +77,7 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
       const nameLen=u16(view,p+28), extraLen=u16(view,p+30), commentLen=u16(view,p+32);
       const localOffset=u32(view,p+42);
       const name=dec.decode(bytes.slice(p+46,p+46+nameLen));
-      if(/[.](mp4|mov)$/i.test(name)&&!/[\/]$/.test(name)){
+      if(/[.](mp4|mov)$/i.test(name)&&!/[/]$/.test(name)){
         out.push({name,method,compSize,size,localOffset});
       }
       p+=46+nameLen+extraLen+commentLen;
