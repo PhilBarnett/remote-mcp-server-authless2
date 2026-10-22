@@ -59,7 +59,7 @@ small{opacity:.72;display:block;margin-top:10px}
   }
   async function sendZip(fileId,fileName,mimeType){
     if(!openai?.getFileDownloadUrl || !openai?.callTool) throw new Error("Required ChatGPT file/tool bridge is unavailable.");
-    if(!/\.zip$/i.test(fileName||"")) throw new Error("Select a ZIP file.");
+    if(!/[.]zip$/i.test(fileName||"")) throw new Error("Select a ZIP file.");
     setStatus("Authorising "+fileName+"…");
     const dl=await openai.getFileDownloadUrl({fileId});
     const downloadUrl=dl?.downloadUrl || dl?.download_url;
@@ -116,7 +116,7 @@ small{opacity:.72;display:block;margin-top:10px}
     try{
       if(!openai?.selectFiles) throw new Error("ChatGPT file library picker is unavailable in this client.");
       const selected=await openai.selectFiles();
-      const zip=(selected||[]).find(f=>/\.zip$/i.test(f.fileName||f.file_name||""));
+      const zip=(selected||[]).find(f=>/[.]zip$/i.test(f.fileName||f.file_name||""));
       if(!zip) throw new Error("Select a ZIP file.");
       await sendZip(
         zip.fileId||zip.file_id,
