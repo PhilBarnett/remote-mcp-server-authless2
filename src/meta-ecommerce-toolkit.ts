@@ -365,20 +365,6 @@ async function refuseDuplicateAdName(name: string) {
 	}
 }
 
-function assertTrustedVideoSourceUrl(value: string) {
-	const source = new URL(value);
-	if (
-		source.protocol !== "https:" ||
-		(source.hostname !== "oaiusercontent.com" && !source.hostname.endsWith(".oaiusercontent.com")) ||
-		source.username ||
-		source.password ||
-		source.hash
-	) {
-		throw new Error("source_url must be a credential-free HTTPS URL on oaiusercontent.com.");
-	}
-	return source.toString();
-}
-
 function collectStringsByKey(value: unknown, keys: Set<string>, results: string[] = []) {
 	if (Array.isArray(value)) {
 		for (const item of value) collectStringsByKey(item, keys, results);
