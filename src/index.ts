@@ -4583,6 +4583,24 @@ function createServer() {
 			content: [{ type: "text" as const, text: "Blindmotion Media Intake v3 is ready. Choose the ZIP in the app." }],
 		}),
 	);
+		server.registerTool(
+			"open_blindmotion_media_intake_v4",
+			{
+				title: "Open Blindmotion Media Intake v4",
+				description:
+					"Open Blindmotion Media Intake v4 using the current uncached app resource. Choose one local ZIP, extract MP4/MOV files in the browser and stream them to Meta through guarded resumable uploads. This tool does not create or activate ads or campaigns.",
+				inputSchema: z.object({}),
+				_meta: {
+					ui: { resourceUri: "ui://blindmotion/media-intake-v4.html" },
+					"openai/toolInvocation/invoking": "Opening Media Intake v4…",
+					"openai/toolInvocation/invoked": "Media Intake v4 ready.",
+				},
+			},
+			async () => ({
+				structuredContent: { ready: true, purpose: "blindmotion_media_intake_v4" },
+				content: [{ type: "text" as const, text: "Blindmotion Media Intake v4 is ready. Choose the ZIP in the app." }],
+			}),
+		);
 	registerSearchConsoleTools(server, {
 		query: searchConsoleQuery,
 		siteUrl: SEARCH_CONSOLE_SITE_URL,
