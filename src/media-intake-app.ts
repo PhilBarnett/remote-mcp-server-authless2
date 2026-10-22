@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-const MEDIA_INTAKE_URI = "ui://blindmotion/media-intake-v4.html";
+const MEDIA_INTAKE_URI = "ui://blindmotion/media-intake-v5.html";
 
 const MEDIA_INTAKE_HTML = `<!doctype html>
 <html>
@@ -223,8 +223,8 @@ export function registerMediaIntakeApp(server: McpServer) {
 			},
 		},
 		async () => ({
-			structuredContent: { ready: true, purpose: "blindmotion_media_intake_v4" },
-			content: [{ type: "text" as const, text: "Blindmotion Media Intake v4 is ready. Choose the ZIP in the app." }],
+			structuredContent: { ready: true, purpose: "blindmotion_media_intake_v5" },
+			content: [{ type: "text" as const, text: "Blindmotion Media Intake v5 is ready. Choose the ZIP in the app." }],
 		}),
 	);
 }
