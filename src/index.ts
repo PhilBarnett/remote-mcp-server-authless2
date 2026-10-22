@@ -3604,7 +3604,7 @@ async function getProductPmaxAssetState(args: {
 		);
 	}
 	const listing = await googleAdsSearch(`
-		SELECT asset_group_listing_group_filter.resource_name,
+		SELECT campaign.id, asset_group.id, asset_group_listing_group_filter.resource_name,
 			asset_group_listing_group_filter.parent_listing_group_filter,
 			asset_group_listing_group_filter.type,
 			asset_group_listing_group_filter.case_value.product_item_id.value
@@ -3629,7 +3629,7 @@ async function getProductPmaxAssetState(args: {
 		);
 	}
 	const assetGroupAssets = await googleAdsSearch(`
-		SELECT asset_group_asset.resource_name, asset_group_asset.asset_group,
+		SELECT asset_group.id, asset_group_asset.resource_name, asset_group_asset.asset_group,
 			asset_group_asset.asset, asset_group_asset.field_type,
 			asset_group_asset.status, asset_group_asset.source,
 			asset_group_asset.primary_status, asset_group_asset.primary_status_reasons,
@@ -3647,7 +3647,7 @@ async function getProductPmaxAssetState(args: {
 		ORDER BY asset_group_asset.field_type, asset.id
 	`);
 	const campaignAssets = await googleAdsSearch(`
-		SELECT campaign_asset.resource_name, campaign_asset.field_type,
+		SELECT campaign.id, campaign_asset.resource_name, campaign_asset.field_type,
 			campaign_asset.status, asset.id, asset.resource_name, asset.name, asset.type,
 			asset.text_asset.text, asset.image_asset.full_size.url,
 			asset.image_asset.full_size.width_pixels,
@@ -3997,7 +3997,7 @@ function safeOrderAttribution(order: any) {
 	let gadCampaignId: string | null = null;
 	let landingPath: string | null = null;
 	let landingProduct: string | null = null;
-	let sampleIntent: "ZipGrip" | "Outdoor" | "Roller" | "Unknown" = "Unknown";
+	let sampleIntent = "Unknown";
 
 	if (typeof sessionEntry === "string" && sessionEntry.trim()) {
 		try {
@@ -4011,7 +4011,10 @@ function safeOrderAttribution(order: any) {
 			const searchable = `${url.pathname} ${url.search}`.toLowerCase();
 
 			// Most-specific classification first.
-			if (
+			if (/total[ _-]?block/.test(url.pathname.toLowerCase()) || url.searchParams.get("sample_product")?.toLowerCase() === "totalblock") {
+				sampleIntent = "TotalBlock";
+				landingProduct = "Blindmotion TotalBlock Cassette Blind";
+			} else if (
 				searchable.includes("zipgrip") ||
 				searchable.includes("zip-grip") ||
 				searchable.includes("zip-sided") ||
@@ -4043,6 +4046,26 @@ function safeOrderAttribution(order: any) {
 		}
 	}
 
+	// Ordered sample selections outrank landing-page inference; retain acquisition unchanged.
+	const sampleTypes = new Set<string>();
+	let hasSampleSelections = false;
+	for (const item of Array.isArray(order?.line_items) ? order.line_items : []) {
+		if (Number(item?.product_id) !== 128) continue;
+		for (const option of safeOrderLineProductOptions(item)) {
+			const label = option.label.toLowerCase().trim();
+			if (!["type of indoor blinds", "type of roller blinds", "type of outdoor blinds"].includes(label)) continue;
+			hasSampleSelections = true;
+			const value = option.value.toLowerCase().trim();
+			if (/total[ _-]?block/.test(value)) sampleTypes.add("TotalBlock");
+			else if (["everyday roller blinds", "premium roller blinds"].includes(value)) sampleTypes.add("Roller");
+			else if (["zip guided (track)", "zipgrip", "zip guided"].includes(value)) sampleTypes.add("ZipGrip");
+			else if (["straight drop", "wire guide", "cable guide"].includes(value)) sampleTypes.add("Outdoor");
+			else sampleTypes.add("Unknown");
+		}
+	}
+	const selectedSampleTypes = [...sampleTypes].sort();
+	if (hasSampleSelections) sampleIntent = selectedSampleTypes.length > 1 ? "Mixed" : (selectedSampleTypes[0] ?? "Unknown");
+
 	return {
 		source_type: getMeta("_wc_order_attribution_source_type"),
 		referrer: getMeta("_wc_order_attribution_referrer"),
@@ -4062,6 +4085,8 @@ function safeOrderAttribution(order: any) {
 		landing_path: landingPath,
 		landing_product: landingProduct,
 		sample_intent: sampleIntent,
+		sample_types: selectedSampleTypes,
+		sample_intent_basis: hasSampleSelections ? "ordered_sample_selections" : "landing_page_inference",
 
 		session_entry: sessionEntry,
 		session_start_time: getMeta("_wc_order_attribution_session_start_time"),
@@ -15648,3 +15673,4 @@ function registerEquinoxTools(server: McpServer) {
 const handler = createMcpHandler(createServer);
 
 export default authenticatedMcp<Env & AuthEnv>(handler);
+
