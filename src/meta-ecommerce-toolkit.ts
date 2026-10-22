@@ -4,7 +4,6 @@ import { z } from "zod";
 
 const META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION = "CONFIRM UPLOAD META VIDEO BATCH";
 const META_MAX_RESUMABLE_CHUNK_BYTES = 8_000_000;
-const META_MAX_RESUMABLE_PART_BYTES = 16_000_000;
 const META_MAX_HOST_VIDEO_FILE_BYTES = 80_000_000;
 const META_ECOMMERCE_AD_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ECOMMERCE AD";
 const META_AD_STATUS_CONFIRMATION = "CONFIRM META AD STATUS CHANGE";
@@ -139,36 +138,6 @@ async function toolkitMetaPost(
 async function toolkitSha256Hex(bytes: Uint8Array) {
 	const digest = await crypto.subtle.digest("SHA-256", bytes);
 	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function decodeResumableChunk(value: string) {
-	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
-		throw new Error("chunk_base64 is not canonical base64 data.");
-	}
-	const binary = atob(value);
-	if (binary.length < 1 || binary.length > META_MAX_RESUMABLE_CHUNK_BYTES) {
-		throw new Error(
-			`Video chunk must contain between 1 and ${META_MAX_RESUMABLE_CHUNK_BYTES} bytes.`,
-		);
-	}
-	const bytes = new Uint8Array(binary.length);
-	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-	return bytes;
-}
-
-function decodeResumablePart(value: string) {
-	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
-		throw new Error("part_base64 is not canonical base64 data.");
-	}
-	const binary = atob(value);
-	if (binary.length < 1 || binary.length > META_MAX_RESUMABLE_PART_BYTES) {
-		throw new Error(
-			`Video part must contain between 1 and ${META_MAX_RESUMABLE_PART_BYTES} bytes.`,
-		);
-	}
-	const bytes = new Uint8Array(binary.length);
-	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-	return bytes;
 }
 
 async function transferMetaVideoChunk(
@@ -757,22 +726,38 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 	server.registerTool(
 		"upload_meta_ad_video_from_host_file_guarded",
 		{
+			_meta: { "openai/fileParams": ["source_file"] },
 			description:
-				"Upload one MP4 or QuickTime video directly from a host-provided uploaded-file argument. Pass the local ChatGPT attachment path in source_file; the host resolves it to a short-lived HTTPS file reference before the remote MCP executes. The Worker then verifies trusted OpenAI hosting, exact byte length and whole-file SHA-256, and performs Meta's complete resumable upload and finish sequence. It cannot create or activate ads or campaigns.",
+				"Upload one MP4 or QuickTime video directly from a ChatGPT file parameter. ChatGPT supplies a temporary download URL plus file metadata in source_file. The Worker verifies trusted OpenAI hosting, exact byte length and whole-file SHA-256, then performs Meta's complete resumable upload and finish sequence. It cannot create or activate ads or campaigns.",
 			inputSchema: z.object({
 				title: z.string().trim().min(1).max(255),
 				filename: z.string().trim().min(5).max(200),
 				mime_type: z.enum(["video/mp4", "video/quicktime"]),
 				file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
 				expected_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				source_file: z.string().trim().min(1).max(4096),
+				source_file: z.object({
+					download_url: z.string().url(),
+					file_id: z.string().min(1),
+					mime_type: z.string().optional(),
+					file_name: z.string().optional(),
+				}),
 				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
 			}),
 		},
 		async ({ title, filename, mime_type, file_size, expected_sha256, source_file }) => {
 			try {
 				const safeFilename = safeVideoFilename(filename, mime_type);
-				const trustedSource = assertTrustedVideoSourceUrl(source_file);
+				if (source_file.mime_type && source_file.mime_type !== mime_type) {
+					throw new Error("ChatGPT file MIME type does not match mime_type.");
+				}
+				if (source_file.file_name) {
+					const sourceExtension = source_file.file_name.toLowerCase().split(".").pop();
+					const expectedExtension = mime_type === "video/mp4" ? "mp4" : "mov";
+					if (sourceExtension !== expectedExtension) {
+						throw new Error("ChatGPT file extension does not match mime_type.");
+					}
+				}
+				const trustedSource = assertTrustedVideoSourceUrl(source_file.download_url);
 				const existing = (await listAccountVideos()).filter(
 					(item: any) => String(item?.title ?? "") === title,
 				);
@@ -897,364 +882,6 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 						file_size,
 						expected_sha256,
 					},
-					ad_or_campaign_created: false,
-					activation_performed: false,
-				});
-			} catch (error) {
-				return errorResult(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"start_meta_ad_video_resumable_upload_guarded",
-		{
-			description:
-				"Start one resumable video upload directly into the configured Meta ad account. Returns Meta-controlled byte offsets; cannot create or activate ads.",
-			inputSchema: z.object({
-				title: z.string().trim().min(1).max(255),
-				filename: z.string().trim().min(5).max(200),
-				mime_type: z.enum(["video/mp4", "video/quicktime"]),
-				file_size: z.number().int().positive().max(2_000_000_000),
-				expected_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
-			}),
-		},
-		async ({ title, filename, mime_type, file_size, expected_sha256 }) => {
-			try {
-				const safeFilename = safeVideoFilename(filename, mime_type);
-				const existing = (await listAccountVideos()).filter(
-					(item: any) => String(item?.title ?? "") === title,
-				);
-				if (existing.length) {
-					throw new Error(
-						`Refusing resumable upload: ${existing.length} ad-account video(s) already use this exact title.`,
-					);
-				}
-				const { adAccountId } = getToolkitMetaConfig();
-				const started = await toolkitMetaPost(`${adAccountId}/advideos`, {
-					upload_phase: "start",
-					file_size,
-				});
-				const videoId = String(started?.video_id ?? "");
-				const uploadSessionId = String(started?.upload_session_id ?? "");
-				const startOffset = String(started?.start_offset ?? "");
-				const endOffset = String(started?.end_offset ?? "");
-				if (
-					!/^\d+$/.test(videoId) ||
-					!/^\d+$/.test(uploadSessionId) ||
-					!/^\d+$/.test(startOffset) ||
-					!/^\d+$/.test(endOffset) ||
-					Number(endOffset) <= Number(startOffset)
-				) {
-					throw new Error("Meta did not return a valid resumable upload session.");
-				}
-				const requestedChunkBytes = Number(endOffset) - Number(startOffset);
-				if (requestedChunkBytes > META_MAX_RESUMABLE_CHUNK_BYTES) {
-					throw new Error(
-						`Meta requested a ${requestedChunkBytes}-byte chunk, above the guarded ${META_MAX_RESUMABLE_CHUNK_BYTES}-byte limit.`,
-					);
-				}
-				return textResult({
-					started: true,
-					ad_or_campaign_created: false,
-					activation_performed: false,
-					video_id: videoId,
-					upload_session_id: uploadSessionId,
-					start_offset: startOffset,
-					end_offset: endOffset,
-					source_manifest: {
-						title,
-						filename: safeFilename,
-						mime_type,
-						file_size,
-						expected_sha256,
-					},
-				});
-			} catch (error) {
-				return errorResult(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"transfer_meta_ad_video_resumable_chunk_guarded",
-		{
-			description:
-				"Transfer exactly one hash-verified, Meta-requested byte range from canonical base64 or a trusted expiring OpenAI file URL to an existing resumable ad-account video upload. Retry-safe when the caller follows returned offsets.",
-			inputSchema: z.object({
-				video_id: z.string().regex(/^\d+$/),
-				upload_session_id: z.string().regex(/^\d+$/),
-				start_offset: z.string().regex(/^\d+$/),
-				end_offset: z.string().regex(/^\d+$/),
-				chunk_base64: z.string().min(4).max(22_000_000),
-				expected_chunk_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
-			}),
-		},
-		async ({
-			video_id,
-			upload_session_id,
-			start_offset,
-			end_offset,
-			chunk_base64,
-			expected_chunk_sha256,
-		}) => {
-			try {
-				const start = Number(start_offset);
-				const end = Number(end_offset);
-				if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end <= start) {
-					throw new Error("Invalid resumable upload byte offsets.");
-				}
-				let bytes: Uint8Array;
-				if (chunk_base64.startsWith("https://")) {
-					const sourceResponse = await fetch(assertTrustedVideoSourceUrl(chunk_base64), {
-						headers: {
-							Accept: "video/mp4,video/quicktime,application/octet-stream",
-							Range: `bytes=${start}-${end - 1}`,
-						},
-					});
-					if (sourceResponse.status !== 206) {
-						await sourceResponse.body?.cancel().catch(() => undefined);
-						throw new Error(
-							`Trusted video source must honor HTTP Range with 206; received ${sourceResponse.status}.`,
-						);
-					}
-					const expectedContentRangePrefix = `bytes ${start}-${end - 1}/`;
-					const contentRange = sourceResponse.headers.get("content-range") ?? "";
-					if (!contentRange.startsWith(expectedContentRangePrefix)) {
-						await sourceResponse.body?.cancel().catch(() => undefined);
-						throw new Error("Trusted video source returned an unexpected Content-Range.");
-					}
-					const declaredLength = sourceResponse.headers.get("content-length");
-					if (declaredLength && Number(declaredLength) !== end - start) {
-						await sourceResponse.body?.cancel().catch(() => undefined);
-						throw new Error("Trusted video source range Content-Length is incorrect.");
-					}
-					bytes = new Uint8Array(await sourceResponse.arrayBuffer());
-				} else {
-					bytes = decodeResumableChunk(chunk_base64);
-				}
-				if (bytes.length !== end - start) {
-					throw new Error(
-						`Chunk byte length ${bytes.length} does not match Meta-requested range ${start_offset}-${end_offset}.`,
-					);
-				}
-				const actualChunkHash = await toolkitSha256Hex(bytes);
-				if (actualChunkHash !== expected_chunk_sha256) {
-					throw new Error("Video chunk SHA-256 does not match expected_chunk_sha256; nothing was transferred.");
-				}
-				const { accessToken, apiVersion, adAccountId } = getToolkitMetaConfig();
-				const form = new FormData();
-				form.set("upload_phase", "transfer");
-				form.set("upload_session_id", upload_session_id);
-				form.set("start_offset", start_offset);
-				form.set("video_file_chunk", new Blob([bytes], { type: "application/octet-stream" }), "chunk.bin");
-				const response = await fetch(
-					`https://graph.facebook.com/${apiVersion}/${adAccountId}/advideos`,
-					{
-						method: "POST",
-						headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-						body: form,
-					},
-				);
-				const payload: any = await response.json().catch(() => ({}));
-				if (!response.ok || payload?.error) {
-					throw new Error(
-						`Meta resumable chunk transfer failed (${response.status}): ${payload?.error?.message ?? "unknown error"}`,
-					);
-				}
-				const nextStartOffset = String(payload?.start_offset ?? "");
-				const nextEndOffset = String(payload?.end_offset ?? "");
-				if (
-					!/^\d+$/.test(nextStartOffset) ||
-					!/^\d+$/.test(nextEndOffset) ||
-					nextStartOffset !== end_offset ||
-					Number(nextEndOffset) < Number(nextStartOffset)
-				) {
-					throw new Error("Meta returned unexpected resumable upload offsets after transfer.");
-				}
-				const nextChunkBytes = Number(nextEndOffset) - Number(nextStartOffset);
-				if (nextChunkBytes > META_MAX_RESUMABLE_CHUNK_BYTES) {
-					throw new Error(
-						`Meta requested a ${nextChunkBytes}-byte next chunk, above the guarded limit.`,
-					);
-				}
-				return textResult({
-					transferred: true,
-					video_id,
-					upload_session_id,
-					transferred_start_offset: start_offset,
-					transferred_end_offset: end_offset,
-					chunk_sha256: actualChunkHash,
-					next_start_offset: nextStartOffset,
-					next_end_offset: nextEndOffset,
-					upload_complete: nextStartOffset === nextEndOffset,
-					ad_or_campaign_created: false,
-					activation_performed: false,
-				});
-			} catch (error) {
-				return errorResult(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"transfer_meta_ad_video_resumable_part_guarded",
-		{
-			description:
-				"Transfer a hash-verified contiguous video part of up to 16 MB into an existing Meta resumable upload, automatically satisfying as many consecutive Meta-requested chunk ranges as the part contains. Intended for locally extracted ChatGPT attachments/ZIP files so the caller does not need one tool call per Meta chunk. Returns the exact next offset and how many supplied bytes were consumed.",
-			inputSchema: z.object({
-				video_id: z.string().regex(/^\d+$/),
-				upload_session_id: z.string().regex(/^\d+$/),
-				start_offset: z.string().regex(/^\d+$/),
-				end_offset: z.string().regex(/^\d+$/),
-				part_base64: z.string().min(4).max(22_000_000),
-				expected_part_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
-			}),
-		},
-		async ({
-			video_id,
-			upload_session_id,
-			start_offset,
-			end_offset,
-			part_base64,
-			expected_part_sha256,
-		}) => {
-			try {
-				let currentStart = Number(start_offset);
-				let currentEnd = Number(end_offset);
-				if (
-					!Number.isSafeInteger(currentStart) ||
-					!Number.isSafeInteger(currentEnd) ||
-					currentEnd <= currentStart
-				) {
-					throw new Error("Invalid resumable upload byte offsets.");
-				}
-				const bytes = decodeResumablePart(part_base64);
-				const actualPartHash = await toolkitSha256Hex(bytes);
-				if (actualPartHash !== expected_part_sha256) {
-					throw new Error("Video part SHA-256 does not match expected_part_sha256; nothing was transferred.");
-				}
-				const { accessToken, apiVersion, adAccountId } = getToolkitMetaConfig();
-				let consumed = 0;
-				let transferCount = 0;
-				while (currentEnd > currentStart) {
-					const required = currentEnd - currentStart;
-					if (required > META_MAX_RESUMABLE_CHUNK_BYTES) {
-						throw new Error(
-							`Meta requested a ${required}-byte chunk, above the guarded ${META_MAX_RESUMABLE_CHUNK_BYTES}-byte limit.`,
-						);
-					}
-					if (required > bytes.length - consumed) break;
-					const chunk = bytes.subarray(consumed, consumed + required);
-					const payload = await transferMetaVideoChunk(
-						adAccountId,
-						accessToken,
-						apiVersion,
-						upload_session_id,
-						String(currentStart),
-						chunk,
-					);
-					const nextStartOffset = String(payload?.start_offset ?? "");
-					const nextEndOffset = String(payload?.end_offset ?? "");
-					if (
-						!/^\d+$/.test(nextStartOffset) ||
-						!/^\d+$/.test(nextEndOffset) ||
-						nextStartOffset !== String(currentEnd) ||
-						Number(nextEndOffset) < Number(nextStartOffset)
-					) {
-						throw new Error("Meta returned unexpected resumable upload offsets after transfer.");
-					}
-					consumed += required;
-					transferCount += 1;
-					currentStart = Number(nextStartOffset);
-					currentEnd = Number(nextEndOffset);
-					if (transferCount >= 64 && currentEnd > currentStart) {
-						throw new Error("Video part exceeded the guarded per-call transfer count.");
-					}
-				}
-				if (consumed < 1) {
-					throw new Error(
-						`Supplied video part is too small for Meta's current requested range of ${Number(end_offset) - Number(start_offset)} bytes.`,
-					);
-				}
-				return textResult({
-					transferred: true,
-					video_id,
-					upload_session_id,
-					part_start_offset: start_offset,
-					part_bytes_supplied: bytes.length,
-					part_bytes_consumed: consumed,
-					part_bytes_unused: bytes.length - consumed,
-					part_sha256: actualPartHash,
-					meta_transfer_count: transferCount,
-					next_start_offset: String(currentStart),
-					next_end_offset: String(currentEnd),
-					upload_complete: currentStart === currentEnd,
-					ad_or_campaign_created: false,
-					activation_performed: false,
-				});
-			} catch (error) {
-				return errorResult(error);
-			}
-		},
-	);
-
-	server.registerTool(
-		"finish_meta_ad_video_resumable_upload_guarded",
-		{
-			description:
-				"Finish one fully transferred resumable upload, set its title and report whether Meta already exposes it as an owned ad-account video. Cannot create or activate ads.",
-			inputSchema: z.object({
-				video_id: z.string().regex(/^\d+$/),
-				upload_session_id: z.string().regex(/^\d+$/),
-				title: z.string().trim().min(1).max(255),
-				filename: z.string().trim().min(5).max(200),
-				mime_type: z.enum(["video/mp4", "video/quicktime"]),
-				file_size: z.number().int().positive().max(2_000_000_000),
-				expected_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-				final_start_offset: z.string().regex(/^\d+$/),
-				final_end_offset: z.string().regex(/^\d+$/),
-				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
-			}),
-		},
-		async ({
-			video_id,
-			upload_session_id,
-			title,
-			filename,
-			mime_type,
-			file_size,
-			expected_sha256,
-			final_start_offset,
-			final_end_offset,
-		}) => {
-			try {
-				safeVideoFilename(filename, mime_type);
-				if (final_start_offset !== final_end_offset || Number(final_end_offset) !== file_size) {
-					throw new Error("Refusing finish: final offsets do not prove that the complete file was transferred.");
-				}
-				const { adAccountId } = getToolkitMetaConfig();
-				const finished = await toolkitMetaPost(`${adAccountId}/advideos`, {
-					upload_phase: "finish",
-					upload_session_id,
-					title,
-				});
-				if (finished?.success !== true) {
-					throw new Error("Meta did not confirm resumable upload completion.");
-				}
-				const visibleVideo = (await listAccountVideos()).find(
-					(item: any) => String(item?.id) === video_id,
-				);
-				return textResult({
-					finished: true,
-					video_id,
-					visible_as_owned_ad_account_video: Boolean(visibleVideo),
-					processing_complete: visibleVideo?.status?.processing_phase?.status === "complete",
-					video: visibleVideo ? { ...visibleVideo, derived_dimensions: derivedVideoDimensions(visibleVideo) } : null,
-					source_manifest: { title, filename, mime_type, file_size, expected_sha256 },
 					ad_or_campaign_created: false,
 					activation_performed: false,
 				});
