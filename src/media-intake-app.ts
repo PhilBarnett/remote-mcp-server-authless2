@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-const MEDIA_INTAKE_URI = "ui://blindmotion/media-intake-v6.html";
+const MEDIA_INTAKE_URI = "ui://blindmotion/media-intake-v7.html";
 
 const MEDIA_INTAKE_HTML = `<!doctype html>
 <html>
@@ -26,7 +26,7 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
 <h1>Blindmotion Media Intake</h1>
 <p>Choose one ZIP from your computer. Media Intake extracts MP4/MOV files locally in the browser, then uploads each video directly to the guarded Blindmotion Worker endpoint for Meta ingestion. No ChatGPT file-export step is used.</p>
 <div class="actions">
-<label class="filebtn">Choose ZIP<input id="zipInput" type="file" accept=".zip,application/zip"></label>
+<label class="filebtn">Choose ZIP<input id="zipInput" type="file" accept=".zip,application/zip"></label>\n<label class="filebtn">Choose videos<input id="videoInput" type="file" accept=".mp4,.mov,video/mp4,video/quicktime" multiple></label>
 </div>
 <div id="status" class="status">Ready.</div>
 <div id="items"></div>
@@ -37,7 +37,7 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
   const openai = window.openai;
   const status = document.getElementById("status");
   const items = document.getElementById("items");
-  const zipInput = document.getElementById("zipInput");
+  const zipInput = document.getElementById("zipInput");\n  const videoInput = document.getElementById("videoInput");
 
   function setStatus(text){
     status.textContent=text;
@@ -144,6 +144,56 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
     }
   }
 
+  videoInput.addEventListener("change",async()=>{
+    const files=Array.from(videoInput.files||[]);
+    if(!files.length) return;
+    items.innerHTML="";
+    const completed=[];
+    const failures=[];
+    try{
+      if(files.length>20) throw new Error("Choose no more than 20 videos.");
+      setStatus("Found "+files.length+" video(s). Uploading sequentially…");
+      for(const file of files){
+        const state=addItem(file.name);
+        try{
+          if(!/[.](mp4|mov)$/i.test(file.name)) throw new Error("Unsupported video file type.");
+          if(file.size>80000000) throw new Error(file.name+" exceeds 80 MB.");
+          state.textContent="Reading";
+          const bytes=new Uint8Array(await file.arrayBuffer());
+          await uploadVideo(file.name,bytes,state,completed);
+        }catch(err){
+          const message=err?.message||String(err);
+          state.textContent="Error: "+message; state.className="state err";
+          failures.push({source_name:file.name,file_size:file.size,error:message});
+          if(openai?.setWidgetState){
+            openai.setWidgetState({
+              modelContent:"Blindmotion Media Intake progress. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures),
+              privateContent:{completed,failures}
+            });
+          }
+        }
+      }
+      const summary="Complete: "+completed.length+" uploaded, "+failures.length+" failed.";
+      setStatus(summary);
+      if(openai?.setWidgetState){
+        openai.setWidgetState({
+          modelContent:"Blindmotion Media Intake complete. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures),
+          privateContent:{completed,failures}
+        });
+      }
+      if(openai?.sendFollowUpMessage){
+        await openai.sendFollowUpMessage({
+          prompt:"Blindmotion Media Intake finished. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures)+". Diagnose any failures and continue the paused ZipGrip campaign build with successful videos.",
+          scrollToBottom:true
+        });
+      }
+    }catch(error){
+      setStatus("Error: "+(error?.message||String(error)));
+    }finally{
+      videoInput.value="";
+    }
+  });
+
   zipInput.addEventListener("change",async()=>{
     const file=zipInput.files?.[0]; if(!file) return;
     items.innerHTML="";
@@ -229,7 +279,7 @@ export function registerMediaIntakeApp(server: McpServer) {
 		{
 			title: "Open Blindmotion Media Intake",
 			description:
-				"Open Blindmotion Media Intake to choose one local ZIP, extract MP4/MOV files in the browser and stream them to Meta through guarded resumable uploads. This tool does not create or activate ads or campaigns.",
+				"Open Blindmotion Media Intake to choose one local ZIP or multiple MP4/MOV files and upload them directly to Meta through the guarded Worker path. This tool does not create or activate ads or campaigns.",
 			inputSchema: z.object({}),
 			_meta: {
 				ui: { resourceUri: MEDIA_INTAKE_URI },
@@ -238,8 +288,8 @@ export function registerMediaIntakeApp(server: McpServer) {
 			},
 		},
 		async () => ({
-			structuredContent: { ready: true, purpose: "blindmotion_media_intake_v6" },
-			content: [{ type: "text" as const, text: "Blindmotion Media Intake v6 is ready. Choose the ZIP in the app." }],
+			structuredContent: { ready: true, purpose: "blindmotion_media_intake_v7" },
+			content: [{ type: "text" as const, text: "Blindmotion Media Intake v7 is ready. Choose a ZIP or video files in the app." }],
 		}),
 	);
 }
