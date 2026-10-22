@@ -3,7 +3,6 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 const META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION = "CONFIRM UPLOAD META VIDEO BATCH";
-const META_MAX_RESUMABLE_CHUNK_BYTES = 8_000_000;
 const META_MAX_HOST_VIDEO_FILE_BYTES = 80_000_000;
 const META_ECOMMERCE_AD_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ECOMMERCE AD";
 const META_AD_STATUS_CONFIRMATION = "CONFIRM META AD STATUS CHANGE";
@@ -138,36 +137,6 @@ async function toolkitMetaPost(
 async function toolkitSha256Hex(bytes: Uint8Array) {
 	const digest = await crypto.subtle.digest("SHA-256", bytes);
 	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function transferMetaVideoChunk(
-	adAccountId: string,
-	accessToken: string,
-	apiVersion: string,
-	uploadSessionId: string,
-	startOffset: string,
-	bytes: Uint8Array,
-) {
-	const form = new FormData();
-	form.set("upload_phase", "transfer");
-	form.set("upload_session_id", uploadSessionId);
-	form.set("start_offset", startOffset);
-	form.set("video_file_chunk", new Blob([bytes], { type: "application/octet-stream" }), "chunk.bin");
-	const response = await fetch(
-		`https://graph.facebook.com/${apiVersion}/${adAccountId}/advideos`,
-		{
-			method: "POST",
-			headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-			body: form,
-		},
-	);
-	const payload: any = await response.json().catch(() => ({}));
-	if (!response.ok || payload?.error) {
-		throw new Error(
-			`Meta resumable chunk transfer failed (${response.status}): ${payload?.error?.message ?? "unknown error"}`,
-		);
-	}
-	return payload;
 }
 
 function safeVideoFilename(filename: string, mimeType: "video/mp4" | "video/quicktime") {
@@ -711,136 +680,56 @@ const websiteAdCopySchema = {
 
 export function registerMetaEcommerceToolkit(server: McpServer) {
 	server.registerTool(
-		"manage_meta_video_upload_session_guarded",
+		"upload_meta_ad_video_from_url_guarded",
 		{
 			description:
-				"Guarded resumable Meta video upload session for Blindmotion Media Intake. START creates a Meta upload session for one MP4/MOV; TRANSFER accepts only the exact Meta-requested byte range as canonical base64 and verifies its SHA-256 before forwarding; FINISH succeeds only after Meta offsets prove the declared file size was transferred. This tool cannot create or activate ads or campaigns.",
-			inputSchema: z.discriminatedUnion("action", [
-				z.object({
-					action: z.literal("start"),
-					title: z.string().trim().min(1).max(255),
-					filename: z.string().trim().min(5).max(200),
-					mime_type: z.enum(["video/mp4", "video/quicktime"]),
-					file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
-					confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
-				}),
-				z.object({
-					action: z.literal("transfer"),
-					video_id: z.string().regex(/^\d+$/),
-					upload_session_id: z.string().regex(/^\d+$/),
-					start_offset: z.number().int().nonnegative(),
-					end_offset: z.number().int().positive(),
-					chunk_base64: z.string().min(4).max(12_000_000),
-					chunk_sha256: z.string().regex(/^[a-f0-9]{64}$/),
-					confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
-				}),
-				z.object({
-					action: z.literal("finish"),
-					video_id: z.string().regex(/^\d+$/),
-					upload_session_id: z.string().regex(/^\d+$/),
-					title: z.string().trim().min(1).max(255),
-					file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
-					final_offset: z.number().int().positive(),
-					confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
-				}),
-			]),
+				"Upload one MP4/MOV to the configured Meta ad account by asking Meta to fetch a temporary ChatGPT oaiusercontent.com URL. The Worker validates the source host, file metadata and duplicate title before calling Meta. It cannot create or activate ads or campaigns.",
+			inputSchema: z.object({
+				title: z.string().trim().min(1).max(255),
+				filename: z.string().trim().min(5).max(200),
+				mime_type: z.enum(["video/mp4", "video/quicktime"]),
+				file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
+				source_url: z.string().url(),
+				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
+			}),
 		},
-		async (args) => {
+		async ({ title, filename, mime_type, file_size, source_url }) => {
 			try {
-				const { accessToken, apiVersion, adAccountId } = getToolkitMetaConfig();
-				if (args.action === "start") {
-					const safeFilename = safeVideoFilename(args.filename, args.mime_type);
-					const existing = (await listAccountVideos()).filter(
-						(item: any) => String(item?.title ?? "") === args.title,
-					);
-					if (existing.length) {
-						throw new Error(`Refusing upload: ${existing.length} owned video(s) already use this exact title.`);
-					}
-					const started = await toolkitMetaPost(`${adAccountId}/advideos`, {
-						upload_phase: "start",
-						file_size: args.file_size,
-					});
-					const videoId = String(started?.video_id ?? "");
-					const uploadSessionId = String(started?.upload_session_id ?? "");
-					const startOffset = Number(started?.start_offset ?? NaN);
-					const endOffset = Number(started?.end_offset ?? NaN);
-					if (
-						!/^\d+$/.test(videoId) ||
-						!/^\d+$/.test(uploadSessionId) ||
-						!Number.isSafeInteger(startOffset) ||
-						!Number.isSafeInteger(endOffset) ||
-						endOffset <= startOffset ||
-						endOffset > args.file_size
-					) throw new Error("Meta did not return a valid resumable upload session.");
-					return textResult({
-						action: "start",
-						video_id: videoId,
-						upload_session_id: uploadSessionId,
-						start_offset: startOffset,
-						end_offset: endOffset,
-						file_size: args.file_size,
-						title: args.title,
-						filename: safeFilename,
-					});
+				const safeFilename = safeVideoFilename(filename, mime_type);
+				const source = new URL(source_url);
+				if (
+					source.protocol !== "https:" ||
+					(source.hostname !== "oaiusercontent.com" && !source.hostname.endsWith(".oaiusercontent.com")) ||
+					source.username ||
+					source.password ||
+					source.hash
+				) {
+					throw new Error("source_url must be a credential-free HTTPS URL on oaiusercontent.com.");
 				}
-				if (args.action === "transfer") {
-					if (args.end_offset <= args.start_offset) throw new Error("end_offset must exceed start_offset.");
-					const expectedLength = args.end_offset - args.start_offset;
-					if (expectedLength > META_MAX_RESUMABLE_CHUNK_BYTES) {
-						throw new Error(`Chunk exceeds ${META_MAX_RESUMABLE_CHUNK_BYTES} bytes.`);
-					}
-					if (!/^[A-Za-z0-9+/]*={0,2}$/.test(args.chunk_base64) || args.chunk_base64.length % 4 !== 0) {
-						throw new Error("chunk_base64 is not canonical base64.");
-					}
-					const binary = atob(args.chunk_base64);
-					if (binary.length !== expectedLength) throw new Error("Decoded chunk length does not match offsets.");
-					const bytes = new Uint8Array(binary.length);
-					for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-					const actualSha = await toolkitSha256Hex(bytes);
-					if (actualSha !== args.chunk_sha256) throw new Error("Chunk SHA-256 mismatch.");
-					const payload = await transferMetaVideoChunk(
-						adAccountId,
-						accessToken,
-						apiVersion,
-						args.upload_session_id,
-						String(args.start_offset),
-						bytes,
-					);
-					const nextStart = Number(payload?.start_offset ?? NaN);
-					const nextEnd = Number(payload?.end_offset ?? NaN);
-					if (
-						!Number.isSafeInteger(nextStart) ||
-						!Number.isSafeInteger(nextEnd) ||
-						nextStart !== args.end_offset ||
-						nextEnd < nextStart
-					) throw new Error("Meta returned unexpected resumable upload offsets.");
-					return textResult({
-						action: "transfer",
-						video_id: args.video_id,
-						upload_session_id: args.upload_session_id,
-						start_offset: nextStart,
-						end_offset: nextEnd,
-						verified_chunk_sha256: actualSha,
-					});
+				const existing = (await listAccountVideos()).filter(
+					(item: any) => String(item?.title ?? "") === title,
+				);
+				if (existing.length) {
+					throw new Error(`Refusing URL upload: ${existing.length} owned video(s) already use this exact title.`);
 				}
-				if (args.final_offset !== args.file_size) {
-					throw new Error("final_offset must equal file_size before finish.");
-				}
-				const finished = await toolkitMetaPost(`${adAccountId}/advideos`, {
-					upload_phase: "finish",
-					upload_session_id: args.upload_session_id,
-					title: args.title,
+				const { adAccountId } = getToolkitMetaConfig();
+				const uploaded = await toolkitMetaPost(`${adAccountId}/advideos`, {
+					file_url: source.toString(),
+					title,
 				});
-				if (finished?.success !== true) throw new Error("Meta did not confirm upload completion.");
+				const videoId = String(uploaded?.id ?? uploaded?.video_id ?? "");
+				if (!/^\d+$/.test(videoId)) {
+					throw new Error("Meta did not return a video ID for URL upload.");
+				}
 				const visibleVideo = (await listAccountVideos()).find(
-					(item: any) => String(item?.id) === args.video_id,
+					(item: any) => String(item?.id) === videoId,
 				);
 				return textResult({
-					action: "finish",
 					uploaded: true,
-					video_id: args.video_id,
-					upload_session_id: args.upload_session_id,
-					file_size: args.file_size,
+					video_id: videoId,
+					filename: safeFilename,
+					mime_type,
+					file_size,
 					visible_as_owned_ad_account_video: Boolean(visibleVideo),
 					processing_complete: visibleVideo?.status?.processing_phase?.status === "complete",
 					video: visibleVideo ? { ...visibleVideo, derived_dimensions: derivedVideoDimensions(visibleVideo) } : null,
