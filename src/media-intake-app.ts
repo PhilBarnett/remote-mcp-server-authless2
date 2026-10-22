@@ -139,6 +139,7 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
     const file=zipInput.files?.[0]; if(!file) return;
     items.innerHTML="";
     const completed=[];
+    const failures=[];
     try{
       setStatus("Reading ZIP locally…");
       const buffer=await file.arrayBuffer();
@@ -153,16 +154,30 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
           const bytes=await extractEntry(zip,e);
           await uploadVideo(e.name,bytes,state,completed);
         }catch(err){
-          state.textContent="Error"; state.className="state err";
-          throw err;
+          const message=err?.message||String(err);
+          state.textContent="Error: "+message; state.className="state err";
+          failures.push({source_name:e.name,compressed_size:e.compSize,uncompressed_size:e.size,error:message});
+          if(openai?.setWidgetState){
+            openai.setWidgetState({
+              modelContent:"Blindmotion Media Intake progress. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures),
+              privateContent:{completed,failures}
+            });
+          }
         }
       }
-      setStatus("Complete: "+completed.length+" video(s) uploaded to Meta.");
+      const summary="Complete: "+completed.length+" uploaded, "+failures.length+" failed.";
+      setStatus(summary);
       if(openai?.setWidgetState){
-        openai.setWidgetState({modelContent:"Blindmotion Media Intake complete. Uploaded Meta videos: "+JSON.stringify(completed),privateContent:{completed}});
+        openai.setWidgetState({
+          modelContent:"Blindmotion Media Intake complete. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures),
+          privateContent:{completed,failures}
+        });
       }
       if(openai?.sendFollowUpMessage){
-        await openai.sendFollowUpMessage({prompt:"Blindmotion Media Intake completed. Continue the paused ZipGrip campaign build using the uploaded Meta videos.",scrollToBottom:true});
+        await openai.sendFollowUpMessage({
+          prompt:"Blindmotion Media Intake finished. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures)+". Diagnose any failures and continue the paused ZipGrip campaign build with successful videos.",
+          scrollToBottom:true
+        });
       }
     }catch(error){
       setStatus("Error: "+(error?.message||String(error)));
