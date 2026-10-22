@@ -141,36 +141,6 @@ async function toolkitSha256Hex(bytes: Uint8Array) {
 	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function decodeResumableChunk(value: string) {
-	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
-		throw new Error("chunk_base64 is not canonical base64 data.");
-	}
-	const binary = atob(value);
-	if (binary.length < 1 || binary.length > META_MAX_RESUMABLE_CHUNK_BYTES) {
-		throw new Error(
-			`Video chunk must contain between 1 and ${META_MAX_RESUMABLE_CHUNK_BYTES} bytes.`,
-		);
-	}
-	const bytes = new Uint8Array(binary.length);
-	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-	return bytes;
-}
-
-function decodeResumablePart(value: string) {
-	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
-		throw new Error("part_base64 is not canonical base64 data.");
-	}
-	const binary = atob(value);
-	if (binary.length < 1 || binary.length > META_MAX_RESUMABLE_PART_BYTES) {
-		throw new Error(
-			`Video part must contain between 1 and ${META_MAX_RESUMABLE_PART_BYTES} bytes.`,
-		);
-	}
-	const bytes = new Uint8Array(binary.length);
-	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-	return bytes;
-}
-
 async function transferMetaVideoChunk(
 	adAccountId: string,
 	accessToken: string,

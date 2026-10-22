@@ -59,7 +59,7 @@ small{opacity:.72;display:block;margin-top:10px}
   }
   function safeMetaFilename(name){
     const ext=(name.toLowerCase().endsWith(".mov")?".mov":".mp4");
-    let stem=name.replace(/\.[^.]+$/,"").normalize("NFKD").replace(/[^A-Za-z0-9._ -]+/g,"_").replace(/^[_ .-]+|[_ .-]+$/g,"");
+    let stem=name.replace(/[.][^.]+$/,"").normalize("NFKD").replace(/[^A-Za-z0-9._ -]+/g,"_").replace(/^[_ .-]+|[_ .-]+$/g,"");
     if(!stem) stem="Blindmotion_Video";
     return (stem.slice(0,190-ext.length)+ext);
   }
@@ -139,7 +139,7 @@ small{opacity:.72;display:block;margin-top:10px}
     let mediaCount=0;
     const unzip=new fflate.Unzip((entry)=>{
       const name=entry.name || "unnamed";
-      const isMedia=/\.(mp4|mov)$/i.test(name) && !/\/$/.test(name);
+      const isMedia=/[.](mp4|mov)$/i.test(name) && !/[/]$/.test(name);
       let chunks=[]; let total=0; let stateEl=null;
       if(isMedia){ mediaCount++; stateEl=itemRow(name); }
       entry.ondata=(err,chunk,final)=>{
@@ -185,7 +185,7 @@ small{opacity:.72;display:block;margin-top:10px}
     try{
       if(!openai?.selectFiles || !openai?.getFileDownloadUrl) throw new Error("ChatGPT file picker is unavailable in this client.");
       const chosen=await openai.selectFiles();
-      const zip=(chosen||[]).find(f=>/\.zip$/i.test(f.fileName||f.file_name||""));
+      const zip=(chosen||[]).find(f=>/[.]zip$/i.test(f.fileName||f.file_name||""));
       if(!zip) throw new Error("Select a ZIP file.");
       const fileId=zip.fileId||zip.file_id;
       const dl=await openai.getFileDownloadUrl({fileId});
