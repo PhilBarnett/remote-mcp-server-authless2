@@ -4566,21 +4566,21 @@ function createServer() {
 	registerMetaEcommerceToolkit(server);
 	registerMediaIntakeApp(server);
 	server.registerTool(
-			"open_blindmotion_media_intake_v6",
+			"open_blindmotion_media_intake_v7",
 			{
-				title: "Open Blindmotion Media Intake v6",
+				title: "Open Blindmotion Media Intake v7",
 				description:
-					"Open Blindmotion Media Intake v6 using the current uncached app resource. Choose one local ZIP, extract MP4/MOV files in the browser and stream them to Meta through guarded resumable uploads. This tool does not create or activate ads or campaigns.",
+					"Open Blindmotion Media Intake v7 using the current uncached app resource. Choose one local ZIP, extract MP4/MOV files in the browser and stream them to Meta through guarded resumable uploads. This tool does not create or activate ads or campaigns.",
 				inputSchema: z.object({}),
 				_meta: {
-					ui: { resourceUri: "ui://blindmotion/media-intake-v6.html" },
-					"openai/toolInvocation/invoking": "Opening Media Intake v6…",
-					"openai/toolInvocation/invoked": "Media Intake v6 ready.",
+					ui: { resourceUri: "ui://blindmotion/media-intake-v7.html" },
+					"openai/toolInvocation/invoking": "Opening Media Intake v7…",
+					"openai/toolInvocation/invoked": "Media Intake v7 ready.",
 				},
 			},
 			async () => ({
-				structuredContent: { ready: true, purpose: "blindmotion_media_intake_v6" },
-				content: [{ type: "text" as const, text: "Blindmotion Media Intake v6 is ready. Choose the ZIP in the app." }],
+				structuredContent: { ready: true, purpose: "blindmotion_media_intake_v7" },
+				content: [{ type: "text" as const, text: "Blindmotion Media Intake v7 is ready. Choose the ZIP in the app." }],
 			}),
 		);
 	registerSearchConsoleTools(server, {
