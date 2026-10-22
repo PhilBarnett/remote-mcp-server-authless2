@@ -45,6 +45,9 @@ jobs:
       - name: Test Meta account spending-limit guards
         run: node --test scripts/test-meta-spend-limit.mjs
 
+      - name: Test fixed live sample-routing update and PHP release
+        run: node scripts/test-sample-routing-update.mjs
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 100
 

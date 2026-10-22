@@ -47,6 +47,9 @@ jobs:
       - name: Test staging work guards
         run: node scripts/test-staging-work.mjs
 
+      - name: Test fixed live sample-routing update and PHP release
+        run: node scripts/test-sample-routing-update.mjs
+
       - name: Test product image and choice-label guards
         run: node --experimental-strip-types scripts/test-product-option-edits.mjs
 
