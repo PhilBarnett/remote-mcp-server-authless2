@@ -106,61 +106,35 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
     if(!stem) stem="Blindmotion_Video";
     return stem.slice(0,190-ext.length)+ext;
   }
-  async function sha256(bytes){
-    const dig=await crypto.subtle.digest("SHA-256",bytes);
-    return Array.from(new Uint8Array(dig),b=>b.toString(16).padStart(2,"0")).join("");
-  }
-  function toBase64(bytes){
-    let s="", step=0x8000;
-    for(let i=0;i<bytes.length;i+=step){
-      const chunk=bytes.subarray(i,Math.min(i+step,bytes.length));
-      s+=String.fromCharCode(...chunk);
-    }
-    return btoa(s);
-  }
   async function uploadVideo(name,bytes,state,completed){
-    if(!openai?.callTool) throw new Error("ChatGPT tool bridge unavailable.");
+    if(!openai?.uploadFile || !openai?.getFileDownloadUrl || !openai?.callTool){
+      throw new Error("Required ChatGPT file/tool bridge is unavailable.");
+    }
     if(bytes.length>80000000) throw new Error(name+" exceeds 80 MB.");
     const title=baseName(name).replace(/[.][^.]+$/,"").slice(0,255);
     const filename=safeFilename(baseName(name));
     const mime=/[.]mov$/i.test(filename)?"video/quicktime":"video/mp4";
-    state.textContent="Starting";
-    let r=parseTool(await openai.callTool("manage_meta_video_upload_session_guarded",{
-      action:"start",title,filename,mime_type:mime,file_size:bytes.length,
+    state.textContent="Authorising";
+    const file=new File([bytes],filename,{type:mime});
+    const uploaded=await openai.uploadFile(file);
+    const fileId=uploaded?.fileId||uploaded?.file_id;
+    if(!fileId) throw new Error("ChatGPT did not return a file ID for "+name);
+    const dl=await openai.getFileDownloadUrl({fileId});
+    const sourceUrl=dl?.downloadUrl||dl?.download_url;
+    if(!sourceUrl) throw new Error("ChatGPT did not return a download URL for "+name);
+    state.textContent="Sending to Meta";
+    const result=parseTool(await openai.callTool("upload_meta_ad_video_from_url_guarded",{
+      title,filename,mime_type:mime,file_size:bytes.length,source_url:sourceUrl,
       confirmation:"CONFIRM UPLOAD META VIDEO BATCH"
     }));
-    if(!r?.upload_session_id||!r?.video_id) throw new Error(r?.message||"Start failed for "+name);
-    let start=Number(r.start_offset), end=Number(r.end_offset);
-    while(end>start){
-      const chunk=bytes.subarray(start,end);
-      state.textContent="Uploading "+Math.floor((start/bytes.length)*100)+"%";
-      const h=await sha256(chunk);
-      r=parseTool(await openai.callTool("manage_meta_video_upload_session_guarded",{
-        action:"transfer",
-        video_id:String(r.video_id),
-        upload_session_id:String(r.upload_session_id),
-        start_offset:start,end_offset:end,
-        chunk_base64:toBase64(chunk),chunk_sha256:h,
-        confirmation:"CONFIRM UPLOAD META VIDEO BATCH"
-      }));
-      if(!Number.isFinite(Number(r?.start_offset))||!Number.isFinite(Number(r?.end_offset))) throw new Error(r?.message||"Transfer failed for "+name);
-      start=Number(r.start_offset); end=Number(r.end_offset);
-    }
-    state.textContent="Finishing";
-    const final=parseTool(await openai.callTool("manage_meta_video_upload_session_guarded",{
-      action:"finish",
-      video_id:String(r.video_id),
-      upload_session_id:String(r.upload_session_id),
-      title,file_size:bytes.length,final_offset:start,
-      confirmation:"CONFIRM UPLOAD META VIDEO BATCH"
-    }));
-    if(final?.uploaded!==true) throw new Error(final?.message||"Finish failed for "+name);
-    state.textContent="Meta "+final.video_id; state.className="state ok";
-    completed.push({source_name:name,meta_video_id:String(final.video_id),processing_complete:Boolean(final.processing_complete),file_size:bytes.length});
+    if(result?.uploaded!==true) throw new Error(result?.message||"Meta URL upload failed for "+name);
+    state.textContent="Meta "+result.video_id; state.className="state ok";
+    completed.push({source_name:name,meta_video_id:String(result.video_id),processing_complete:Boolean(result.processing_complete),file_size:bytes.length});
     if(openai?.setWidgetState){
       openai.setWidgetState({modelContent:"Blindmotion Media Intake uploaded "+completed.length+" video(s): "+JSON.stringify(completed),privateContent:{completed}});
     }
   }
+
   zipInput.addEventListener("change",async()=>{
     const file=zipInput.files?.[0]; if(!file) return;
     items.innerHTML="";
