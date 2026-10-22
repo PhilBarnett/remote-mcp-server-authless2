@@ -683,20 +683,66 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"upload_meta_ad_video_from_url_guarded",
 		{
 			description:
-				"Upload one MP4/MOV to the configured Meta ad account by asking Meta to fetch a temporary ChatGPT oaiusercontent.com URL. The Worker validates the source host, file metadata and duplicate title before calling Meta. It cannot create or activate ads or campaigns.",
-			inputSchema: z.object({
-				title: z.string().trim().min(1).max(255),
-				filename: z.string().trim().min(5).max(200),
-				mime_type: z.enum(["video/mp4", "video/quicktime"]),
-				file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
-				source_url: z.string().url(),
-				confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
-			}),
+				"Guarded Blindmotion Meta video intake. PERMIT issues a short-lived single-use Worker upload permit for one MP4/MOV. URL retains the temporary oaiusercontent.com fetch path as a fallback. This tool cannot create or activate ads or campaigns.",
+			inputSchema: z.discriminatedUnion("action", [
+				z.object({
+					action: z.literal("permit"),
+					title: z.string().trim().min(1).max(255),
+					filename: z.string().trim().min(5).max(200),
+					mime_type: z.enum(["video/mp4", "video/quicktime"]),
+					file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
+					confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
+				}),
+				z.object({
+					action: z.literal("url"),
+					title: z.string().trim().min(1).max(255),
+					filename: z.string().trim().min(5).max(200),
+					mime_type: z.enum(["video/mp4", "video/quicktime"]),
+					file_size: z.number().int().positive().max(META_MAX_HOST_VIDEO_FILE_BYTES),
+					source_url: z.string().url(),
+					confirmation: z.literal(META_RESUMABLE_VIDEO_UPLOAD_CONFIRMATION),
+				}),
+			]),
 		},
-		async ({ title, filename, mime_type, file_size, source_url }) => {
+		async (args) => {
 			try {
-				const safeFilename = safeVideoFilename(filename, mime_type);
-				const source = new URL(source_url);
+				const safeFilename = safeVideoFilename(args.filename, args.mime_type);
+				const existing = (await listAccountVideos()).filter(
+					(item: any) => String(item?.title ?? "") === args.title,
+				);
+				if (existing.length) {
+					throw new Error(`Refusing upload: ${existing.length} owned video(s) already use this exact title.`);
+				}
+				if (args.action === "permit") {
+					const workerEnv = env as unknown as {
+						OAUTH_KV?: KVNamespace;
+					};
+					if (!workerEnv.OAUTH_KV) throw new Error("Media Intake permit store is unavailable.");
+					const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+					const token = Array.from(tokenBytes, byte => byte.toString(16).padStart(2, "0")).join("");
+					const permit = {
+						title: args.title,
+						filename: safeFilename,
+						mime_type: args.mime_type,
+						file_size: args.file_size,
+						created_at: Date.now(),
+					};
+					await workerEnv.OAUTH_KV.put(`media-intake-upload:${token}`, JSON.stringify(permit), {
+						expirationTtl: 600,
+					});
+					return textResult({
+						action: "permit",
+						upload_url: "https://remote-mcp-server-authless2.phil-cd4.workers.dev/media-intake/video",
+						upload_token: token,
+						expires_in_seconds: 600,
+						filename: safeFilename,
+						mime_type: args.mime_type,
+						file_size: args.file_size,
+						ad_or_campaign_created: false,
+						activation_performed: false,
+					});
+				}
+				const source = new URL(args.source_url);
 				if (
 					source.protocol !== "https:" ||
 					(source.hostname !== "oaiusercontent.com" && !source.hostname.endsWith(".oaiusercontent.com")) ||
@@ -706,30 +752,23 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				) {
 					throw new Error("source_url must be a credential-free HTTPS URL on oaiusercontent.com.");
 				}
-				const existing = (await listAccountVideos()).filter(
-					(item: any) => String(item?.title ?? "") === title,
-				);
-				if (existing.length) {
-					throw new Error(`Refusing URL upload: ${existing.length} owned video(s) already use this exact title.`);
-				}
 				const { adAccountId } = getToolkitMetaConfig();
 				const uploaded = await toolkitMetaPost(`${adAccountId}/advideos`, {
 					file_url: source.toString(),
-					title,
+					title: args.title,
 				});
 				const videoId = String(uploaded?.id ?? uploaded?.video_id ?? "");
-				if (!/^\d+$/.test(videoId)) {
-					throw new Error("Meta did not return a video ID for URL upload.");
-				}
+				if (!/^\d+$/.test(videoId)) throw new Error("Meta did not return a video ID for URL upload.");
 				const visibleVideo = (await listAccountVideos()).find(
 					(item: any) => String(item?.id) === videoId,
 				);
 				return textResult({
+					action: "url",
 					uploaded: true,
 					video_id: videoId,
 					filename: safeFilename,
-					mime_type,
-					file_size,
+					mime_type: args.mime_type,
+					file_size: args.file_size,
 					visible_as_owned_ad_account_video: Boolean(visibleVideo),
 					processing_complete: visibleVideo?.status?.processing_phase?.status === "complete",
 					video: visibleVideo ? { ...visibleVideo, derived_dimensions: derivedVideoDimensions(visibleVideo) } : null,
