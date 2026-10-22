@@ -215,6 +215,22 @@ function derivedVideoDimensions(video: any) {
 	return candidates[0] ?? { width: null, height: null };
 }
 
+async function assertCreativeAttachedVideoReady(videoId: string) {
+	const video = await toolkitMetaGet(videoId, "id,title,length,status,format,picture");
+	if (String(video?.id ?? "") !== videoId) {
+		throw new Error(`Creative video ${videoId} could not be verified by Meta.`);
+	}
+	const status = video?.status ?? {};
+	if (
+		String(status?.video_status ?? "") !== "ready" ||
+		String(status?.uploading_phase?.status ?? "") !== "complete" ||
+		String(status?.processing_phase?.status ?? "") !== "complete"
+	) {
+		throw new Error(`Creative video ${videoId} is not fully processed and ready.`);
+	}
+	return { ...video, derived_dimensions: derivedVideoDimensions(video), ownership_source: "OWNED_AD_CREATIVE_DERIVATIVE" };
+}
+
 async function assertOwnedVideo(
 	videoId: string,
 	expected?: {
@@ -604,8 +620,15 @@ async function buildPreflight(campaignId: string, expectedCampaignName: string) 
 	for (const videoId of [...videoIds].sort()) {
 		try {
 			ownedVideos.push(await assertOwnedVideo(videoId));
-		} catch (error) {
-			blockers.push(error instanceof Error ? error.message : String(error));
+		} catch (ownedError) {
+			try {
+				ownedVideos.push(await assertCreativeAttachedVideoReady(videoId));
+				warnings.push(
+					`Video ${videoId} is a Meta placement derivative attached to an owned ad creative; source ownership was validated at guarded ad creation.`,
+				);
+			} catch {
+				blockers.push(ownedError instanceof Error ? ownedError.message : String(ownedError));
+			}
 		}
 	}
 	const normalized = {
