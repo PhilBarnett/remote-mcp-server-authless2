@@ -1,4 +1,5 @@
 import { metaSpendLimitSchema, manageMetaSpendLimit } from "./tools/meta-spend-limit";
+import { updateSampleRouting } from "./tools/sample-routing-update";
 import { authenticatedMcp, type AuthEnv } from "./oauth";
 import { EQUINOX_PRICING_PATHS, verifyEquinoxPricing, assertEquinoxPricingReadOnly } from "./equinox-pricing";
 import { purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult } from "./tools/ga4-purchase-diagnostics";
@@ -4643,17 +4644,26 @@ function createServer() {
 		"get_blindmotion_mcp_source_file",
 		{
 			description:
-				"Read one permitted Blindmotion MCP source file from the exact current main commit, or use path=production-sample-routing for the fixed live routing snippet 11. Production reads are GET-only, identity-checked, credential-redacted and hashed. MUTATION: path=production-sample-routing-cleanup removes only reviewed legacy blocks from live snippet 11, requires the exact reviewed source hash, preserves routing version and activation, verifies read-back and attempts guarded rollback on failure. It does not sync contacts or change email settings.",
+				"Read permitted repository source or fixed live sample-routing snippet 11. production-sample-routing-preview returns the hash-locked plan for the bundled v1.0.4 release or its reviewed rollback. MUTATIONS: production-sample-routing-apply and production-sample-routing-rollback require exact preview source/plan hashes and CONFIRM UPDATE LIVE SAMPLE ROUTING. They can write only bundled reviewed code to live snippet 11, preserve activation/settings, verify read-back and attempt guarded rollback. No arbitrary PHP, snippet IDs, contact sync or email-sequence activation. Legacy production-sample-routing-cleanup remains restricted to its reviewed cleanup.",
 			inputSchema: z.object({
-				path: z.enum(["src/index.ts", "README.md", "production-sample-routing", "production-sample-routing-cleanup"]),
+				path: z.enum(["src/index.ts", "README.md", "production-sample-routing", "production-sample-routing-cleanup", "production-sample-routing-preview", "production-sample-routing-apply", "production-sample-routing-rollback"]),
+				expected_source_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+				expected_plan_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+				confirmation: z.literal("CONFIRM UPDATE LIVE SAMPLE ROUTING").optional(),
 				expected_main_sha: z
 					.string()
 					.regex(/^[0-9a-f]{40}$/)
 					.optional(),
 			}),
 		},
-		async ({ path, expected_main_sha }) => {
+		async ({ path, expected_main_sha, expected_source_sha256, expected_plan_sha256, confirmation }) => {
 			try {
+				if (["production-sample-routing-preview", "production-sample-routing-apply", "production-sample-routing-rollback"].includes(path)) {
+					if (expected_main_sha !== undefined) throw new Error("expected_main_sha does not apply to routing updates.");
+					const workerEnv = env as unknown as Record<string, string>;
+					const action = path === "production-sample-routing-preview" ? "preview" : path === "production-sample-routing-apply" ? "apply" : "rollback";
+					return toolResult(await updateSampleRouting(workerEnv.WC_SITE, getWpWriteAuthHeader(), { action, expected_source_sha256, expected_plan_sha256, confirmation }));
+				}
 				if (path === "production-sample-routing-cleanup") {
 					if (expected_main_sha !== undefined) throw new Error("expected_main_sha does not apply to cleanup.");
 					const workerEnv = env as unknown as Record<string, string>;
