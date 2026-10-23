@@ -8225,7 +8225,7 @@ function createServer() {
 				campaign_id: z.string().regex(/^\d+$/),
 				name: z.string().trim().min(3).max(200),
 				pixel_id: z.string().regex(/^\d+$/),
-				conversion_event: z.enum(["PURCHASE", "LEAD"]).default("PURCHASE"),
+				conversion_event: z.enum(["PURCHASE", "LEAD", "ADD_TO_CART", "INITIATE_CHECKOUT"]).default("PURCHASE"),
 				daily_budget_aud: z.number().positive().max(500).optional(),
 				age_min: z.number().int().min(18).max(65).default(18),
 				age_max: z.number().int().min(18).max(65).default(65),
