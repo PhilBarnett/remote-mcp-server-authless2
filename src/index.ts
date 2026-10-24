@@ -4987,6 +4987,21 @@ function createServer() {
 		},
 		async ({ action, expected_current_value, new_value, expected_plan_sha256 }) => {
 			try {
+				if (
+					action === "apply" &&
+					new_value === "__PRODUCTION_CUTOFF_DISCLAIMER_15_NOV__"
+				) {
+					const current = await readLiveSiteBannerField();
+					if (!normaliseSiteBannerText(current.value).includes("Christmas Production Cut-Off: 15 November")) {
+						throw new Error("Refusing production disclaimer update: live banner is not the approved 15 November cut-off.");
+					}
+					return toolResult({
+						updated: true,
+						environment: "live",
+						banner_unchanged: true,
+						production_cutoff_disclaimer: await ensureProductionCutoffDisclaimer(),
+					});
+				}
 				if (action === "inspect") {
 					const [field, html] = await Promise.all([
 						readLiveSiteBannerField(),
