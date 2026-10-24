@@ -568,6 +568,69 @@ async function buildLiveSiteBannerPlan(
 	return { current, core, planSha256 };
 }
 
+
+const SITE_PRODUCTION_DISCLAIMER_MARKER = "bm-production-cutoff-disclaimer";
+const SITE_PRODUCTION_DISCLAIMER_TEXT =
+	"Pre-Christmas production cut-off dates are based on current factory capacity and production availability. Blindmotion may bring a cut-off forward or extend it where production capacity materially changes. Orders placed before a stated cut-off remain subject to product availability, production requirements, freight schedules and circumstances beyond our reasonable control.";
+
+function buildProductionDisclaimerUpdaterCode() {
+	const marker = SITE_PRODUCTION_DISCLAIMER_MARKER;
+	const text = SITE_PRODUCTION_DISCLAIMER_TEXT.replace(/'/g, "\\'");
+	return `/** Blindmotion MCP one-shot production cut-off disclaimer updater. */
+if ( ! defined( 'ABSPATH' ) ) { exit; }
+add_action( 'init', function () {
+	$page = get_page_by_path( 'shipping-returns', OBJECT, 'page' );
+	if ( ! $page || empty( $page->ID ) ) { return; }
+	if ( strpos( (string) $page->post_content, '${marker}' ) !== false ) { return; }
+	$addition = '<div id="${marker}" class="${marker}"><h3>Production cut-off dates</h3><p>${text}</p></div>';
+	wp_update_post( array(
+		'ID' => (int) $page->ID,
+		'post_content' => rtrim( (string) $page->post_content ) . "\n\n" . $addition,
+	) );
+}, 2 );
+`;
+}
+
+async function ensureProductionCutoffDisclaimer(request: typeof fetch = fetch) {
+	const snippetName = "Blindmotion MCP One-Shot Production Cut-Off Disclaimer";
+	const list = await codeSnippetsBannerRequest("snippets", {}, request);
+	const rows = codeSnippetRows(list);
+	const matches = rows.filter((item: any) => String(item?.name ?? item?.title ?? "") === snippetName);
+	if (matches.length > 1) throw new Error("Multiple managed production disclaimer snippets exist.");
+	const code = buildProductionDisclaimerUpdaterCode();
+	const codeHash = await sha256Hex(new TextEncoder().encode(code));
+	let id: number;
+	if (matches.length === 1) {
+		id = Number(matches[0]?.id);
+		await codeSnippetsBannerRequest("snippets/" + id, { method: "POST", body: { code, active: true } }, request);
+	} else {
+		const created = await codeSnippetsBannerRequest("snippets", {
+			method: "POST",
+			body: { name: snippetName, code, scope: "global", active: true },
+		}, request);
+		id = Number(created?.id);
+	}
+	if (!Number.isInteger(id) || id < 1) throw new Error("Production disclaimer updater snippet has invalid ID.");
+	await triggerBannerUpdater(request);
+	await codeSnippetsBannerRequest("snippets/" + id, { method: "POST", body: { code, active: false } }, request);
+	const verifyResponse = await request(
+		"https://online.blindmotion.com.au/wp-json/wp/v2/pages?slug=shipping-returns&context=edit",
+		{
+			headers: { Authorization: getWpWriteAuthHeader(), Accept: "application/json", "Cache-Control": "no-cache, no-store" },
+			redirect: "manual",
+			signal: AbortSignal.timeout(15_000),
+		},
+	);
+	if (!verifyResponse.ok) throw new Error("Production disclaimer page verification failed: HTTP " + verifyResponse.status);
+	const pages = await verifyResponse.json<any[]>();
+	if (!Array.isArray(pages) || pages.length !== 1) throw new Error("Shipping & Returns page identity verification failed.");
+	const raw = String(pages[0]?.content?.raw ?? "");
+	if (!raw.includes(SITE_PRODUCTION_DISCLAIMER_MARKER) || !raw.includes(SITE_PRODUCTION_DISCLAIMER_TEXT)) {
+		throw new Error("Production disclaimer was not found in the Shipping & Returns page after update.");
+	}
+	return { page_id: Number(pages[0].id), page_slug: "shipping-returns", snippet_id: id, snippet_deactivated: true, verified: true, code_sha256: codeHash };
+}
+
 async function applyLiveSiteBannerPlan(
 	expectedCurrentValue: string,
 	newValue: string,
@@ -613,6 +676,9 @@ async function applyLiveSiteBannerPlan(
 		) {
 			throw new Error("Public homepage did not verify the new Offer Banner 1 text.");
 		}
+		const productionDisclaimer = plan.core.new_rendered_text.includes("Christmas Production Cut-Off: 15 November")
+			? await ensureProductionCutoffDisclaimer(request)
+			: null;
 		return {
 			updated: true,
 			environment: "live",
@@ -627,6 +693,7 @@ async function applyLiveSiteBannerPlan(
 			plan_sha256: plan.planSha256,
 			acf_readback_verified: true,
 			public_homepage_verified: true,
+			production_cutoff_disclaimer: productionDisclaimer,
 			temporary_updater_snippet_id: updaterId,
 			temporary_updater_deactivated: true,
 			rollback_protected: true,
