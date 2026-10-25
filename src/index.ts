@@ -51,6 +51,159 @@ const GOOGLE_ADS_PRODUCT_PMAX_VIDEO_CONFIRMATION = "CONFIRM LINK PAUSED PRODUCT 
 
 const GENUINE_STATUSES = new Set(["processing", "completed", "on-hold"]);
 
+const BLINDMOTION_BUSINESS_TIME_ZONE = "Australia/Sydney";
+const BLINDMOTION_TIME_ZONE_LABEL = "Australia/Sydney";
+
+function dateOnlyAddDays(date: string, days: number) {
+	const ms = Date.parse(date + "T00:00:00Z");
+	if (!Number.isFinite(ms)) throw new Error("Invalid date: " + date);
+	return new Date(ms + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+function zonedDateTimeToUtcIso(date: string, time: string, timeZone = BLINDMOTION_BUSINESS_TIME_ZONE) {
+	const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+	const timeMatch = /^(\d{2}):(\d{2}):(\d{2})$/.exec(time);
+	if (!match || !timeMatch) throw new Error("Invalid local date/time.");
+	const desiredMs = Date.UTC(
+		Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+		Number(timeMatch[1]), Number(timeMatch[2]), Number(timeMatch[3]),
+	);
+	let guess = desiredMs;
+	const formatter = new Intl.DateTimeFormat("en-CA", {
+		timeZone,
+		year: "numeric", month: "2-digit", day: "2-digit",
+		hour: "2-digit", minute: "2-digit", second: "2-digit",
+		hourCycle: "h23",
+	});
+	for (let i = 0; i < 3; i++) {
+		const parts = Object.fromEntries(
+			formatter.formatToParts(new Date(guess))
+				.filter((part) => part.type !== "literal")
+				.map((part) => [part.type, part.value]),
+		);
+		const actualLocalMs = Date.UTC(
+			Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+			Number(parts.hour), Number(parts.minute), Number(parts.second),
+		);
+		guess += desiredMs - actualLocalMs;
+	}
+	return new Date(guess).toISOString();
+}
+
+function sydneyOrderRange(startDate: string, endDate: string) {
+	const after = zonedDateTimeToUtcIso(startDate, "00:00:00");
+	const nextDate = dateOnlyAddDays(endDate, 1);
+	const nextMidnightMs = Date.parse(zonedDateTimeToUtcIso(nextDate, "00:00:00"));
+	return {
+		after,
+		before: new Date(nextMidnightMs - 1000).toISOString(),
+		dates_are_gmt: 1,
+	};
+}
+
+function formatSydneyTimestampFromUtc(value: unknown) {
+	if (typeof value !== "string" || !value.trim()) return null;
+	const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : value + "Z";
+	const date = new Date(normalized);
+	if (!Number.isFinite(date.getTime())) return null;
+	const formatter = new Intl.DateTimeFormat("en-CA", {
+		timeZone: BLINDMOTION_BUSINESS_TIME_ZONE,
+		year: "numeric", month: "2-digit", day: "2-digit",
+		hour: "2-digit", minute: "2-digit", second: "2-digit",
+		hourCycle: "h23",
+		timeZoneName: "longOffset",
+	});
+	const parts = Object.fromEntries(
+		formatter.formatToParts(date)
+			.filter((part) => part.type !== "literal")
+			.map((part) => [part.type, part.value]),
+	);
+	const offset = String(parts.timeZoneName ?? "GMT+00:00").replace(/^GMT/, "");
+	return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${offset}`;
+}
+
+function orderUtcTimestamp(order: any, field: "date_created" | "date_paid" | "date_completed" = "date_created") {
+	const gmtField = field + "_gmt";
+	const gmt = order?.[gmtField];
+	if (typeof gmt === "string" && gmt) return /Z$/i.test(gmt) ? gmt : gmt + "Z";
+	const raw = order?.[field];
+	if (typeof raw !== "string" || !raw) return null;
+	// Blindmotion historically returned Woo order timestamps in UTC without an offset.
+	return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw) ? raw : raw + "Z";
+}
+
+function orderSydneyTimestamp(order: any, field: "date_created" | "date_paid" | "date_completed" = "date_created") {
+	return formatSydneyTimestampFromUtc(orderUtcTimestamp(order, field));
+}
+
+function orderSydneyDate(order: any) {
+	return orderSydneyTimestamp(order)?.slice(0, 10) ?? null;
+}
+
+function orderTimestampMs(order: any) {
+	const utc = orderUtcTimestamp(order);
+	if (!utc) return null;
+	const ms = Date.parse(utc);
+	return Number.isFinite(ms) ? ms : null;
+}
+
+async function readLiveWordPressSettings(request: typeof fetch = fetch) {
+	const response = await request("https://online.blindmotion.com.au/wp-json/wp/v2/settings", {
+		headers: {
+			Authorization: getWpWriteAuthHeader(),
+			Accept: "application/json",
+			"Cache-Control": "no-cache, no-store",
+		},
+		redirect: "manual",
+		signal: AbortSignal.timeout(15_000),
+	});
+	if (!response.ok) throw new Error("WordPress settings read failed: HTTP " + response.status);
+	const settings = await response.json<any>();
+	return {
+		timezone: settings?.timezone ?? null,
+		date_format: settings?.date_format ?? null,
+		time_format: settings?.time_format ?? null,
+	};
+}
+
+async function setLiveWordPressSydneyTimezone(request: typeof fetch = fetch) {
+	const before = await readLiveWordPressSettings(request);
+	if (before.timezone === BLINDMOTION_BUSINESS_TIME_ZONE) {
+		return { updated: false, previous_timezone: before.timezone, timezone: before.timezone, verified: true };
+	}
+	const response = await request("https://online.blindmotion.com.au/wp-json/wp/v2/settings", {
+		method: "POST",
+		headers: {
+			Authorization: getWpWriteAuthHeader(),
+			Accept: "application/json",
+			"Content-Type": "application/json",
+			"Cache-Control": "no-cache, no-store",
+		},
+		body: JSON.stringify({ timezone: BLINDMOTION_BUSINESS_TIME_ZONE }),
+		redirect: "manual",
+		signal: AbortSignal.timeout(15_000),
+	});
+	if (!response.ok) throw new Error("WordPress timezone update failed: HTTP " + response.status);
+	const after = await readLiveWordPressSettings(request);
+	if (after.timezone !== BLINDMOTION_BUSINESS_TIME_ZONE) {
+		if (typeof before.timezone === "string") {
+			await request("https://online.blindmotion.com.au/wp-json/wp/v2/settings", {
+				method: "POST",
+				headers: {
+					Authorization: getWpWriteAuthHeader(),
+					Accept: "application/json",
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ timezone: before.timezone }),
+				redirect: "manual",
+				signal: AbortSignal.timeout(15_000),
+			});
+		}
+		throw new Error("WordPress timezone update did not verify; prior timezone was restored.");
+	}
+	return { updated: true, previous_timezone: before.timezone, timezone: after.timezone, verified: true };
+}
+
 function getAuthHeader() {
 	const workerEnv = env as unknown as Record<string, string>;
 	const auth = btoa(`${workerEnv.WC_CONSUMER_KEY}:${workerEnv.WC_CONSUMER_SECRET}`);
@@ -3934,8 +4087,7 @@ async function getAllOrders(startDate: string, endDate: string) {
 
 	for (let page = 1; page <= maxPages; page++) {
 		const response = await wcFetch("orders", {
-			after: `${startDate}T00:00:00`,
-			before: `${endDate}T23:59:59`,
+			...sydneyOrderRange(startDate, endDate),
 			per_page: perPage,
 			page,
 			orderby: "date",
@@ -4265,7 +4417,9 @@ function safeOrderLineDimensions(item: any) {
 function safeOrder(order: any) {
 	return {
 		id: order.id,
-		date_created: order.date_created,
+		date_created: orderSydneyTimestamp(order),
+		date_created_utc: orderUtcTimestamp(order),
+		time_zone: BLINDMOTION_TIME_ZONE_LABEL,
 		status: order.status,
 		customer_id: order.customer_id,
 		currency: order.currency,
@@ -4967,23 +5121,14 @@ function createServer() {
 		},
 		async () => {
 			try {
-				const response = await fetch("https://online.blindmotion.com.au/wp-json/wp/v2/settings", {
-					headers: {
-						Authorization: getWpWriteAuthHeader(),
-						Accept: "application/json",
-						"Cache-Control": "no-cache, no-store",
-					},
-					redirect: "manual",
-					signal: AbortSignal.timeout(15_000),
-				});
-				if (!response.ok) throw new Error("WordPress settings read failed: HTTP " + response.status);
-				const settings = await response.json<any>();
+				const settings = await readLiveWordPressSettings();
 				return toolResult({
 					write_performed: false,
 					host: "online.blindmotion.com.au",
-					wordpress_timezone: settings?.timezone ?? null,
-					date_format: settings?.date_format ?? null,
-					time_format: settings?.time_format ?? null,
+					wordpress_timezone: settings.timezone,
+					date_format: settings.date_format,
+					time_format: settings.time_format,
+					business_timezone: BLINDMOTION_BUSINESS_TIME_ZONE,
 					worker_utc_now: new Date().toISOString(),
 				});
 			} catch (error) {
@@ -5023,6 +5168,16 @@ function createServer() {
 			try {
 				if (
 					action === "apply" &&
+					new_value === "__SET_WORDPRESS_TIMEZONE_AUSTRALIA_SYDNEY__"
+				) {
+					return toolResult({
+						environment: "live",
+						banner_unchanged: true,
+						wordpress_timezone: await setLiveWordPressSydneyTimezone(),
+					});
+				}
+				if (
+					action === "apply" &&
 					new_value === "__PRODUCTION_CUTOFF_DISCLAIMER_15_NOV__"
 				) {
 					const current = await readLiveSiteBannerField();
@@ -5037,9 +5192,10 @@ function createServer() {
 					});
 				}
 				if (action === "inspect") {
-					const [field, html] = await Promise.all([
+					const [field, html, wpSettings] = await Promise.all([
 						readLiveSiteBannerField(),
 						liveSiteBannerHomepage(),
+						readLiveWordPressSettings(),
 					]);
 					const renderedText = normaliseSiteBannerText(field.value);
 					return toolResult({
@@ -5049,6 +5205,8 @@ function createServer() {
 						...field,
 						rendered_text: renderedText,
 						public_render_occurrences: siteBannerTextOccurrenceCount(html, renderedText),
+						wordpress_timezone: wpSettings.timezone,
+						business_timezone: BLINDMOTION_BUSINESS_TIME_ZONE,
 					});
 				}
 				const plan = await buildLiveSiteBannerPlan(expected_current_value!, new_value!);
@@ -5151,6 +5309,7 @@ function createServer() {
 					start_date,
 					end_date,
 					commercial_start_date: COMMERCIAL_START_DATE,
+					time_zone: BLINDMOTION_TIME_ZONE_LABEL,
 					genuine_order_min_total: GENUINE_ORDER_MIN_TOTAL,
 					genuine_statuses: Array.from(GENUINE_STATUSES),
 					order_count: orderCount,
@@ -5223,7 +5382,7 @@ function createServer() {
 				const orders = await getAllOrders(start_date, asOfDate);
 				const sampleOrders = orders
 					.filter((order) => {
-						const orderMs = cohortDateMs(order?.date_created);
+						const orderMs = cohortDateMs(orderSydneyDate(order));
 						if (
 							orderMs === null ||
 							orderMs < startMs ||
@@ -5244,8 +5403,8 @@ function createServer() {
 					})
 					.sort(
 						(a, b) =>
-							Number(cohortTimestampMs(a?.date_created)) -
-							Number(cohortTimestampMs(b?.date_created)),
+							Number(orderTimestampMs(a)) -
+							Number(orderTimestampMs(b)),
 					);
 				const purchaseOrders = orders.filter((order) => {
 					if (product_scope === "roller") return isRollerPurchaseOrder(order);
@@ -5278,8 +5437,8 @@ function createServer() {
 					const customerId =
 						Number(order?.customer_id ?? 0) > 0 ? Number(order.customer_id) : null;
 					const timestampMs =
-						cohortTimestampMs(order?.date_created) ??
-						cohortDateMs(order?.date_created)!;
+						orderTimestampMs(order) ??
+						cohortDateMs(orderSydneyDate(order))!;
 					const matchingIndexes = customers
 						.map((customer, index) => ({ customer, index }))
 						.filter(({ customer }) => {
@@ -5297,7 +5456,7 @@ function createServer() {
 							customer_ids: new Set(customerId ? [customerId] : []),
 							matchable: Boolean(email || phone || customerId),
 							first_sample_order_id: Number(order.id),
-							first_sample_date: String(order.date_created).slice(0, 10),
+							first_sample_date: orderSydneyDate(order) ?? String(order.date_created).slice(0, 10),
 							first_sample_timestamp_ms: timestampMs,
 							sample_order_ids: [Number(order.id)],
 						});
@@ -5371,8 +5530,8 @@ function createServer() {
 							}))
 							.filter(({ order, match_method }) => {
 								if (!match_method) return false;
-								const purchaseMs = cohortDateMs(order?.date_created);
-								const purchaseTimestampMs = cohortTimestampMs(order?.date_created);
+								const purchaseMs = cohortDateMs(orderSydneyDate(order));
+								const purchaseTimestampMs = orderTimestampMs(order);
 								return (
 									purchaseMs !== null &&
 									purchaseTimestampMs !== null &&
@@ -5412,10 +5571,10 @@ function createServer() {
 							first_sample_date: customer.first_sample_date,
 							match_method: first.match_method,
 							first_purchase_order_id: Number(first.order.id),
-							first_purchase_date: String(first.order.date_created).slice(0, 10),
+							first_purchase_date: orderSydneyDate(first.order) ?? String(first.order.date_created).slice(0, 10),
 							days_to_first_purchase: cohortDaysBetween(
 								customer.first_sample_date,
-								first.order.date_created,
+								orderSydneyDate(first.order) ?? first.order.date_created,
 							),
 							purchase_order_ids: matched.map((result) =>
 								Number(result.order.id),
@@ -5565,8 +5724,7 @@ function createServer() {
 		async ({ start_date, end_date, status, limit }) => {
 			try {
 				const response = await wcFetch("orders", {
-					after: `${start_date}T00:00:00`,
-					before: `${end_date}T23:59:59`,
+					...sydneyOrderRange(start_date, end_date),
 					status,
 					per_page: limit,
 					orderby: "date",
@@ -7272,8 +7430,10 @@ function createServer() {
 				const order = await response.json<any>();
 				return toolResult({
 					...safeOrderWithLineItemConfiguration(order),
-					date_paid: order.date_paid,
-					date_completed: order.date_completed,
+					date_paid: orderSydneyTimestamp(order, "date_paid"),
+					date_paid_utc: orderUtcTimestamp(order, "date_paid"),
+					date_completed: orderSydneyTimestamp(order, "date_completed"),
+					date_completed_utc: orderUtcTimestamp(order, "date_completed"),
 					transaction_id: order.transaction_id,
 					fee_lines: order.fee_lines?.map((fee: any) => ({
 						name: fee.name,
@@ -7365,7 +7525,8 @@ function createServer() {
 				for (let page = 1; page <= 20; page++) {
 					const response = await wcFetch("orders", {
 						customer: customer_id,
-						after: `${COMMERCIAL_START_DATE}T00:00:00`,
+						after: zonedDateTimeToUtcIso(COMMERCIAL_START_DATE, "00:00:00"),
+						dates_are_gmt: 1,
 						per_page: perPage,
 						page,
 						orderby: "date",
