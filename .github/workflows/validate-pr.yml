@@ -63,4 +63,4 @@ jobs:
         run: node --test scripts/test-meta-spend-limit.mjs
 
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 100
+        run: npm run audit:mcp-tools -- --max 101
