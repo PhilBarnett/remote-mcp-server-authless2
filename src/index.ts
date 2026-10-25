@@ -4958,6 +4958,40 @@ function createServer() {
 	 */
 
 
+
+	server.registerTool(
+		"inspect_live_wordpress_timezone",
+		{
+			description: "Read the live Blindmotion WordPress site timezone setting and server-side current timestamps. Read-only; performs no writes.",
+			inputSchema: z.object({}),
+		},
+		async () => {
+			try {
+				const response = await fetch("https://online.blindmotion.com.au/wp-json/wp/v2/settings", {
+					headers: {
+						Authorization: getWpWriteAuthHeader(),
+						Accept: "application/json",
+						"Cache-Control": "no-cache, no-store",
+					},
+					redirect: "manual",
+					signal: AbortSignal.timeout(15_000),
+				});
+				if (!response.ok) throw new Error("WordPress settings read failed: HTTP " + response.status);
+				const settings = await response.json<any>();
+				return toolResult({
+					write_performed: false,
+					host: "online.blindmotion.com.au",
+					wordpress_timezone: settings?.timezone ?? null,
+					date_format: settings?.date_format ?? null,
+					time_format: settings?.time_format ?? null,
+					worker_utc_now: new Date().toISOString(),
+				});
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
 	server.registerTool(
 		"manage_live_site_banner_guarded",
 		{

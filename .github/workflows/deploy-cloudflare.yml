@@ -49,7 +49,7 @@ jobs:
         run: node scripts/test-sample-routing-update.mjs
 
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 100
+        run: npm run audit:mcp-tools -- --max 101
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3

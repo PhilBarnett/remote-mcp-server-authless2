@@ -109,10 +109,11 @@ try {
 	assert.ok(toolsText.includes("set_staging_product_publication_guarded"));
 	const decode = text => JSON.parse(text.startsWith("event:") ? text.split("\n").find(line => line.startsWith("data: ")).slice(6) : text);
 	const listedTools = decode(toolsText).result.tools;
-	assert.equal(listedTools.length, 106);
-	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 106);
+	assert.equal(listedTools.length, 107);
+	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 107);
 	assert.ok(listedTools.find(tool => tool.name === "manage_equinox").inputSchema.properties.action.enum.includes("pricing_details"));
 	assert.ok(listedTools.find(tool => tool.name === "manage_live_site_banner_guarded"));
+	assert.ok(listedTools.find(tool => tool.name === "inspect_live_wordpress_timezone"));
 	const management = listedTools.find(tool => tool.name === "manage_equinox");
 	assert.ok(management.inputSchema.required.includes("site"));
 	for (const [site, expected] of [["equinox", "Equinox test product"], ["blindmotion", "Blindmotion test product"]]) {
