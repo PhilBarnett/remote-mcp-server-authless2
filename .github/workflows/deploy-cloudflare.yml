@@ -48,6 +48,9 @@ jobs:
       - name: Test fixed live sample-routing update and PHP release
         run: node scripts/test-sample-routing-update.mjs
 
+      - name: Test Google budget diagnostics
+        run: node --experimental-strip-types --test scripts/test-google-budget-diagnostics.mjs
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 101
 

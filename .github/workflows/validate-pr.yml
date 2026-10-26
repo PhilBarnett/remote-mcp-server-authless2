@@ -62,5 +62,8 @@ jobs:
       - name: Test Meta account spending-limit guards
         run: node --test scripts/test-meta-spend-limit.mjs
 
+      - name: Test Google budget diagnostics
+        run: node --experimental-strip-types --test scripts/test-google-budget-diagnostics.mjs
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 101

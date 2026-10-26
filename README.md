@@ -618,3 +618,45 @@ amount.
 API references: [Meta AdAccount reference](https://developers.facebook.com/docs/marketing-api/reference/ad-account/),
 [Meta's account update example](https://www.postman.com/meta/facebook-marketing-api/request/wkoohbd/updating-adaccount-basic-details-l4),
 [Meta account spending-limit help](https://www.facebook.com/business/help/203321833042958).
+
+## Read-only Google Ads budget constraint diagnostics
+
+`get_google_ads_campaign_performance` retains existing reporting. Optionally pass
+`budget_diagnostics: { campaign_id, expected_campaign_name }` with the existing
+`start_date` and `end_date` (inclusive, maximum 93 days). No new exposed tool is
+added and the existing shared-budget mutation refusal remains unchanged.
+
+The diagnostic resolves the configured Google customer, AUD currency and account
+timezone, validates the exact campaign name/ID/resource, and reads its budget's
+identity, amount, period, sharing flag and reference count. It returns current
+budget members (including paused/removed members), each member's period spend,
+combined spend by day (including zero-delivery days), and indicative utilisation
+of the current daily budget. It does not infer historical budget amounts or
+membership changes. Reports cover the supplied dates in Google's account timezone.
+
+Current campaign primary status/reasons, bidding strategy and target ROAS are
+shown separately from historical Search impression share and losses due to budget
+or rank. Google may omit these metrics or not support them for a campaign: null
+means unavailable, never zero. An explicitly reported BUDGET_CONSTRAINED reason is
+positive current evidence. Its absence alone is not proof of no constraint.
+Historical positive budget-loss share is evidence for that reporting period only.
+Google may return bounded/estimated shares; these remain unaltered fractions.
+
+Current-budget utilisation is contextual, not proof of a budget constraint. Google
+can overdeliver on individual days; underspending can also reflect bid/target,
+demand, eligibility or other restrictions. A budget change affects all sharing
+campaigns. This feature executes only fixed SELECT queries through the existing
+configured-account reader, and cannot mutate or validate a proposed budget change.
+If impression-share reads fail, budget/spend results survive with an explicit
+warning. Invalid identity, dates, financial rows or potentially truncated group
+results fail closed rather than presenting complete-looking totals.
+
+Tests: `node --experimental-strip-types --test scripts/test-google-budget-diagnostics.mjs`.
+They cover shared spend, micros, zero days, missing vs zero impression shares,
+partial-query failure, absence of current budget evidence, non-daily budgets,
+injection/date validation, customer/campaign identity and truncation safeguards.
+Both PR and deployment workflows run the tests. Live Google field availability
+and real account results must be verified after deployment.
+
+References: [Google v25 campaign fields](https://developers.google.com/google-ads/api/fields/v25/campaign)
+and [campaign budget fields](https://developers.google.com/google-ads/api/fields/v25/campaign_budget).

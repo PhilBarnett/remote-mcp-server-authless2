@@ -1,3 +1,4 @@
+import { googleBudgetDiagnostics } from "./tools/google-budget-diagnostics";
 import { metaSpendLimitSchema, manageMetaSpendLimit } from "./tools/meta-spend-limit";
 import { updateSampleRouting } from "./tools/sample-routing-update";
 import { authenticatedMcp, type AuthEnv } from "./oauth";
@@ -9352,6 +9353,9 @@ function createServer() {
 				inputSchema: z.object({
 					...googleAdsDateSchema,
 					limit: z.number().int().min(1).max(1000).default(100),
+					...(name === "get_google_ads_campaign_performance" ? {
+						budget_diagnostics: z.object({ campaign_id: z.string().regex(/^\d{1,20}$/), expected_campaign_name: z.string().min(1).max(255) }).strict().optional(),
+					} : {}),
 					...(name === "get_google_ads_ad_performance" ? {
 						campaign_id: z.string().regex(/^\d{1,20}$/).optional(),
 						expected_campaign_name: z.string().trim().min(1).max(255).optional(),
@@ -9364,6 +9368,7 @@ function createServer() {
 				try {
 					assertGoogleAdsDate(start_date, "start_date");
 					assertGoogleAdsDate(end_date, "end_date");
+					if (name === "get_google_ads_campaign_performance" && args.budget_diagnostics) return toolResult(await googleBudgetDiagnostics(googleAdsSearch, { ...args.budget_diagnostics, start_date, end_date }));
 					if (name === "get_google_ads_ad_performance" &&
 						(campaign_id || expected_campaign_name || expected_asset_group_name)) {
 						if (!campaign_id || !expected_campaign_name || !expected_asset_group_name) {
@@ -9443,7 +9448,7 @@ function createServer() {
 		"get_google_ads_campaign_performance",
 		"campaign",
 		"campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type",
-		"Return read-only Blindmotion Google Ads campaign performance for a date range.",
+		"Return read-only Blindmotion Google Ads campaign performance for a date range. Optional budget_diagnostics with exact campaign_id and expected_campaign_name reports its current budget, all shared-budget members, combined daily spend, current primary delivery reasons, bidding strategy and historical lost impression share due to budget/rank where available. Does not mutate or preview budget changes. Diagnostic dates are limited to 93 days; current budget utilisation is indicative, not proof of delivery constraint.",
 	);
 	registerGoogleAdsPerformanceTool(
 		"get_google_ads_ad_group_performance",
