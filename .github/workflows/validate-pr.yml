@@ -65,5 +65,8 @@ jobs:
       - name: Test Google budget diagnostics
         run: node --experimental-strip-types --test scripts/test-google-budget-diagnostics.mjs
 
+      - name: Test exact Google budget controls
+        run: node --experimental-strip-types --test scripts/test-google-budget-controls.mjs
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 101
