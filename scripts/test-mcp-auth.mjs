@@ -18,6 +18,7 @@ const runtimeOptions = {
 	modules: true, script: bundle.outputFiles[0].text,
 	compatibilityDate: "2026-07-02", compatibilityFlags: ["nodejs_compat"],
 	kvNamespaces: ["OAUTH_KV"], bindings: {
+		META_ACCESS_TOKEN: "mock-meta-token", META_AD_ACCOUNT_ID: "99", META_API_VERSION: "v25.0",
 		MCP_OWNER_SECRET: secret, WC_SITE: "https://online.blindmotion.com.au",
 		WC_CONSUMER_KEY: "test-bm-key", WC_CONSUMER_SECRET: "test-bm-secret",
 		WP_USERNAME: "test-bm-user", WP_APPLICATION_PASSWORD: "test-bm-password",
@@ -27,6 +28,12 @@ const runtimeOptions = {
 	outboundService: async request => {
 		const url = new URL(request.url);
 		upstreamCalls.push({ origin: url.origin, path: url.pathname });
+		if (url.origin === "https://graph.facebook.com") {
+			assert.equal(request.method, "GET");
+			assert.equal(request.headers.get("Authorization"), "Bearer mock-meta-token");
+			assert.ok(["/v25.0/act_99/promote_pages", "/v25.0/act_99/advideos", "/v25.0/act_99/adcreatives"].includes(url.pathname));
+			return Response.json({ data: url.pathname.endsWith("/promote_pages") ? [{id:"10",name:"Mock Meta Page"}] : [] });
+		}
 		const equinox = url.origin === "https://equinoxwholesaleblinds.com.au";
 		assert.ok(equinox || url.origin === "https://online.blindmotion.com.au");
 		const expected = equinox ? "test-eq-user:test-eq-password" : "test-bm-key:test-bm-secret";
@@ -114,6 +121,22 @@ try {
 	assert.ok(listedTools.find(tool => tool.name === "manage_equinox").inputSchema.properties.action.enum.includes("pricing_details"));
 	assert.ok(listedTools.find(tool => tool.name === "manage_live_site_banner_guarded"));
 	assert.ok(listedTools.find(tool => tool.name === "inspect_live_wordpress_timezone"));
+	const socialReader = listedTools.find(tool => tool.name === "get_meta_lead_campaign_assets");
+	assert.equal(socialReader.annotations.readOnlyHint, true);
+	assert.ok(socialReader.inputSchema.properties.comment_request.properties.action.enum.includes("instagram_comments"));
+	assert.ok(!(socialReader.inputSchema.required ?? []).includes("comment_request"));
+	const commentInventory = await rpc(token.access_token, "tools/call", {name:"get_meta_lead_campaign_assets",arguments:{comment_request:{action:"inventory"}}});
+	const commentResult = JSON.parse(decode(await commentInventory.text()).result.content[0].text);
+	assert.equal(commentResult.read_only, true);
+	assert.equal(commentResult.data[0].name, "Mock Meta Page");
+	assert.ok(!JSON.stringify(commentResult).includes("mock-meta-token"));
+	const legacyAssets = await rpc(token.access_token, "tools/call", {name:"get_meta_lead_campaign_assets",arguments:{}});
+	const legacyResult = JSON.parse(decode(await legacyAssets.text()).result.content[0].text);
+	assert.equal(legacyResult.account_id, "act_99");
+	assert.equal(legacyResult.pages[0].name, "Mock Meta Page");
+	assert.deepEqual(legacyResult.instant_forms, []);
+	assert.deepEqual(legacyResult.videos, []);
+	assert.deepEqual(legacyResult.creatives, []);
 	const management = listedTools.find(tool => tool.name === "manage_equinox");
 	assert.ok(management.inputSchema.required.includes("site"));
 	for (const [site, expected] of [["equinox", "Equinox test product"], ["blindmotion", "Blindmotion test product"]]) {

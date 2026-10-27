@@ -13,7 +13,8 @@
 		"cf-typegen": "wrangler types",
 		"type-check": "tsc --noEmit",
 		"audit:mcp-tools": "node scripts/audit-mcp-tools.mjs",
-		"test:mcp-auth": "node scripts/test-mcp-auth.mjs"
+		"test:mcp-auth": "node scripts/test-mcp-auth.mjs",
+		"test:meta-comments": "node --experimental-strip-types --test scripts/test-meta-comments.mjs && node scripts/test-meta-comments-runtime.mjs"
 	},
 	"dependencies": {
 		"@cloudflare/workers-oauth-provider": "1.2.3",

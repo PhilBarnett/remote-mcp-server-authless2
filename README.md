@@ -718,3 +718,13 @@ membership, stale hashes, duplicate plans, API validation failure, verification
 and guarded rollback. Both PR and deployment workflows run:
 `node --experimental-strip-types --test scripts/test-google-budget-controls.mjs`.
 Live Google validation and verification remain required after deployment.
+
+## Read-only Facebook and Instagram comment setup
+
+`get_meta_lead_campaign_assets` now accepts an optional `comment_request` for
+Page inventory/permission diagnostics, Facebook posts/comments/replies, linked
+professional Instagram media/comments/replies and candidate ad-comment sources.
+Original calls are unchanged; the 101-tool source ceiling is preserved. This
+stage is read-and-draft only: no publishing, moderation, new permissions or
+monitoring schedule. See [the usage, coverage limits and live acceptance checklist](docs/meta-comments-readonly.md).
+Run `npm run test:meta-comments` for fixture and Cloudflare-runtime checks.

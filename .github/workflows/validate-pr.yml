@@ -68,5 +68,8 @@ jobs:
       - name: Test exact Google budget controls
         run: node --experimental-strip-types --test scripts/test-google-budget-controls.mjs
 
+      - name: Test read-only Meta comments
+        run: npm run test:meta-comments
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 101
