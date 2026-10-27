@@ -1,3 +1,4 @@
+import { googleExactBudgetSchema, prepareExactBudget, verifyExactBudget } from "./tools/google-budget-controls";
 import { googleBudgetDiagnostics } from "./tools/google-budget-diagnostics";
 import { metaSpendLimitSchema, manageMetaSpendLimit } from "./tools/meta-spend-limit";
 import { updateSampleRouting } from "./tools/sample-routing-update";
@@ -3072,6 +3073,7 @@ const googleAdsCampaignChangeSchema = z.object({
 	changes: z
 		.array(
 			z.discriminatedUnion("action", [
+				googleExactBudgetSchema,
 				z.object({
 					action: z.literal("PAUSE_CAMPAIGN"),
 					campaign_id: z.string().regex(/^\d{1,20}$/),
@@ -3204,6 +3206,13 @@ async function buildGoogleAdsCampaignChangePlan(
 	const rollbackOperations: any[] = [];
 
 	for (const change of input.changes) {
+		if (change.action === "SET_DAILY_BUDGET_AUD") {
+			const exact = await prepareExactBudget(googleAdsSearch, getGoogleAdsConfig().customerId, change);
+			plannedChanges.push(exact.planned);
+			mutateOperations.push(...exact.operations);
+			rollbackOperations.push(...exact.rollback);
+			continue;
+		}
 		if (seenCampaignIds.has(change.campaign_id)) {
 			throw new Error(
 				"Each Google Ads campaign may appear only once in a change plan.",
@@ -3365,6 +3374,17 @@ async function buildGoogleAdsCampaignChangePlan(
 		});
 	}
 
+	// Refuse duplicate writes and overlapping campaign controls in one plan.
+	const touchedBudgets = new Set<string>();
+	for (const planned of plannedChanges) {
+		if (planned.budget) {
+			if (touchedBudgets.has(planned.budget.resource_name)) throw new Error("Each budget may appear only once per plan.");
+			touchedBudgets.add(planned.budget.resource_name);
+		}
+		if (planned.action === "SET_DAILY_BUDGET_AUD" && planned.budget.members.some((m: any) => seenCampaignIds.has(m.campaign_id))) {
+			throw new Error("Do not combine a budget change with another control for a member campaign.");
+		}
+	}
 	const { customerId } = getGoogleAdsConfig();
 	const planSha256 = await sha256Hex(
 		new TextEncoder().encode(
@@ -3389,6 +3409,10 @@ async function verifyGoogleAdsCampaignChangePlan(
 ) {
 	const verifiedChanges: any[] = [];
 	for (const planned of plannedChanges) {
+		if (planned.action === "SET_DAILY_BUDGET_AUD") {
+			verifiedChanges.push(await verifyExactBudget(googleAdsSearch, getGoogleAdsConfig().customerId, planned, afterWrite));
+			continue;
+		}
 		const snapshot = await getGoogleAdsCampaignControlSnapshot(
 			planned.campaign.id,
 			planned.campaign.name,
@@ -9671,7 +9695,7 @@ function createServer() {
 		"preview_google_ads_campaign_changes",
 		{
 			description:
-				"Preview hash-locked Google Ads campaign controls or one exact PMax image link replacement. Verifies identities and source image, and runs validateOnly without writing.",
+				"Preview Google campaign controls, exact DAILY budget increases/decreases (shared or individual), or one PMax image replacement. SET_DAILY_BUDGET_AUD requires budget ID/name, exact current/new AUD amounts (0.01–500), and the complete expected member campaign ID/name list from budget_diagnostics. Shows all affected members; hash locks live state and runs validateOnly. Legacy percentage increases remain capped at 25% and non-shared only.",
 			inputSchema: googleAdsCampaignChangeSchema,
 		},
 		async (args) => {
@@ -9690,11 +9714,13 @@ function createServer() {
 					confirmation_required: GOOGLE_ADS_CAMPAIGN_CHANGE_CONFIRMATION,
 					guardrails: {
 						activation_supported: false,
-						budget_decrease_supported: false,
-						maximum_budget_increase_percent: 25,
+						exact_aud_budget_decrease_supported: true,
+						legacy_percentage_increase_maximum: 25,
+						exact_aud_change_percentage_cap: null,
 						maximum_daily_budget_aud:
 							GOOGLE_ADS_CAMPAIGN_MAX_DAILY_BUDGET_AUD,
-						explicitly_shared_budgets_allowed: false,
+						exact_aud_shared_budgets_allowed: true,
+						complete_member_approval_required: true,
 						atomic_google_ads_mutation: true,
 					},
 				});
@@ -9708,7 +9734,7 @@ function createServer() {
 		"apply_google_ads_campaign_changes_guarded",
 		{
 			description:
-				"Apply one hash-locked preview of campaign controls or a single PMax image link replacement atomically. Validates before writing, verifies afterward and attempts link restoration if verification fails.",
+				"Apply an explicitly approved hash-locked Google preview, including exact shared or individual DAILY budget increases/decreases. Rechecks amount and complete membership before writing, validates atomically, verifies afterward and attempts rollback on verification failure. Changes only the previewed fields; no bidding or targeting changes.",
 			inputSchema: googleAdsCampaignChangeSchema.extend({
 				expected_plan_sha256: z.string().regex(/^[0-9a-f]{64}$/),
 				confirmation: z.literal(GOOGLE_ADS_CAMPAIGN_CHANGE_CONFIRMATION),
@@ -9740,6 +9766,9 @@ function createServer() {
 				}
 
 				await googleAdsMutate(plan.mutateOperations, true);
+				for (const exact of plan.plannedChanges.filter((c: any) => c.action === "SET_DAILY_BUDGET_AUD")) {
+					await verifyExactBudget(googleAdsSearch, plan.customerId, exact, false);
+				}
 				let mutationReturned = false;
 				try {
 					await googleAdsMutate(plan.mutateOperations, false);
@@ -9786,6 +9815,10 @@ function createServer() {
 							}
 						}
 						if (plan.rollbackOperations.length > 0) {
+							// Never overwrite a concurrent budget/member edit during recovery.
+							for (const exact of plan.plannedChanges.filter((c: any) => c.action === "SET_DAILY_BUDGET_AUD")) {
+								await verifyExactBudget(googleAdsSearch, plan.customerId, exact, true);
+							}
 							await googleAdsMutate(plan.rollbackOperations, true);
 							await googleAdsMutate(plan.rollbackOperations, false);
 						}

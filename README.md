@@ -660,3 +660,61 @@ and real account results must be verified after deployment.
 
 References: [Google v25 campaign fields](https://developers.google.com/google-ads/api/fields/v25/campaign)
 and [campaign budget fields](https://developers.google.com/google-ads/api/fields/v25/campaign_budget).
+
+## Exact Google daily budget controls (including shared budgets)
+
+The existing `preview_google_ads_campaign_changes` and
+`apply_google_ads_campaign_changes_guarded` tools accept
+`SET_DAILY_BUDGET_AUD`. It supports both increases and decreases for individual
+and shared DAILY budgets, without percentage rounding or multiple compounded
+increases. No new exposed tools are added.
+
+Read `get_google_ads_campaign_performance` with `budget_diagnostics` first to
+obtain the budget identity, current amount and every member campaign. Then preview:
+
+```json
+{
+  "changes": [{
+    "action": "SET_DAILY_BUDGET_AUD",
+    "budget_id": "<budget ID from diagnostic>",
+    "expected_budget_name": "<exact budget name>",
+    "expected_current_daily_budget_aud": 22,
+    "new_daily_budget_aud": 32,
+    "expected_member_campaigns": [
+      { "campaign_id": "<member ID>", "expected_campaign_name": "<exact member name>" }
+    ]
+  }]
+}
+```
+
+The member list must contain **every** attached campaign, including paused and
+removed members returned by the diagnostic. The preview shows their statuses and
+the exact old/new amount. Shared-budget approval applies to the whole group.
+The configured customer must match and use AUD; the budget must be ENABLED and
+DAILY. Positive amounts must use whole cents, up to A$500/day. There is no
+percentage cap on this exact-amount path; the legacy percentage action retains
+its 25% ceiling and refusal of shared budgets.
+
+Apply the same request with the returned `expected_plan_sha256` and
+`confirmation: "CONFIRM APPLY GOOGLE ADS CAMPAIGN CHANGES"` only after the exact
+change is approved. The hash covers budget identity, current amount, currency,
+timezone, sharing and complete member IDs/names/statuses. Row ordering is
+normalised. Drift invalidates the preview. Each budget appears once per plan;
+overlapping campaign controls are refused. Google validation runs before writing,
+then exact-budget state is rechecked immediately before the atomic Google mutation.
+Only `campaignBudget.amount_micros` is changed. Post-write verification checks
+both amount and membership. Recovery attempts the exact original amount only if
+the approved post-write state still matches, avoiding overwriting a concurrent
+edit. A transport error can leave write outcome uncertain: re-read before retrying.
+
+Cross-platform reallocations are **not atomic**: Google and Meta have separate
+APIs. Verify both previews before changing either side, report partial completion
+explicitly and re-read both amounts after completion. This feature does not
+automatically reduce Meta budgets, change ROAS targets or apply a reallocation.
+
+Tests exercise the real registered preview/apply callbacks, shared $22→$32,
+decreases and individual budgets, no-op, cents, ownership/currency, complete
+membership, stale hashes, duplicate plans, API validation failure, verification
+and guarded rollback. Both PR and deployment workflows run:
+`node --experimental-strip-types --test scripts/test-google-budget-controls.mjs`.
+Live Google validation and verification remain required after deployment.
