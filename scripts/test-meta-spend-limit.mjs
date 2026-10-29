@@ -239,3 +239,22 @@ test("reset uncertain outcomes never retry; unchanged spend or changed cap canno
   assert.equal(r.outcome,outcome==="throw"?"UNKNOWN":"UNVERIFIED");
  }
 });
+
+test("authorised reset before exhaustion preserves cap and rejects replay", async () => {
+ const s = setup();
+ const p = await s.run({mode:"preview_reset",expected_account_name:"Blindmotion"});
+ assert.equal(p.previous_counted_spend_aud,850);
+ assert.equal(p.unchanged_limit_aud,1000);
+ const r = await s.run(resetApply(p));
+ assert.equal(r.verified,true);
+ assert.equal(s.account.spend_cap,"100000");
+ await assert.rejects(s.run(resetApply(p)));
+ assert.equal(s.writes().length,1);
+});
+test("reset refuses zero counted spend and unlimited cap", async()=>{
+ for(const [cap,spent] of [["100000","0"],["0","85000"]]){
+ const s=setup(); s.account.spend_cap=cap;s.account.amount_spent=spent;
+ await assert.rejects(s.run({mode:"preview_reset",expected_account_name:"Blindmotion"}));
+ assert.equal(s.writes().length,0);
+ }
+});

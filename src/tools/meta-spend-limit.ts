@@ -332,8 +332,8 @@ async function manageReset(
  current: ReturnType<typeof accountSnapshot>,
  args: { mode: "preview_reset" | "apply_reset"; preview_token?: string }, now: number,
 ) {
- if (current.cap === null || current.cap <= 0 || current.spent === null || current.spent < current.cap)
-  throw new Error("Reset requires an exhausted finite account limit; refusing to replenish a running account.");
+ if (current.cap === null || current.cap <= 0 || current.spent === null || current.spent <= 0)
+  throw new Error("Reset requires a finite account limit and positive counted spend.");
  const plan = { version: 2, action: "reset_amount_spent", account: current, issued_at: now, expires_at: now + TTL };
  if (args.mode === "preview_reset") {
   const payload = JSON.stringify(plan);
