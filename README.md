@@ -585,7 +585,7 @@ when the cap is already at its target is a verified no-op.
 
 ### Reset amount spent
 
-For an exhausted finite cap, call `preview_reset` with the exact account name.
+For a finite cap with positive counted spend, call `preview_reset` with the exact account name.
 The preview shows the unchanged cap, existing counted spend, proposed zero counter
 and restored allowance. Approve this exact reset and its potential to resume active
 campaign spending, then call `apply_reset` with the account name, preview token and
@@ -596,7 +596,7 @@ preview. Apply sends only `spend_cap_action=reset`. It verifies counted spend is
 zero and the cap remains unchanged. Historical reporting and charges are not
 erased. If spend has already accrued or the response is uncertain, report
 UNVERIFIED/UNKNOWN and reread; never retry automatically. A successful reset
-makes the account ineligible for another reset until its finite cap is exhausted.
+makes the account ineligible for another reset while counted spend is zero.
 Live reset permission and behavior remain unverified until an authorized reset.
 
 ### Early-warning delivery
