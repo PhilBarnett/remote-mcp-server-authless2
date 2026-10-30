@@ -1,3 +1,4 @@
+import "./test-meta-daily-budget.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
