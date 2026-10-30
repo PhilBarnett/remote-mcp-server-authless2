@@ -7850,7 +7850,7 @@ function createServer() {
 		"update_meta_daily_budget",
 		{
 			description:
-				"Update only the daily budget of one Meta campaign or ad set after explicit confirmation. Increases are limited to 25% and A$500/day.",
+				"Update only the daily budget of one Meta campaign or ad set after explicit confirmation. Increases are limited to 50% and A$500/day.",
 			inputSchema: z.object({
 				object_type: z.enum(["campaign", "adset"]),
 				object_id: z.string().regex(/^\d+$/),
@@ -7883,9 +7883,9 @@ function createServer() {
 				}
 
 				const roundedBudget = Number(new_daily_budget_aud.toFixed(2));
-				if (roundedBudget > currentBudget * 1.25) {
+				if (roundedBudget > currentBudget * 1.5) {
 					throw new Error(
-						`Refusing update: increases are capped at 25% per change. Current budget is A$${currentBudget.toFixed(2)}.`,
+						`Refusing update: increases are capped at 50% per change. Current budget is A$${currentBudget.toFixed(2)}.`,
 					);
 				}
 

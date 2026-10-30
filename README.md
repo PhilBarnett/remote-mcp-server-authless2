@@ -728,3 +728,12 @@ Original calls are unchanged; the 101-tool source ceiling is preserved. This
 stage is read-and-draft only: no publishing, moderation, new permissions or
 monitoring schedule. See [the usage, coverage limits and live acceptance checklist](docs/meta-comments-readonly.md).
 Run `npm run test:meta-comments` for fixture and Cloudflare-runtime checks.
+
+## Meta daily budget updates
+
+`update_meta_daily_budget` allows an explicitly confirmed campaign or ad-set daily
+budget increase of up to 50% per change, with an A$500/day maximum. Account
+ownership checks and the existing confirmation phrase remain required. Decreases
+remain supported. From A$24/day, the largest permitted single increase is A$36/day;
+a direct change to A$45/day remains outside this limit. Google budget limits are
+unchanged. The existing Meta test suite also runs daily-budget boundary tests.
