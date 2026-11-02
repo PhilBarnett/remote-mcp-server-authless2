@@ -71,5 +71,8 @@ jobs:
       - name: Test read-only Meta comments
         run: npm run test:meta-comments
 
+      - name: Test read-only iDempiere database guards
+        run: npm run test:idempiere-db
+
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 101
+        run: npm run audit:mcp-tools -- --max 102
