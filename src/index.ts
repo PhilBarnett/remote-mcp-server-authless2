@@ -1,4 +1,5 @@
 import { googleExactBudgetSchema, prepareExactBudget, verifyExactBudget } from "./tools/google-budget-controls";
+import { idempiereDbSchema, readIdempiereDb, type DbEnv } from "./tools/idempiere-db";
 import { googleBudgetDiagnostics } from "./tools/google-budget-diagnostics";
 import { metaCommentsSchema, createCommentReader, readMetaComments } from "./tools/meta-comments";
 import { metaSpendLimitSchema, manageMetaSpendLimit } from "./tools/meta-spend-limit";
@@ -4809,6 +4810,15 @@ function createServer() {
 	const server = new McpServer({
 		name: "Blindmotion WooCommerce",
 		version: "2.0.0",
+	});
+
+	server.registerTool("read_idempiere_database", {
+		description: "Read-only, tenant/organisation-scoped iDempiere production and scan database audit. Supports connection status, dictionary columns, indexes, triggers, bounded rows and counts for five allowlisted tables. No arbitrary SQL, writes, inventory processing or credentials returned. Disabled until a restricted database connection is configured.",
+		inputSchema: idempiereDbSchema,
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+	}, async (args) => {
+		try { return toolResult(await readIdempiereDb(args, env as unknown as DbEnv)); }
+		catch (error) { return toolError(error); }
 	});
 
 	registerMetaEcommerceToolkit(server);

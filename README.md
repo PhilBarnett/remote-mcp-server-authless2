@@ -737,3 +737,7 @@ ownership checks and the existing confirmation phrase remain required. Decreases
 remain supported. From A$24/day, the largest permitted single increase is A$36/day;
 a direct change to A$45/day remains outside this limit. Google budget limits are
 unchanged. The existing Meta test suite also runs daily-budget boundary tests.
+
+## iDempiere direct database audit
+
+The authenticated `read_idempiere_database` tool provides bounded, read-only production/scanning queries. It remains disabled until a dedicated database role, verified TLS connection and explicit tenant/organisation scope are configured. See [setup and verification](docs/idempiere-database-reader.md). It cannot execute arbitrary SQL or update ERP records.

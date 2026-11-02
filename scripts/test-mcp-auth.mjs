@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { build } from "esbuild";
 import * as runtime from "miniflare";
+import { builtinModules } from "node:module";
 
 const origin = "https://remote-mcp-server-authless2.phil-cd4.workers.dev";
 const resource = origin + "/mcp";
@@ -12,6 +13,12 @@ const bundle = await build({
 	bundle: true, write: false, format: "esm",
 	platform: "browser", conditions: ["workerd", "worker", "browser"],
 	external: ["cloudflare:*", "node:*"],
+	// Match Wrangler's nodejs_compat handling for the PostgreSQL driver.
+	banner: { js: 'import { createRequire as createNodeRequire } from "node:module"; const require = createNodeRequire("/worker.js");' },
+	plugins: [{ name: "node-builtins", setup(builder) {
+		builder.onResolve({ filter: /^[a-z_][a-z0-9_]*(?:\/.*)?$/ }, args =>
+			builtinModules.includes(args.path) ? { path: "node:" + args.path, external: true } : undefined);
+	} }],
 });
 const upstreamCalls = [];
 const runtimeOptions = {
@@ -116,8 +123,12 @@ try {
 	assert.ok(toolsText.includes("set_staging_product_publication_guarded"));
 	const decode = text => JSON.parse(text.startsWith("event:") ? text.split("\n").find(line => line.startsWith("data: ")).slice(6) : text);
 	const listedTools = decode(toolsText).result.tools;
-	assert.equal(listedTools.length, 107);
-	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 107);
+	assert.equal(listedTools.length, 108);
+	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 108);
+	assert.equal(listedTools.find(tool => tool.name === "read_idempiere_database").annotations.readOnlyHint, true);
+	const dbDisabled = decode(await (await rpc(token.access_token, "tools/call", { name: "read_idempiere_database", arguments: { action: "status" } })).text()).result;
+	assert.equal(dbDisabled.isError, true);
+	assert.match(dbDisabled.content[0].text, /database reader is disabled/);
 	assert.ok(listedTools.find(tool => tool.name === "manage_equinox").inputSchema.properties.action.enum.includes("pricing_details"));
 	assert.ok(listedTools.find(tool => tool.name === "manage_live_site_banner_guarded"));
 	assert.ok(listedTools.find(tool => tool.name === "inspect_live_wordpress_timezone"));
