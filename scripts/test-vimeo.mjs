@@ -236,7 +236,7 @@ test("ZipGrip placement is previewed, hash-locked, applied and publicly verified
 		assert.equal(applied.public_render_verified, true);
 		assert.equal(writes, 1);
 		const nodes = JSON.parse(templateRaw);
-		assert.equal(nodes[1].id, "bmv1244");
+		assert.equal(nodes[1].id, "a1244f0");
 		assert.equal(nodes[2].id, "features");
 		assert.ok(templateRaw.includes("player.vimeo.com/video/1244573300"));
 	} finally {
