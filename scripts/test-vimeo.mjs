@@ -5,6 +5,7 @@ import {
 	registerVimeoTools,
 	VIMEO_PERMIT_KEY_PREFIX,
 	VIMEO_UPLOAD_CONFIRMATION,
+	ZIPGRIP_VIDEO_PLACEMENT_CONFIRMATION,
 } from "../src/tools/vimeo.ts";
 
 class MemoryKv {
@@ -149,6 +150,93 @@ test("permit is single-purpose, short-lived and idempotent by exact title", asyn
 		);
 		assert.equal(existing.action, "existing");
 		assert.equal(existing.video_id, "123");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("ZipGrip placement is previewed, hash-locked, applied and publicly verified", async () => {
+	let templateRaw = JSON.stringify([
+		{ id: "intro", elType: "section", settings: { filler: "x".repeat(1100) }, elements: [] },
+		{ id: "features", elType: "section", settings: { css_classes: "feat-ben-sec" }, elements: [] },
+	]);
+	let writes = 0;
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = async (url, init = {}) => {
+		const value = String(url);
+		if (value.startsWith("https://api.vimeo.com/videos/1244573300?")) {
+			return Response.json({
+				uri: "/videos/1244573300",
+				name: "ZipGrip Outdoor Blinds — Koolewong Case Study",
+				status: "available",
+				transcode: { status: "complete" },
+				privacy: { view: "disable", embed: "public", download: false },
+				embed: { html: '<iframe src="https://player.vimeo.com/video/1244573300"></iframe>' },
+			});
+		}
+		if (value.startsWith("https://online.blindmotion.com.au/wp-json/wc/v3/products/1301?")) {
+			return Response.json({ id: 1301, name: "Zip Sided Outdoor Blinds", status: "publish" });
+		}
+		if (value === "https://online.blindmotion.com.au/wp-json/wp/v2/elementor_library/557?context=edit") {
+			assert.match(init.headers.Authorization, /^Basic /);
+			return Response.json({
+				id: 557,
+				title: { raw: "Single Product Template" },
+				status: "publish",
+				meta: { _elementor_data: templateRaw },
+			});
+		}
+		if (value === "https://online.blindmotion.com.au/wp-json/wp/v2/elementor_library/557") {
+			assert.equal(init.method, "POST");
+			templateRaw = JSON.parse(init.body).meta._elementor_data;
+			writes += 1;
+			return Response.json({ id: 557 });
+		}
+		if (value.startsWith("https://online.blindmotion.com.au/zipsided-outdoor-blinds/?bm_verify=")) {
+			return new Response(
+				'<h2>See ZipGrip in a real waterfront installation</h2><iframe src="https://player.vimeo.com/video/1244573300"></iframe>',
+				{ status: 200 },
+			);
+		}
+		throw new Error(`Unexpected fetch: ${value}`);
+	};
+	try {
+		const tool = registered({
+			OAUTH_KV: new MemoryKv(),
+			VIMEO_ACCESS_TOKEN: "vimeo",
+			WC_SITE: "https://online.blindmotion.com.au",
+			WC_CONSUMER_KEY: "key",
+			WC_CONSUMER_SECRET: "secret",
+			WP_USERNAME: "wp-user",
+			WP_APPLICATION_PASSWORD: "wp-password",
+		});
+		const preview = parsed(
+			await tool.handler({
+				action: "preview_placement",
+				video_id: "1244573300",
+				expected_name: "ZipGrip Outdoor Blinds — Koolewong Case Study",
+			}),
+		);
+		assert.equal(preview.write_performed, false);
+		assert.equal(preview.template.insert_before_css_class, "feat-ben-sec");
+		assert.match(preview.expected_plan_sha256, /^[a-f0-9]{64}$/);
+		const applied = parsed(
+			await tool.handler({
+				action: "apply_placement",
+				video_id: "1244573300",
+				expected_name: "ZipGrip Outdoor Blinds — Koolewong Case Study",
+				expected_template_sha256: preview.template.expected_template_sha256,
+				expected_plan_sha256: preview.expected_plan_sha256,
+				confirmation: ZIPGRIP_VIDEO_PLACEMENT_CONFIRMATION,
+			}),
+		);
+		assert.equal(applied.verified, true);
+		assert.equal(applied.public_render_verified, true);
+		assert.equal(writes, 1);
+		const nodes = JSON.parse(templateRaw);
+		assert.equal(nodes[1].id, "bmv1244");
+		assert.equal(nodes[2].id, "features");
+		assert.ok(templateRaw.includes("player.vimeo.com/video/1244573300"));
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
