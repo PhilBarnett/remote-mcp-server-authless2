@@ -34,7 +34,11 @@ encrypted disks/storage, an off-host backup copy and a retention policy independ
    distinct. Verify supported PostgreSQL client/server versions, disk space, locale,
    extensions and restore permissions. The supplied commands use /usr/bin PostgreSQL
    binaries; install/select the matching version before enabling the service.
-2. Create a dedicated Linux user/group `blindmotion-erp-ops`. Install service.py as
+2. Install on the TEST application VM, where systemctl controls only its local unit.
+   Record its exact hostname and the output of `sha256sum /etc/machine-id` in
+   test_hostname and test_machine_sha256. The service verifies both on startup
+   and preflight. Verify that the production VM has a distinct machine ID.
+   Create a dedicated Linux user/group `blindmotion-erp-ops`. Install service.py as
    root-owned, non-writable by this user under /opt/blindmotion-erp-ops. Install the
    systemd unit. Create /etc/blindmotion with root ownership and restricted access.
 3. Populate config.example.json as /etc/blindmotion/erp-maintenance.json, root-owned
@@ -56,7 +60,7 @@ encrypted disks/storage, an off-host backup copy and a retention policy independ
    in both config and sudoers). Do not grant wildcard shell or systemctl access:
 
    ```sudoers
-   blindmotion-erp-ops ALL=(root) NOPASSWD: /usr/bin/systemctl stop idempiere-test.service, /usr/bin/systemctl start idempiere-test.service
+   blindmotion-erp-ops ALL=(root) NOPASSWD: /usr/bin/systemctl stop idempiere.service, /usr/bin/systemctl start idempiere.service
    ```
 
 7. Route the dedicated Cloudflare Tunnel hostname to 127.0.0.1:8789; configure an

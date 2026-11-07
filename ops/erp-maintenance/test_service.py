@@ -14,12 +14,16 @@ spec.loader.exec_module(m)
 
 class MaintenanceTests(unittest.TestCase):
     def setUp(self):
+        hostname = patch.object(m.socket, "gethostname", return_value="testidempiere12")
+        hostname.start()
+        self.addCleanup(hostname.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.root.chmod(0o700)
         self.config_path = self.root / "config.json"
         c = json.loads(Path(__file__).with_name("config.example.json").read_text())
         c.update(state_dir=str(self.root), production_db="production", test_db="testerp", test_owner="testowner", refresh_enabled=True)
+        c["test_machine_sha256"] = m.digest("/etc/machine-id")
         for key in ("pg_service_file", "pgpass_file", "overlay_sql", "verify_sql", "isolation_probe", "health_probe"):
             p = self.root / key
             p.write_text("installed test fixture")
@@ -137,7 +141,8 @@ class MaintenanceTests(unittest.TestCase):
             self.engine.start(preview["plan_sha256"], str(uuid.uuid4()))
 
     def test_target_and_configuration_guards(self):
-        for change in ({"test_db": "production"}, {"test_db": "erp"}, {"test_unit": "idempiere.service"},
+        for change in ({"test_db": "production"}, {"test_db": "erp"}, {"test_unit": "postgresql.service"},
+                       {"test_hostname": "idempiere12production"}, {"test_machine_sha256": "0" * 64},
                        {"production_db": "prod;drop"}, {"production_service": self.c["test_service"]}):
             with self.subTest(change=change):
                 self.config_path.write_text(json.dumps({**self.c, **change}))

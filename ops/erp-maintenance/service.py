@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -53,7 +54,14 @@ def load_config(path):
         raise MaintenanceError("UNSAFE_TARGET")
     if c["admin_db"] in (c["production_db"], c["test_db"]):
         raise MaintenanceError("ADMIN_REQUIRES_MAINTENANCE_DATABASE")
-    if not re.fullmatch(r"[a-z0-9_-]*test[a-z0-9_-]*\.service", c["test_unit"]):
+    hostname = c.get("test_hostname", "")
+    machine_hash = c.get("test_machine_sha256", "")
+    if (not re.fullmatch(r"[a-z0-9_-]*test[a-z0-9_-]*", hostname)
+            or socket.gethostname() != hostname
+            or not re.fullmatch(r"[a-f0-9]{64}", machine_hash)
+            or digest("/etc/machine-id") != machine_hash):
+        raise MaintenanceError("TEST_HOST_IDENTITY_MISMATCH")
+    if not re.fullmatch(r"(?:idempiere|[a-z0-9_-]*test[a-z0-9_-]*)\.service", c["test_unit"]):
         raise MaintenanceError("UNSAFE_TEST_UNIT")
     if len(c["token"]) < 43:
         raise MaintenanceError("INVALID_AUTHENTICATION")
