@@ -507,19 +507,32 @@ export function registerVimeoTools(server: McpServer, getBindings: () => VimeoEn
 						) {
 							throw new Error("Elementor read-back did not match the exact previewed placement.");
 						}
-						const publicUrl = `${liveSite(bindings)}/zipsided-outdoor-blinds/?bm_verify=${Date.now()}`;
-						const rendered = await fetch(publicUrl, {
-							headers: { Accept: "text/html" },
-							redirect: "manual",
-							signal: AbortSignal.timeout(30_000),
-						});
-						const html = await rendered.text();
-						if (
-							!rendered.ok ||
-							!html.includes(`player.vimeo.com/video/${args.video_id}`) ||
-							!html.includes(ZIPGRIP_VIDEO_HEADING)
-						) {
-							throw new Error("The public ZipGrip page did not render the new Vimeo section.");
+						let publicRenderVerified = false;
+						let renderDiagnostic = "no response";
+						for (let attempt = 1; attempt <= 3; attempt += 1) {
+							if (attempt > 1) await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+							const publicUrl = `${liveSite(bindings)}/zipsided-outdoor-blinds/?bm_verify=${Date.now()}-${attempt}`;
+							const rendered = await fetch(publicUrl, {
+								headers: {
+									Accept: "text/html",
+									"Cache-Control": "no-cache, no-store, max-age=0",
+									Pragma: "no-cache",
+								},
+								redirect: "manual",
+								signal: AbortSignal.timeout(30_000),
+							});
+							const html = await rendered.text();
+							const hasPlayer = html.includes(`player.vimeo.com/video/${args.video_id}`);
+							const hasHeading = html.includes(ZIPGRIP_VIDEO_HEADING);
+							const hasElement = html.includes(`elementor-element-${ZIPGRIP_VIDEO_SECTION_ID}`);
+							renderDiagnostic = `attempt=${attempt}, status=${rendered.status}, player=${hasPlayer}, heading=${hasHeading}, element=${hasElement}, bytes=${html.length}`;
+							if (rendered.ok && hasPlayer && hasHeading && hasElement) {
+								publicRenderVerified = true;
+								break;
+							}
+						}
+						if (!publicRenderVerified) {
+							throw new Error(`The public ZipGrip page did not render the new Vimeo section (${renderDiagnostic}).`);
 						}
 						return textResult({
 							action: "apply_placement",
