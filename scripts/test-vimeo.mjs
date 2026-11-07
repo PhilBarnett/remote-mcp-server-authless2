@@ -161,6 +161,7 @@ test("ZipGrip placement is previewed, hash-locked, applied and publicly verified
 		{ id: "features", elType: "section", settings: { css_classes: "feat-ben-sec" }, elements: [] },
 	]);
 	let writes = 0;
+	let cacheFlushes = 0;
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = async (url, init = {}) => {
 		const value = String(url);
@@ -193,6 +194,12 @@ test("ZipGrip placement is previewed, hash-locked, applied and publicly verified
 			templateRaw = body.meta._elementor_data;
 			writes += 1;
 			return Response.json({ id: 557 });
+		}
+		if (value === "https://online.blindmotion.com.au/wp-json/jetpack/v4/site/cache/flush") {
+			assert.equal(init.method, "POST");
+			assert.match(init.headers.Authorization, /^Basic /);
+			cacheFlushes += 1;
+			return Response.json({ success: true });
 		}
 		if (value.startsWith("https://online.blindmotion.com.au/zipsided-outdoor-blinds/?bm_verify=")) {
 			return new Response(
@@ -235,6 +242,7 @@ test("ZipGrip placement is previewed, hash-locked, applied and publicly verified
 		assert.equal(applied.verified, true);
 		assert.equal(applied.public_render_verified, true);
 		assert.equal(writes, 1);
+		assert.equal(cacheFlushes, 1);
 		const nodes = JSON.parse(templateRaw);
 		assert.equal(nodes[1].id, "a1244f0");
 		assert.equal(nodes[1].isInner, false);
