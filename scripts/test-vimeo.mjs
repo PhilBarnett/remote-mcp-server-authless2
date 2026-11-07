@@ -188,7 +188,9 @@ test("ZipGrip placement is previewed, hash-locked, applied and publicly verified
 		}
 		if (value === "https://online.blindmotion.com.au/wp-json/wp/v2/elementor_library/557") {
 			assert.equal(init.method, "POST");
-			templateRaw = JSON.parse(init.body).meta._elementor_data;
+			const body = JSON.parse(init.body);
+			assert.equal(body.meta._elementor_element_cache, "");
+			templateRaw = body.meta._elementor_data;
 			writes += 1;
 			return Response.json({ id: 557 });
 		}
