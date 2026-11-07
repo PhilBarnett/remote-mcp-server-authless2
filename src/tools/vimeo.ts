@@ -13,10 +13,10 @@ const PERMIT_SECONDS = 600;
 const ZIPGRIP_PRODUCT_ID = 1301;
 const ZIPGRIP_PRODUCT_NAME = "Zip Sided Outdoor Blinds";
 const ZIPGRIP_TEMPLATE_ID = 557;
-const ZIPGRIP_VIDEO_SECTION_ID = "bmv1244";
-const ZIPGRIP_VIDEO_COLUMN_ID = "bmv1245";
-const ZIPGRIP_VIDEO_HEADING_ID = "bmv1246";
-const ZIPGRIP_VIDEO_HTML_ID = "bmv1247";
+const ZIPGRIP_VIDEO_SECTION_ID = "a1244f0";
+const ZIPGRIP_VIDEO_COLUMN_ID = "a1245f1";
+const ZIPGRIP_VIDEO_HEADING_ID = "a1246f2";
+const ZIPGRIP_VIDEO_HTML_ID = "a1247f3";
 const ZIPGRIP_VIDEO_HEADING = "See ZipGrip in a real waterfront installation";
 
 export interface VimeoEnv {
