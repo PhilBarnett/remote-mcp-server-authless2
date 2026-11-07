@@ -350,7 +350,13 @@ async function writeZipGripTemplate(bindings: VimeoEnv, raw: string, request: Fe
 				Accept: "application/json",
 				"Content-Type": "application/json",
 			},
-			body: JSON.stringify({ meta: { _elementor_data: raw } }),
+			body: JSON.stringify({
+				meta: {
+					_elementor_data: raw,
+					// Elementor's element cache can otherwise continue serving the prior tree.
+					_elementor_element_cache: "",
+				},
+			}),
 			redirect: "manual",
 			signal: AbortSignal.timeout(30_000),
 		}),
