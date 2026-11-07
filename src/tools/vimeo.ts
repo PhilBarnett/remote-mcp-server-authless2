@@ -346,7 +346,7 @@ function buildZipGripPlacement(data: any[], videoId: string) {
 }
 
 async function writeZipGripTemplate(bindings: VimeoEnv, raw: string, request: Fetcher = fetch) {
-	return readJson(
+	const result = await readJson(
 		await request(`${liveSite(bindings)}/wp-json/wp/v2/elementor_library/${ZIPGRIP_TEMPLATE_ID}`, {
 			method: "POST",
 			headers: {
@@ -366,6 +366,21 @@ async function writeZipGripTemplate(bindings: VimeoEnv, raw: string, request: Fe
 		}),
 		"Elementor template write",
 	);
+	await readJson(
+		await request(`${liveSite(bindings)}/wp-json/jetpack/v4/site/cache/flush`, {
+			method: "POST",
+			headers: {
+				Authorization: wpAuth(bindings),
+				Accept: "application/json",
+				"Content-Type": "application/json",
+			},
+			body: "{}",
+			redirect: "manual",
+			signal: AbortSignal.timeout(30_000),
+		}),
+		"Jetpack page-cache flush",
+	);
+	return result;
 }
 
 export function registerVimeoTools(server: McpServer, getBindings: () => VimeoEnv) {
