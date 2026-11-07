@@ -18,6 +18,26 @@ npm create cloudflare@latest -- my-mcp-server --template=cloudflare/ai/demos/rem
 
 To add your own [tools](https://developers.cloudflare.com/agents/model-context-protocol/protocol/tools/) to the MCP server, register each tool on the `McpServer` created in the `createServer()` function in `src/index.ts` using `server.registerTool(...)`.
 
+## Guarded Vimeo website-video intake
+
+The existing Blindmotion Media Intake app now supports either Vimeo website video
+or Meta advertising creative. Vimeo is the default destination. It sends the chosen
+MP4/MOV directly through a single-use Worker permit, creates an embed-only,
+non-downloadable Vimeo video, verifies the TUS byte offset and reads the new video
+back before returning its ID and embed URL. The Vimeo token never reaches the
+browser. Exact existing titles are reused; ambiguous duplicates are refused.
+
+`manage_vimeo_video` provides connection status, exact video inspection and guarded
+upload permits without adding separate one-off tools. The retired duplicate
+`open_blindmotion_media_intake_v7` registration keeps the source tool ceiling at
+102; `open_blindmotion_media_intake` is the stable app entry point.
+
+Configure the encrypted Cloudflare secret `VIMEO_ACCESS_TOKEN` with an authenticated
+Vimeo token carrying `private`, `upload` and `edit` scopes. An optional
+`VIMEO_FOLDER_URI` Worker variable places new videos in one fixed Vimeo folder. See
+[Vimeo website-video intake](docs/vimeo-video-intake.md) for setup, safeguards and
+verification.
+
 ## Privacy-safe WooCommerce cohort reporting
 
 `get_sample_to_purchase_cohort` measures all-product or ZipGrip Fabric Sample to

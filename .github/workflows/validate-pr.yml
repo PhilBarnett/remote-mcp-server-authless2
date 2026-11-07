@@ -74,5 +74,8 @@ jobs:
       - name: Test read-only iDempiere database guards
         run: npm run test:idempiere-db
 
+      - name: Test guarded Vimeo upload
+        run: npm run test:vimeo
+
       - name: Enforce MCP tool ceiling
         run: npm run audit:mcp-tools -- --max 102

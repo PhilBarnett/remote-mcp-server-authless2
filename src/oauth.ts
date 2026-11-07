@@ -6,6 +6,7 @@ import OAuthProvider, {
 	type OAuthHelpers,
 	type OAuthResourceAuth,
 } from "@cloudflare/workers-oauth-provider";
+import { handleVimeoMediaUpload, VIMEO_UPLOAD_PATH, type VimeoEnv } from "./tools/vimeo";
 
 export const MCP_SCOPE = "business:manage";
 export const MCP_RESOURCE = "https://remote-mcp-server-authless2.phil-cd4.workers.dev/mcp";
@@ -180,6 +181,7 @@ export const authorizationHandler = {
 	async fetch(request: Request, env: AuthEnv): Promise<Response> {
 		const url = new URL(request.url);
 		if (url.pathname === MEDIA_UPLOAD_PATH) return handleMediaIntakeUpload(request, env);
+		if (url.pathname === VIMEO_UPLOAD_PATH) return handleVimeoMediaUpload(request, env as VimeoEnv);
 		if (url.pathname === "/equinox/mcp") return new Response("Use the authenticated /mcp connection.", { status: 410, headers: secureHeaders });
 		if (url.pathname !== "/authorize") return new Response("Not found", { status: 404, headers: secureHeaders });
 		if (!env.MCP_OWNER_SECRET || env.MCP_OWNER_SECRET.length < 32 || env.MCP_OWNER_SECRET.length > 512) {
