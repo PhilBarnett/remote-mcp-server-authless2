@@ -45,8 +45,9 @@ encrypted disks/storage, an off-host backup copy and a retention policy independ
    0640, group blindmotion-erp-ops. Generate a random token (at least 32 random bytes).
    Populate identities with independently observed values, not guessed IP addresses.
    Keep refresh_enabled=false until local acceptance passes.
-4. Create three libpq service entries and a pgpass file, root-owned 0640 with the
-   service group. Pin host, port, dbname, user and verify-full TLS/CA for remote
+4. Create three libpq service entries in a root-owned 0640 file with the service
+   group. Install the pgpass file as the service user with mode 0600 in the
+   root-controlled configuration directory. Pin host, port, dbname, user and verify-full TLS/CA for remote
    connections. For local Unix sockets, use explicitly configured peer authentication.
    No password appears in subprocess arguments, API requests or API results.
 5. Replace the fail-closed overlay/verification examples with reviewed SQL for the

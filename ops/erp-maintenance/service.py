@@ -50,7 +50,7 @@ def load_config(path):
     for k in ("production_db", "test_db", "test_owner", "admin_db"):
         if not IDENT.fullmatch(c[k]):
             raise MaintenanceError("INVALID_CONFIGURATION")
-    if not c["test_db"].startswith("test") or c["production_db"] == c["test_db"]:
+    if not (c["test_db"].startswith("test") or c["test_db"].endswith("_test")) or c["production_db"] == c["test_db"]:
         raise MaintenanceError("UNSAFE_TARGET")
     if c["admin_db"] in (c["production_db"], c["test_db"]):
         raise MaintenanceError("ADMIN_REQUIRES_MAINTENANCE_DATABASE")
@@ -68,10 +68,12 @@ def load_config(path):
     for k in ("production_service", "test_service", "admin_service"):
         if not IDENT.fullmatch(c[k]):
             raise MaintenanceError("INVALID_SERVICE")
-    for k in ("pg_service_file", "pgpass_file"):
-        p = protected(c[k])
-        if p.stat().st_mode & 0o027:
-            raise MaintenanceError("SECRET_FILE_PERMISSIONS")
+    if protected(c["pg_service_file"]).stat().st_mode & 0o027:
+        raise MaintenanceError("SECRET_FILE_PERMISSIONS")
+    passfile = Path(c["pgpass_file"])
+    st = passfile.lstat()
+    if passfile.is_symlink() or not passfile.is_file() or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+        raise MaintenanceError("SECRET_FILE_PERMISSIONS")
     for k in ("overlay_sql", "verify_sql", "isolation_probe", "health_probe"):
         protected(c[k])
     if len({c[k] for k in ("production_service", "test_service", "admin_service")}) != 3:

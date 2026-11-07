@@ -1,8 +1,8 @@
 {
   "refresh_enabled": false,
   "token": "REPLACE_WITH_A_RANDOM_SERVER_SIDE_TOKEN_OF_AT_LEAST_43_CHARACTERS",
-  "production_db": "replace_production_database",
-  "test_db": "testerp",
+  "production_db": "idempiere",
+  "test_db": "idempiere_test",
   "admin_db": "postgres",
   "test_owner": "replace_test_owner",
   "production_service": "bm_production_backup",

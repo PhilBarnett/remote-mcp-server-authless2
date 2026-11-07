@@ -22,7 +22,7 @@ class MaintenanceTests(unittest.TestCase):
         self.root.chmod(0o700)
         self.config_path = self.root / "config.json"
         c = json.loads(Path(__file__).with_name("config.example.json").read_text())
-        c.update(state_dir=str(self.root), production_db="production", test_db="testerp", test_owner="testowner", refresh_enabled=True)
+        c.update(state_dir=str(self.root), production_db="idempiere", test_db="idempiere_test", test_owner="testowner", refresh_enabled=True)
         c["test_machine_sha256"] = m.digest("/etc/machine-id")
         for key in ("pg_service_file", "pgpass_file", "overlay_sql", "verify_sql", "isolation_probe", "health_probe"):
             p = self.root / key
@@ -46,7 +46,7 @@ class MaintenanceTests(unittest.TestCase):
                 sql = args[-1]
                 if sql.startswith("SELECT json_build_object"):
                     service = args[args.index("--dbname") + 1].split("=", 1)[1]
-                    db = {c["production_service"]: "production", c["test_service"]: "testerp", c["admin_service"]: "postgres"}[service]
+                    db = {c["production_service"]: "idempiere", c["test_service"]: "idempiere_test", c["admin_service"]: "postgres"}[service]
                     return json.dumps({"database": db, "address": "127.0.0.1", "port": "5432",
                                        "role": c["identities"][service]["role"], "oid": 100})
             return ""
@@ -86,7 +86,7 @@ class MaintenanceTests(unittest.TestCase):
         for args in self.calls:
             if args[0] == "/usr/bin/psql" and any("CREATE DATABASE" in x or "ALTER DATABASE" in x for x in args):
                 self.assertIn("service=" + self.c["admin_service"], args)
-                self.assertNotIn('"production"', args[-1])
+                self.assertNotIn('"idempiere"', args[-1])
         self.assertFalse(any("DROP DATABASE" in " ".join(args) for args in self.calls))
 
     def test_restore_failure_leaves_test_running(self):
@@ -141,7 +141,7 @@ class MaintenanceTests(unittest.TestCase):
             self.engine.start(preview["plan_sha256"], str(uuid.uuid4()))
 
     def test_target_and_configuration_guards(self):
-        for change in ({"test_db": "production"}, {"test_db": "erp"}, {"test_unit": "postgresql.service"},
+        for change in ({"test_db": "idempiere"}, {"test_db": "erp"}, {"test_unit": "postgresql.service"},
                        {"test_hostname": "idempiere12production"}, {"test_machine_sha256": "0" * 64},
                        {"production_db": "prod;drop"}, {"production_service": self.c["test_service"]}):
             with self.subTest(change=change):
