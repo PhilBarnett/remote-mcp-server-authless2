@@ -367,18 +367,17 @@ async function writeZipGripTemplate(bindings: VimeoEnv, raw: string, request: Fe
 		"Elementor template write",
 	);
 	await readJson(
-		await request(`${liveSite(bindings)}/wp-json/jetpack/v4/site/cache/flush`, {
-			method: "POST",
+		await request(`${liveSite(bindings)}/wp-json/elementor/v1/cache`, {
+			method: "DELETE",
 			headers: {
 				Authorization: wpAuth(bindings),
 				Accept: "application/json",
 				"Content-Type": "application/json",
 			},
-			body: "{}",
 			redirect: "manual",
 			signal: AbortSignal.timeout(30_000),
 		}),
-		"Jetpack page-cache flush",
+		"Elementor cache reset",
 	);
 	return result;
 }
