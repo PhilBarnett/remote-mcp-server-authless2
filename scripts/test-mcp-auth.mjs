@@ -132,6 +132,10 @@ try {
 	assert.ok(listedTools.find(tool => tool.name === "manage_equinox").inputSchema.properties.action.enum.includes("pricing_details"));
 	assert.ok(listedTools.find(tool => tool.name === "manage_live_site_banner_guarded"));
 	assert.ok(listedTools.find(tool => tool.name === "inspect_live_wordpress_timezone"));
+	assert.ok(listedTools.find(tool => tool.name === "manage_vimeo_video"));
+	assert.ok(!listedTools.find(tool => tool.name === "open_blindmotion_media_intake_v7"));
+	const vimeoConnection = decode(await (await rpc(token.access_token, "tools/call", { name: "manage_vimeo_video", arguments: { action: "connection" } })).text()).result;
+	assert.deepEqual(JSON.parse(vimeoConnection.content[0].text), { configured: false, upload_ready: false, required_secret: "VIMEO_ACCESS_TOKEN" });
 	const socialReader = listedTools.find(tool => tool.name === "get_meta_lead_campaign_assets");
 	assert.equal(socialReader.annotations.readOnlyHint, true);
 	assert.ok(socialReader.inputSchema.properties.comment_request.properties.action.enum.includes("instagram_comments"));

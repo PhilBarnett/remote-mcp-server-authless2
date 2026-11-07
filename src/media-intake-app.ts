@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-const MEDIA_INTAKE_URI = "ui://blindmotion/media-intake-v7.html";
+const MEDIA_INTAKE_URI = "ui://blindmotion/media-intake-v8.html";
 
 const MEDIA_INTAKE_HTML = `<!doctype html>
 <html>
@@ -16,6 +16,7 @@ body{margin:0;padding:16px;background:transparent;color:CanvasText}
 h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
 .filebtn{display:inline-block;border:1px solid color-mix(in srgb,CanvasText 25%,transparent);background:ButtonFace;color:ButtonText;border-radius:9px;padding:9px 12px;font-weight:600;cursor:pointer}
 .filebtn input{display:none}.status{font-size:13px;margin:10px 0;white-space:pre-wrap;line-height:1.45}
+.destination{display:flex;gap:8px;align-items:center;margin:12px 0}.destination select{border:1px solid color-mix(in srgb,CanvasText 25%,transparent);border-radius:8px;padding:7px;background:Canvas;color:CanvasText}
 .item{display:grid;grid-template-columns:1fr auto;gap:8px;padding:8px 0;border-top:1px solid color-mix(in srgb,CanvasText 12%,transparent)}
 .item:first-child{border-top:0}.name{font-size:12px;overflow-wrap:anywhere}.state{font-size:12px;opacity:.78}
 .ok{font-weight:700;opacity:1}.err{font-weight:700;opacity:1}small{opacity:.72;display:block;margin-top:12px}
@@ -24,13 +25,14 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
 <body>
 <div class="wrap"><div class="card">
 <h1>Blindmotion Media Intake</h1>
-<p>Choose one ZIP from your computer. Media Intake extracts MP4/MOV files locally in the browser, then uploads each video directly to the guarded Blindmotion Worker endpoint for Meta ingestion. No ChatGPT file-export step is used.</p>
+<p>Choose one ZIP or multiple videos. Media Intake reads MP4/MOV files locally, then sends each video directly through the guarded Blindmotion upload path. No ChatGPT file-export step is used.</p>
+<label class="destination">Destination <select id="destination"><option value="vimeo" selected>Vimeo — website video</option><option value="meta">Meta — advertising creative</option></select></label>
 <div class="actions">
 <label class="filebtn">Choose ZIP<input id="zipInput" type="file" accept=".zip,application/zip"></label>\n<label class="filebtn">Choose videos<input id="videoInput" type="file" accept=".mp4,.mov,video/mp4,video/quicktime" multiple></label>
 </div>
 <div id="status" class="status">Ready.</div>
 <div id="items"></div>
-<small>Limits: 20 videos, 80 MB per video. This app cannot create or activate ads or campaigns.</small>
+<small>Limits: 20 videos, 80 MB per video. Vimeo uploads are hidden on Vimeo, embeddable on websites and non-downloadable. This app cannot create or activate ads or campaigns.</small>
 </div></div>
 <script>
 (() => {
@@ -38,6 +40,7 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
   const status = document.getElementById("status");
   const items = document.getElementById("items");
   const zipInput = document.getElementById("zipInput");\n  const videoInput = document.getElementById("videoInput");
+  const destination = document.getElementById("destination");
 
   function setStatus(text){
     status.textContent=text;
@@ -112,18 +115,20 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
     const title=baseName(name).replace(/[.][^.]+$/,"").slice(0,255);
     const filename=safeFilename(baseName(name));
     const mime=/[.]mov$/i.test(filename)?"video/quicktime":"video/mp4";
-    state.textContent="Authorising";
-    const permit=parseTool(await openai.callTool("upload_meta_ad_video_from_url_guarded",{
-      action:"permit",title,filename,mime_type:mime,file_size:bytes.length,
-      confirmation:"CONFIRM UPLOAD META VIDEO BATCH"
+    const target=destination.value==="meta"?"meta":"vimeo";
+    state.textContent="Authorising "+(target==="meta"?"Meta":"Vimeo");
+    const tool=target==="meta"?"upload_meta_ad_video_from_url_guarded":"manage_vimeo_video";
+    const confirmation=target==="meta"?"CONFIRM UPLOAD META VIDEO BATCH":"CONFIRM UPLOAD VIMEO VIDEO";
+    const permit=parseTool(await openai.callTool(tool,{
+      action:"permit",title,filename,mime_type:mime,file_size:bytes.length,confirmation
     }));
     if(permit?.action==="existing"&&permit?.uploaded===true&&permit?.video_id){
-      state.textContent="Already in Meta "+permit.video_id; state.className="state ok";
-      completed.push({source_name:name,meta_video_id:String(permit.video_id),processing_complete:Boolean(permit.processing_complete),file_size:bytes.length,existing:true});
+      state.textContent="Already in "+(target==="meta"?"Meta ":"Vimeo ")+permit.video_id; state.className="state ok";
+      completed.push({source_name:name,destination:target,video_id:String(permit.video_id),processing_complete:Boolean(permit.processing_complete||permit.transcode_status==="complete"),file_size:bytes.length,existing:true,link:permit.link||null,embed_url:permit.embed_url||null});
       return;
     }
     if(!permit?.upload_url||!permit?.upload_token) throw new Error(permit?.message||"Upload permit failed for "+name);
-    state.textContent="Uploading to Meta";
+    state.textContent="Uploading to "+(target==="meta"?"Meta":"Vimeo");
     const response=await fetch(permit.upload_url,{
       method:"POST",
       headers:{
@@ -137,8 +142,8 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
     if(!response.ok||result?.uploaded!==true||!result?.video_id){
       throw new Error(result?.error||("Direct upload failed (HTTP "+response.status+") for "+name));
     }
-    state.textContent="Meta "+result.video_id; state.className="state ok";
-    completed.push({source_name:name,meta_video_id:String(result.video_id),processing_complete:false,file_size:bytes.length,existing:false});
+    state.textContent=(target==="meta"?"Meta ":"Vimeo ")+result.video_id; state.className="state ok";
+    completed.push({source_name:name,destination:target,video_id:String(result.video_id),processing_complete:Boolean(result.transcode_status==="complete"),file_size:bytes.length,existing:false,link:result.link||null,embed_url:result.embed_url||null});
     if(openai?.setWidgetState){
       openai.setWidgetState({modelContent:"Blindmotion Media Intake uploaded "+completed.length+" video(s): "+JSON.stringify(completed),privateContent:{completed}});
     }
@@ -183,7 +188,7 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
       }
       if(openai?.sendFollowUpMessage){
         await openai.sendFollowUpMessage({
-          prompt:"Blindmotion Media Intake finished. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures)+". Diagnose any failures and continue the paused ZipGrip campaign build with successful videos.",
+          prompt:"Blindmotion Media Intake finished. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures)+". Diagnose any failures and continue the relevant website-video or advertising workflow with successful videos.",
           scrollToBottom:true
         });
       }
@@ -234,7 +239,7 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
       }
       if(openai?.sendFollowUpMessage){
         await openai.sendFollowUpMessage({
-          prompt:"Blindmotion Media Intake finished. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures)+". Diagnose any failures and continue the paused ZipGrip campaign build with successful videos.",
+          prompt:"Blindmotion Media Intake finished. Uploaded: "+JSON.stringify(completed)+" Failures: "+JSON.stringify(failures)+". Diagnose any failures and continue the relevant website-video or advertising workflow with successful videos.",
           scrollToBottom:true
         });
       }
@@ -250,12 +255,9 @@ h1{font-size:20px;margin:0 0 6px}p{margin:0 0 12px;line-height:1.45}.actions{dis
 </html>`;
 
 export function registerMediaIntakeApp(server: McpServer) {
-	server.registerResource(
-		"blindmotion-media-intake",
-		MEDIA_INTAKE_URI,
-		{},
-		async () => ({
-			contents: [{
+	server.registerResource("blindmotion-media-intake", MEDIA_INTAKE_URI, {}, async () => ({
+		contents: [
+			{
 				uri: MEDIA_INTAKE_URI,
 				mimeType: "text/html;profile=mcp-app",
 				text: MEDIA_INTAKE_HTML,
@@ -263,23 +265,25 @@ export function registerMediaIntakeApp(server: McpServer) {
 					ui: {
 						prefersBorder: true,
 						csp: {
-							connectDomains: ["https://remote-mcp-server-authless2.phil-cd4.workers.dev"],
+							connectDomains: [
+								"https://remote-mcp-server-authless2.phil-cd4.workers.dev",
+							],
 							resourceDomains: [],
 						},
 					},
 					"openai/widgetDescription":
-						"Blindmotion Media Intake locally extracts ZIP creative and streams each video through a guarded Meta resumable-upload session.",
+						"Blindmotion Media Intake locally extracts ZIP creative and streams each video through a guarded Vimeo or Meta upload session.",
 				},
-			}],
-		}),
-	);
+			},
+		],
+	}));
 
 	server.registerTool(
 		"open_blindmotion_media_intake",
 		{
 			title: "Open Blindmotion Media Intake",
 			description:
-				"Open Blindmotion Media Intake to choose one local ZIP or multiple MP4/MOV files and upload them directly to Meta through the guarded Worker path. This tool does not create or activate ads or campaigns.",
+				"Open Blindmotion Media Intake to choose one local ZIP or multiple MP4/MOV files and upload them directly to Vimeo for website embedding or Meta for advertising. This tool does not create or activate ads or campaigns.",
 			inputSchema: z.object({}),
 			_meta: {
 				ui: { resourceUri: MEDIA_INTAKE_URI },
@@ -288,8 +292,13 @@ export function registerMediaIntakeApp(server: McpServer) {
 			},
 		},
 		async () => ({
-			structuredContent: { ready: true, purpose: "blindmotion_media_intake_v7" },
-			content: [{ type: "text" as const, text: "Blindmotion Media Intake v7 is ready. Choose a ZIP or video files in the app." }],
+			structuredContent: { ready: true, purpose: "blindmotion_media_intake_v8" },
+			content: [
+				{
+					type: "text" as const,
+					text: "Blindmotion Media Intake is ready. Choose Vimeo or Meta, then select a ZIP or video files.",
+				},
+			],
 		}),
 	);
 }

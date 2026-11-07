@@ -15,6 +15,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { registerMetaEcommerceToolkit } from "./meta-ecommerce-toolkit";
 import { registerMediaIntakeApp } from "./media-intake-app";
+import { registerVimeoTools, type VimeoEnv } from "./tools/vimeo";
 import {
 	registerSearchConsoleTools,
 	type SearchConsoleQueryRequest,
@@ -4823,24 +4824,7 @@ function createServer() {
 
 	registerMetaEcommerceToolkit(server);
 	registerMediaIntakeApp(server);
-	server.registerTool(
-			"open_blindmotion_media_intake_v7",
-			{
-				title: "Open Blindmotion Media Intake v7",
-				description:
-					"Open Blindmotion Media Intake v7 using the current uncached app resource. Choose one local ZIP, extract MP4/MOV files in the browser and stream them to Meta through guarded resumable uploads. This tool does not create or activate ads or campaigns.",
-				inputSchema: z.object({}),
-				_meta: {
-					ui: { resourceUri: "ui://blindmotion/media-intake-v7.html" },
-					"openai/toolInvocation/invoking": "Opening Media Intake v7…",
-					"openai/toolInvocation/invoked": "Media Intake v7 ready.",
-				},
-			},
-			async () => ({
-				structuredContent: { ready: true, purpose: "blindmotion_media_intake_v7" },
-				content: [{ type: "text" as const, text: "Blindmotion Media Intake v7 is ready. Choose the ZIP in the app." }],
-			}),
-		);
+	registerVimeoTools(server, () => env as unknown as VimeoEnv);
 	registerSearchConsoleTools(server, {
 		query: searchConsoleQuery,
 		siteUrl: SEARCH_CONSOLE_SITE_URL,
