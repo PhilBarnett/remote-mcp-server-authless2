@@ -196,7 +196,7 @@ test("ZipGrip placement is previewed, hash-locked, applied and publicly verified
 		}
 		if (value.startsWith("https://online.blindmotion.com.au/zipsided-outdoor-blinds/?bm_verify=")) {
 			return new Response(
-				'<h2>See ZipGrip in a real waterfront installation</h2><iframe src="https://player.vimeo.com/video/1244573300"></iframe>',
+				'<section class="elementor-element elementor-element-a1244f0"><h2>See ZipGrip in a real waterfront installation</h2><iframe src="https://player.vimeo.com/video/1244573300"></iframe></section>',
 				{ status: 200 },
 			);
 		}
