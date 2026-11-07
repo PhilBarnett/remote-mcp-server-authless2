@@ -123,9 +123,13 @@ try {
 	assert.ok(toolsText.includes("set_staging_product_publication_guarded"));
 	const decode = text => JSON.parse(text.startsWith("event:") ? text.split("\n").find(line => line.startsWith("data: ")).slice(6) : text);
 	const listedTools = decode(toolsText).result.tools;
-	assert.equal(listedTools.length, 108);
-	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 108);
+	assert.equal(listedTools.length, 109);
+	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 109);
 	assert.equal(listedTools.find(tool => tool.name === "read_idempiere_database").annotations.readOnlyHint, true);
+	assert.equal(listedTools.find(tool => tool.name === "manage_idempiere_maintenance").annotations.destructiveHint, true);
+	const opsDisabled = decode(await (await rpc(token.access_token, "tools/call", { name: "manage_idempiere_maintenance", arguments: { action: "status" } })).text()).result;
+	assert.equal(opsDisabled.isError, true);
+	assert.match(opsDisabled.content[0].text, /ERP maintenance is disabled/);
 	const dbDisabled = decode(await (await rpc(token.access_token, "tools/call", { name: "read_idempiere_database", arguments: { action: "status" } })).text()).result;
 	assert.equal(dbDisabled.isError, true);
 	assert.match(dbDisabled.content[0].text, /database reader is disabled/);
@@ -187,3 +191,4 @@ try {
 } finally {
 	await mf.dispose();
 }
+

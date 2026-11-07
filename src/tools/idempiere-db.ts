@@ -89,22 +89,39 @@ export const TABLES = {
 			"isactive",
 		],
 	},
+
+	products: { name: "m_product", key: "m_product_id", columns: ["m_product_id", "ad_client_id", "ad_org_id", "value", "name", "isactive", "m_product_category_id", "m_attributeset_id", "c_uom_id", "isbom", "isverified", "issold", "ispurchased"] },
+	bom: { name: "m_product_bom", key: "m_product_bom_id", columns: ["m_product_bom_id", "ad_client_id", "ad_org_id", "m_product_id", "m_productbom_id", "bomqty", "line", "isactive"] },
+	attributes: { name: "m_attribute", key: "m_attribute_id", columns: ["m_attribute_id", "ad_client_id", "ad_org_id", "name", "isactive", "isinstanceattribute", "islist", "ismandatory"] },
+	attribute_values: { name: "m_attributevalue", key: "m_attributevalue_id", columns: ["m_attributevalue_id", "ad_client_id", "ad_org_id", "m_attribute_id", "value", "name", "isactive"] },
+	orders: { name: "c_order", key: "c_order_id", columns: ["c_order_id", "ad_client_id", "ad_org_id", "documentno", "dateordered", "docstatus", "processed", "issotrx", "totallines", "grandtotal", "c_currency_id"] },
+	order_lines: { name: "c_orderline", key: "c_orderline_id", columns: ["c_orderline_id", "ad_client_id", "ad_org_id", "c_order_id", "line", "m_product_id", "m_attributesetinstance_id", "qtyordered", "priceactual", "linenetamt", "c_uom_id"] },
 } as const;
 
 export const idempiereDbSchema = z
 	.object({
-		action: z.enum(["status", "columns", "indexes", "triggers", "rows", "count"]),
-		table: z.enum(["scans", "scanpoints", "production", "items", "cuts"]).optional(),
+		action: z.enum(["status", "columns", "indexes", "triggers", "rows", "count", "mapping_dictionary"]),
+		table: z.enum(["scans", "scanpoints", "production", "items", "cuts", "products", "bom", "attributes", "attribute_values", "orders", "order_lines"]).optional(),
 		limit: z.number().int().min(1).max(50).default(20),
 		before_id: z.number().int().positive().max(2147483647).optional(),
+		parent_id: z.number().int().positive().max(2147483647).optional(),
+		name_contains: z.string().min(2).max(80).optional(),
 		record_id: z.number().int().positive().max(2147483647).optional(),
 	})
 	.strict()
 	.superRefine((v, ctx) => {
-		if (v.action !== "status" && !v.table)
+		if (!["status", "mapping_dictionary"].includes(v.action) && !v.table)
 			ctx.addIssue({ code: "custom", message: "table is required" });
 		if (v.action !== "rows" && (v.before_id || v.record_id))
 			ctx.addIssue({ code: "custom", message: "ID filters require rows" });
+		if ((v.parent_id || v.name_contains) && v.action !== "rows")
+			ctx.addIssue({ code: "custom", message: "Search filters require rows" });
+		if (v.parent_id && !["bom", "order_lines", "attribute_values"].includes(v.table || ""))
+			ctx.addIssue({ code: "custom", message: "Unsupported parent filter" });
+		if (v.name_contains && !["products", "attributes", "attribute_values"].includes(v.table || ""))
+			ctx.addIssue({ code: "custom", message: "Unsupported name search" });
+		if (v.action === "mapping_dictionary" && v.table)
+			ctx.addIssue({ code: "custom", message: "Dictionary discovery does not accept a table" });
 		if (v.before_id && v.record_id)
 			ctx.addIssue({ code: "custom", message: "Use one ID filter" });
 	});
@@ -207,6 +224,17 @@ export function rowQuery(
 		values.push(input.before_id);
 		where += ` AND ${quote(table.key)} < $3`;
 	}
+	if (input.parent_id) {
+		const parent = { bom: "m_product_id", order_lines: "c_order_id", attribute_values: "m_attribute_id" }[input.table as string];
+		if (!parent || !available.includes(parent)) throw new DbReadError("Parent column is absent.");
+		values.push(input.parent_id);
+		where += ` AND ${quote(parent)} = $${values.length}`;
+	}
+	if (input.name_contains) {
+		if (!available.includes("name")) throw new DbReadError("Name column is absent.");
+		values.push(input.name_contains);
+		where += ` AND position(lower($${values.length}) in lower("name")) > 0`;
+	}
 	const target = `${quote(config.schema)}.${quote(table.name)}`;
 	if (input.action === "count")
 		return { text: `SELECT count(*)::text AS count FROM ${target} WHERE ${where}`, values };
@@ -269,6 +297,13 @@ export async function readIdempiereDb(
 				schema: config.schema,
 				tables: Object.keys(TABLES),
 			};
+		} else if (input.action === "mapping_dictionary") {
+			// Metadata only. No Woo defaults rows: they contain consumer keys/secrets.
+			const rows = (await client.query(`SELECT table_name, column_name, data_type
+				FROM information_schema.columns WHERE table_schema=$1
+				AND (lower(table_name) LIKE '%woocommerce%' OR lower(column_name) LIKE '%woocommerce%')
+				ORDER BY table_name, ordinal_position LIMIT 200`, [config.schema])).rows;
+			result = { action: input.action, read_only: true, metadata_only: true, rows, possibly_truncated: rows.length === 200 };
 		} else {
 			const table = TABLES[input.table!];
 			const params = [config.schema, table.name];
@@ -347,3 +382,4 @@ export async function readIdempiereDb(
 		}
 	}
 }
+
