@@ -5,15 +5,29 @@ export const VIMEO_UPLOAD_PATH = "/media-intake/vimeo-video";
 export const VIMEO_PERMIT_KEY_PREFIX = "vimeo-media-intake-upload:";
 export const VIMEO_MAX_VIDEO_BYTES = 80_000_000;
 export const VIMEO_UPLOAD_CONFIRMATION = "CONFIRM UPLOAD VIMEO VIDEO";
+export const ZIPGRIP_VIDEO_PLACEMENT_CONFIRMATION = "CONFIRM PLACE ZIPGRIP PRODUCT VIDEO";
 
 const VIMEO_API = "https://api.vimeo.com";
 const VIMEO_ACCEPT = "application/vnd.vimeo.*+json;version=3.4";
 const PERMIT_SECONDS = 600;
+const ZIPGRIP_PRODUCT_ID = 1301;
+const ZIPGRIP_PRODUCT_NAME = "Zip Sided Outdoor Blinds";
+const ZIPGRIP_TEMPLATE_ID = 557;
+const ZIPGRIP_VIDEO_SECTION_ID = "bmv1244";
+const ZIPGRIP_VIDEO_COLUMN_ID = "bmv1245";
+const ZIPGRIP_VIDEO_HEADING_ID = "bmv1246";
+const ZIPGRIP_VIDEO_HTML_ID = "bmv1247";
+const ZIPGRIP_VIDEO_HEADING = "See ZipGrip in a real waterfront installation";
 
 export interface VimeoEnv {
 	OAUTH_KV: KVNamespace;
 	VIMEO_ACCESS_TOKEN?: string;
 	VIMEO_FOLDER_URI?: string;
+	WC_SITE?: string;
+	WC_CONSUMER_KEY?: string;
+	WC_CONSUMER_SECRET?: string;
+	WP_USERNAME?: string;
+	WP_APPLICATION_PASSWORD?: string;
 }
 
 type VimeoPermit = {
@@ -162,18 +176,213 @@ async function getVideo(bindings: VimeoEnv, videoId: string, request: Fetcher = 
 	);
 }
 
+function liveSite(bindings: VimeoEnv) {
+	const site = bindings.WC_SITE?.trim().replace(/\/$/, "");
+	if (!site || !/^https:\/\/online\.blindmotion\.com\.au$/i.test(site)) {
+		throw new Error("The fixed Blindmotion Online origin is not configured.");
+	}
+	return site;
+}
+
+function wpAuth(bindings: VimeoEnv) {
+	const username = bindings.WP_USERNAME?.trim();
+	const password = bindings.WP_APPLICATION_PASSWORD?.trim();
+	if (!username || !password) throw new Error("Live WordPress write access is not configured.");
+	return `Basic ${btoa(`${username}:${password}`)}`;
+}
+
+async function readJson(response: Response, label: string) {
+	const raw = await response.text();
+	if (raw.length > 2_000_000) throw new Error(`${label} response exceeded the safety limit.`);
+	let body: any;
+	try {
+		body = raw ? JSON.parse(raw) : {};
+	} catch {
+		throw new Error(`${label} returned malformed JSON.`);
+	}
+	if (!response.ok) {
+		const detail = String(body?.message ?? body?.code ?? "Request failed").slice(0, 300);
+		throw new Error(`${label} failed (HTTP ${response.status}): ${detail}`);
+	}
+	return body;
+}
+
+async function getZipGripProduct(bindings: VimeoEnv, request: Fetcher = fetch) {
+	const key = bindings.WC_CONSUMER_KEY?.trim();
+	const secret = bindings.WC_CONSUMER_SECRET?.trim();
+	if (!key || !secret) throw new Error("WooCommerce read access is not configured.");
+	const url = new URL(`${liveSite(bindings)}/wp-json/wc/v3/products/${ZIPGRIP_PRODUCT_ID}`);
+	url.searchParams.set("consumer_key", key);
+	url.searchParams.set("consumer_secret", secret);
+	const product = await readJson(
+		await request(url.toString(), {
+			headers: { Accept: "application/json" },
+			redirect: "manual",
+			signal: AbortSignal.timeout(30_000),
+		}),
+		"WooCommerce product read",
+	);
+	if (
+		product?.id !== ZIPGRIP_PRODUCT_ID ||
+		product?.name !== ZIPGRIP_PRODUCT_NAME ||
+		product?.status !== "publish"
+	) {
+		throw new Error("The live ZipGrip product identity or publication state changed.");
+	}
+	return product;
+}
+
+async function getZipGripTemplate(bindings: VimeoEnv, request: Fetcher = fetch) {
+	const response = await request(
+		`${liveSite(bindings)}/wp-json/wp/v2/elementor_library/${ZIPGRIP_TEMPLATE_ID}?context=edit`,
+		{
+			headers: { Authorization: wpAuth(bindings), Accept: "application/json" },
+			redirect: "manual",
+			signal: AbortSignal.timeout(30_000),
+		},
+	);
+	const template = await readJson(response, "Elementor template read");
+	if (
+		template?.id !== ZIPGRIP_TEMPLATE_ID ||
+		String(template?.title?.raw ?? template?.title?.rendered ?? "") !== "Single Product Template" ||
+		template?.status !== "publish"
+	) {
+		throw new Error("The live Elementor template identity or publication state changed.");
+	}
+	const raw = template?.meta?.["_elementor_data"];
+	if (typeof raw !== "string" || raw.length < 1000)
+		throw new Error("The live Elementor template data is unavailable.");
+	let data: any[];
+	try {
+		data = JSON.parse(raw);
+	} catch {
+		throw new Error("The live Elementor template data is malformed.");
+	}
+	if (!Array.isArray(data)) throw new Error("The live Elementor template root is invalid.");
+	return { raw, data };
+}
+
+async function sha256(value: string) {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+	return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function hasNodeId(nodes: any[], id: string): boolean {
+	for (const node of nodes) {
+		if (node?.id === id) return true;
+		if (Array.isArray(node?.elements) && hasNodeId(node.elements, id)) return true;
+	}
+	return false;
+}
+
+function zipGripVideoSection(videoId: string) {
+	const playerUrl = `https://player.vimeo.com/video/${videoId}?badge=0&autopause=0&player_id=0&app_id=556546`;
+	return {
+		id: ZIPGRIP_VIDEO_SECTION_ID,
+		elType: "section",
+		settings: {
+			structure: "10",
+			content_width: { unit: "px", size: 1100, sizes: [] },
+			padding: { unit: "px", top: "48", right: "20", bottom: "48", left: "20", isLinked: false },
+			padding_tablet: { unit: "px", top: "36", right: "20", bottom: "36", left: "20", isLinked: false },
+			padding_mobile: { unit: "px", top: "28", right: "16", bottom: "28", left: "16", isLinked: false },
+			dce_visibility_post: [String(ZIPGRIP_PRODUCT_ID)],
+			enabled_visibility: "yes",
+			css_classes: "zipgrip-koolewong-video",
+		},
+		elements: [
+			{
+				id: ZIPGRIP_VIDEO_COLUMN_ID,
+				elType: "column",
+				settings: { _column_size: 100, _inline_size: null },
+				elements: [
+					{
+						id: ZIPGRIP_VIDEO_HEADING_ID,
+						elType: "widget",
+						widgetType: "heading",
+						settings: {
+							title: ZIPGRIP_VIDEO_HEADING,
+							header_size: "h2",
+							align: "center",
+							align_mobile: "left",
+							_margin: { unit: "px", top: "0", right: "0", bottom: "22", left: "0", isLinked: false },
+						},
+						elements: [],
+					},
+					{
+						id: ZIPGRIP_VIDEO_HTML_ID,
+						elType: "widget",
+						widgetType: "html",
+						settings: {
+							html: `<div style="position:relative;padding-top:56.25%;overflow:hidden;background:#000;"><iframe src="${playerUrl}" title="ZipGrip outdoor blinds at Koolewong" style="position:absolute;inset:0;width:100%;height:100%;border:0;" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div>`,
+						},
+						elements: [],
+					},
+				],
+			},
+		],
+	};
+}
+
+function buildZipGripPlacement(data: any[], videoId: string) {
+	if (hasNodeId(data, ZIPGRIP_VIDEO_SECTION_ID)) {
+		throw new Error("The ZipGrip Koolewong video section already exists.");
+	}
+	const featureIndex = data.findIndex(
+		(node) =>
+			node?.elType === "section" &&
+			String(node?.settings?.css_classes ?? "")
+				.split(/\s+/)
+				.includes("feat-ben-sec"),
+	);
+	if (featureIndex < 0) throw new Error("The expected Features & Benefits section was not found.");
+	const next = structuredClone(data);
+	next.splice(featureIndex, 0, zipGripVideoSection(videoId));
+	return { next, insert_index: featureIndex };
+}
+
+async function writeZipGripTemplate(bindings: VimeoEnv, raw: string, request: Fetcher = fetch) {
+	return readJson(
+		await request(`${liveSite(bindings)}/wp-json/wp/v2/elementor_library/${ZIPGRIP_TEMPLATE_ID}`, {
+			method: "POST",
+			headers: {
+				Authorization: wpAuth(bindings),
+				Accept: "application/json",
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ meta: { _elementor_data: raw } }),
+			redirect: "manual",
+			signal: AbortSignal.timeout(30_000),
+		}),
+		"Elementor template write",
+	);
+}
+
 export function registerVimeoTools(server: McpServer, getBindings: () => VimeoEnv) {
 	server.registerTool(
 		"manage_vimeo_video",
 		{
 			description:
-				"Connect, inspect and upload Blindmotion website videos to Vimeo. CONNECTION and VIDEO are read-only. PERMIT creates a short-lived, single-use direct upload for one MP4/MOV; new videos are hidden on Vimeo (privacy.view=disable), embeddable on websites, non-downloadable and read back after upload. No delete, publish-to-feed or replacement capability.",
+				"Connect, inspect and upload Blindmotion website videos to Vimeo, and preview/apply one fixed Koolewong Vimeo placement on the live ZipGrip product template. CONNECTION, VIDEO and PREVIEW_PLACEMENT are read-only. APPLY_PLACEMENT is hash-locked, product-specific, verifies WordPress read-back and public rendering, and restores the exact original Elementor data on failure. PERMIT creates a short-lived, single-use direct upload for one MP4/MOV. No delete, publish-to-feed or video replacement capability.",
 			inputSchema: z.discriminatedUnion("action", [
 				z.object({ action: z.literal("connection") }),
 				z.object({
 					action: z.literal("video"),
 					video_id: z.string().regex(/^\d+$/),
 					expected_name: z.string().trim().min(1).max(255),
+				}),
+				z.object({
+					action: z.literal("preview_placement"),
+					video_id: z.string().regex(/^\d+$/),
+					expected_name: z.string().trim().min(1).max(255),
+				}),
+				z.object({
+					action: z.literal("apply_placement"),
+					video_id: z.string().regex(/^\d+$/),
+					expected_name: z.string().trim().min(1).max(255),
+					expected_template_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+					expected_plan_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+					confirmation: z.literal(ZIPGRIP_VIDEO_PLACEMENT_CONFIRMATION),
 				}),
 				z.object({
 					action: z.literal("permit"),
@@ -220,6 +429,123 @@ export function registerVimeoTools(server: McpServer, getBindings: () => VimeoEn
 					if (String(video?.name ?? "") !== args.expected_name)
 						throw new Error("Vimeo video name does not match expected_name.");
 					return textResult({ ...videoSummary(video), read_only: true });
+				}
+				if (args.action === "preview_placement" || args.action === "apply_placement") {
+					const video = await getVideo(bindings, args.video_id);
+					if (String(video?.name ?? "") !== args.expected_name)
+						throw new Error("Vimeo video name does not match expected_name.");
+					if (
+						video?.status !== "available" ||
+						video?.transcode?.status !== "complete" ||
+						video?.privacy?.view !== "disable" ||
+						video?.privacy?.embed !== "public" ||
+						video?.privacy?.download !== false
+					) {
+						throw new Error("The Vimeo video is not in the expected completed website-only state.");
+					}
+					const product = await getZipGripProduct(bindings);
+					const current = await getZipGripTemplate(bindings);
+					const currentHash = await sha256(current.raw);
+					const placement = buildZipGripPlacement(current.data, args.video_id);
+					const targetRaw = JSON.stringify(placement.next);
+					const targetHash = await sha256(targetRaw);
+					const planHash = await sha256(
+						JSON.stringify({
+							product_id: ZIPGRIP_PRODUCT_ID,
+							product_name: ZIPGRIP_PRODUCT_NAME,
+							template_id: ZIPGRIP_TEMPLATE_ID,
+							video_id: args.video_id,
+							video_name: args.expected_name,
+							current_sha256: currentHash,
+							target_sha256: targetHash,
+							insert_index: placement.insert_index,
+						}),
+					);
+					if (args.action === "preview_placement") {
+						return textResult({
+							action: "preview_placement",
+							write_performed: false,
+							product: { id: product.id, name: product.name, status: product.status },
+							template: {
+								id: ZIPGRIP_TEMPLATE_ID,
+								expected_template_sha256: currentHash,
+								target_template_sha256: targetHash,
+								insert_before_css_class: "feat-ben-sec",
+								insert_index: placement.insert_index,
+							},
+							video: videoSummary(video),
+							heading: ZIPGRIP_VIDEO_HEADING,
+							visibility: { product_ids: [String(ZIPGRIP_PRODUCT_ID)] },
+							expected_plan_sha256: planHash,
+						});
+					}
+					if (
+						currentHash !== args.expected_template_sha256 ||
+						planHash !== args.expected_plan_sha256
+					) {
+						throw new Error("The Elementor template or placement plan changed after preview.");
+					}
+					let writeAttempted = false;
+					try {
+						writeAttempted = true;
+						await writeZipGripTemplate(bindings, targetRaw);
+						const verified = await getZipGripTemplate(bindings);
+						const verifiedHash = await sha256(verified.raw);
+						if (
+							verifiedHash !== targetHash ||
+							!hasNodeId(verified.data, ZIPGRIP_VIDEO_SECTION_ID)
+						) {
+							throw new Error("Elementor read-back did not match the exact previewed placement.");
+						}
+						const publicUrl = `${liveSite(bindings)}/zipsided-outdoor-blinds/?bm_verify=${Date.now()}`;
+						const rendered = await fetch(publicUrl, {
+							headers: { Accept: "text/html" },
+							redirect: "manual",
+							signal: AbortSignal.timeout(30_000),
+						});
+						const html = await rendered.text();
+						if (
+							!rendered.ok ||
+							!html.includes(`player.vimeo.com/video/${args.video_id}`) ||
+							!html.includes(ZIPGRIP_VIDEO_HEADING)
+						) {
+							throw new Error("The public ZipGrip page did not render the new Vimeo section.");
+						}
+						return textResult({
+							action: "apply_placement",
+							write_performed: true,
+							verified: true,
+							rollback_required: false,
+							product: { id: product.id, name: product.name, status: product.status },
+							template_id: ZIPGRIP_TEMPLATE_ID,
+							template_sha256: verifiedHash,
+							video: videoSummary(video),
+							heading: ZIPGRIP_VIDEO_HEADING,
+							public_url: `${liveSite(bindings)}/zipsided-outdoor-blinds/`,
+							public_render_verified: true,
+						});
+					} catch (error) {
+						if (writeAttempted) {
+							try {
+								await writeZipGripTemplate(bindings, current.raw);
+								const restored = await getZipGripTemplate(bindings);
+								if ((await sha256(restored.raw)) !== currentHash) {
+									const rollbackVerificationError = new Error(
+										"Exact Elementor rollback verification failed.",
+									);
+									(rollbackVerificationError as any).cause = error;
+									throw rollbackVerificationError;
+								}
+							} catch (rollbackError) {
+								const combinedError = new Error(
+									`${error instanceof Error ? error.message : String(error)} Rollback also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+								);
+								(combinedError as any).cause = rollbackError;
+								throw combinedError;
+							}
+						}
+						throw error;
+					}
 				}
 
 				vimeoToken(bindings);
