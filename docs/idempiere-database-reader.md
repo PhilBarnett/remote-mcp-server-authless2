@@ -56,3 +56,31 @@ Run `npm run test:idempiere-db`, `npm run type-check`, and `npx wrangler deploy 
 After approved deployment/configuration, call `status`, then `columns` for each table. Read two scoped scanpoint/scan rows and inspect `indexes`/`triggers`; test that out-of-scope record IDs return no rows. Verify rejected writes using a separate controlled administrator test of the reader account, not by introducing a write tool. Do not process production documents or inventory as a connection test. Confirm returned timestamps' database timezone before building dashboard aggregation.
 
 To disable reads, remove/set `IDEMPIERE_DB_ENABLED=false`. To revoke access, an administrator can disable the dedicated LOGIN, terminate its sessions if needed, and revoke its grants. Revert the code PR independently. No production records need restoration because the reader performs no writes.
+
+
+## Product and order inspection extension
+
+Additional named tables are products (`m_product`), bom (`m_product_bom`), attributes
+(`m_attribute`), attribute_values (`m_attributevalue`), orders (`c_order`) and
+order_lines (`c_orderline`). Projections exclude customer details and free-form notes.
+The same tenant/org, role, TLS, time and page limits apply. `rows` supports a literal
+`name_contains` on products/attributes/attribute_values and `parent_id` on BOM
+(product ID), order lines (order ID) and attribute values (attribute ID).
+
+An administrator must first verify these tables and grant SELECT individually to
+`blindmotion_mcp_reader`; no grants are made by the MCP. For conventional schema:
+
+```sql
+GRANT SELECT ON adempiere.m_product, adempiere.m_product_bom,
+  adempiere.m_attribute, adempiere.m_attributevalue,
+  adempiere.c_order, adempiere.c_orderline TO blindmotion_mcp_reader;
+```
+
+Verify the actual BOM implementation: installations may use manufacturing BOM tables
+instead. An absent table fails closed. `mapping_dictionary` discovers only metadata
+for visible WooCommerce table/column names from information_schema (max 200 rows,
+truncation flag). It never reads WooCommerce Defaults rows or their API credentials.
+This is schema discovery, not yet a mapping-data reader: after discovery, add reviewed
+named projections for the installation's exact mapping tables. Existing role checks
+remain unchanged; do not grant role memberships or all-table/future-table access.
+

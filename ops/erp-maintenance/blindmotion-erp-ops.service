@@ -1,0 +1,27 @@
+[Unit]
+Description=Blindmotion ERP fixed-operation maintenance API
+After=network-online.target
+
+[Service]
+Type=simple
+User=blindmotion-erp-ops
+Group=blindmotion-erp-ops
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/blindmotion-erp-ops/service.py
+Restart=on-failure
+StateDirectory=blindmotion-erp-ops
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/blindmotion-erp-ops
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/blindmotion-erp-ops
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# sudo is used ONLY for the exact TEST unit start/stop commands below.
+# NoNewPrivileges cannot be enabled while using that narrowly scoped sudo rule.
+
+[Install]
+WantedBy=multi-user.target

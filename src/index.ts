@@ -1,3 +1,4 @@
+import { erpMaintenanceSchema, manageErpMaintenance, type MaintenanceEnv } from "./tools/erp-maintenance";
 import { googleExactBudgetSchema, prepareExactBudget, verifyExactBudget } from "./tools/google-budget-controls";
 import { idempiereDbSchema, readIdempiereDb, type DbEnv } from "./tools/idempiere-db";
 import { googleBudgetDiagnostics } from "./tools/google-budget-diagnostics";
@@ -4813,11 +4814,20 @@ function createServer() {
 	});
 
 	server.registerTool("read_idempiere_database", {
-		description: "Read-only, tenant/organisation-scoped iDempiere production and scan database audit. Supports connection status, dictionary columns, indexes, triggers, bounded rows and counts for five allowlisted tables. No arbitrary SQL, writes, inventory processing or credentials returned. Disabled until a restricted database connection is configured.",
+		description: "Read-only, tenant/organisation-scoped iDempiere production and scan database audit. Supports production/scans, products, BOMs, attributes and non-personal order summaries, plus Woo mapping schema discovery. Rows are scoped and bounded; no Woo credentials are read. No arbitrary SQL, writes, inventory processing or credentials returned. Disabled until a restricted database connection is configured.",
 		inputSchema: idempiereDbSchema,
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 	}, async (args) => {
 		try { return toolResult(await readIdempiereDb(args, env as unknown as DbEnv)); }
+		catch (error) { return toolError(error); }
+	});
+
+	server.registerTool("manage_idempiere_maintenance", {
+		description: "Preview and run server-side ERP backups or a production-to-TEST refresh. Disabled until the isolated maintenance service is installed. Start requires an exact, expiring plan hash and idempotent request ID. Never accepts SQL, credentials, commands or arbitrary restore targets. Cannot restore production. Poll job for results; interrupted cutovers require operator recovery.",
+		inputSchema: erpMaintenanceSchema,
+		annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+	}, async (args) => {
+		try { return toolResult(await manageErpMaintenance(args, env as unknown as MaintenanceEnv)); }
 		catch (error) { return toolError(error); }
 	});
 
@@ -16007,3 +16017,4 @@ function registerEquinoxTools(server: McpServer) {
 const handler = createMcpHandler(createServer);
 
 export default authenticatedMcp<Env & AuthEnv>(handler);
+

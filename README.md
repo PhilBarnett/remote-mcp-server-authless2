@@ -741,3 +741,14 @@ unchanged. The existing Meta test suite also runs daily-budget boundary tests.
 ## iDempiere direct database audit
 
 The authenticated `read_idempiere_database` tool provides bounded, read-only production/scanning queries. It remains disabled until a dedicated database role, verified TLS connection and explicit tenant/organisation scope are configured. See [setup and verification](docs/idempiere-database-reader.md). It cannot execute arbitrary SQL or update ERP records.
+
+
+## ERP backups and TEST refresh
+
+`manage_idempiere_maintenance` adds previewed, hash-locked, asynchronous backups and
+production-to-TEST refresh through a separate server-local service. It is disabled by
+default and cannot restore production or accept arbitrary commands/SQL.
+See [installation, commissioning and recovery](ops/erp-maintenance/README.md).
+The reader also supports scoped products, BOMs, attributes and order summaries; Woo
+mapping dictionary discovery returns metadata only, never API credentials. Expanded
+reader grants require administrator setup; the existing five-table grants stay unchanged.

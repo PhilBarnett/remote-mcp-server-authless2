@@ -1,0 +1,24 @@
+{
+  "refresh_enabled": false,
+  "token": "REPLACE_WITH_A_RANDOM_SERVER_SIDE_TOKEN_OF_AT_LEAST_43_CHARACTERS",
+  "production_db": "replace_production_database",
+  "test_db": "testerp",
+  "admin_db": "postgres",
+  "test_owner": "replace_test_owner",
+  "production_service": "bm_production_backup",
+  "test_service": "bm_test_backup",
+  "admin_service": "bm_test_admin",
+  "test_unit": "idempiere-test.service",
+  "pg_service_file": "/etc/blindmotion/pg_service.conf",
+  "pgpass_file": "/etc/blindmotion/pgpass",
+  "overlay_sql": "/etc/blindmotion/test-overlay.sql",
+  "verify_sql": "/etc/blindmotion/test-verify.sql",
+  "isolation_probe": "/etc/blindmotion/check-test-isolation",
+  "health_probe": "/etc/blindmotion/check-test-health",
+  "state_dir": "/var/lib/blindmotion-erp-ops",
+  "identities": {
+    "bm_production_backup": { "address": "REPLACE", "port": "5432", "role": "bm_backup_reader" },
+    "bm_test_backup": { "address": "REPLACE", "port": "5432", "role": "bm_test_backup" },
+    "bm_test_admin": { "address": "REPLACE", "port": "5432", "role": "bm_test_admin" }
+  }
+}

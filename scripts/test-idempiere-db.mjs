@@ -150,3 +150,25 @@ test("metadata queries bind schema/table; count is tenant scoped", async () => {
 		assert.equal(client.closed, true);
 	}
 });
+
+test("product search is literal and scoped; BOM parent filter is parameterised", () => {
+	const products = idempiereDbSchema.parse({ action: "rows", table: "products", name_contains: "a%' OR true--" });
+	const q = rowQuery(products, dbConfig(env), [...TABLES.products.columns]);
+	assert.match(q.text, /position\(lower\(\$3\) in lower\("name"\)\)/);
+	assert.doesNotMatch(q.text, /OR true/);
+	assert.equal(q.values[2], "a%' OR true--");
+	const bom = rowQuery(idempiereDbSchema.parse({ action: "rows", table: "bom", parent_id: 123 }), dbConfig(env), [...TABLES.bom.columns]);
+	assert.match(bom.text, /"m_product_id" = \$3/);
+	assert.equal(bom.values[2], 123);
+	assert.equal(idempiereDbSchema.safeParse({ action: "rows", table: "scans", parent_id: 1 }).success, false);
+});
+test("mapping discovery returns metadata only, never queries defaults records", async () => {
+	const client = mock();
+	const result = await readIdempiereDb({ action: "mapping_dictionary" }, env, () => client);
+	assert.equal(result.metadata_only, true);
+	const sql = client.calls.at(-2);
+	assert.match(sql.text, /information_schema.columns/);
+	assert.deepEqual(sql.values, ["adempiere"]);
+	assert.equal(idempiereDbSchema.safeParse({ action: "mapping_dictionary", table: "products" }).success, false);
+});
+

@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "src/**"
+      - "ops/erp-maintenance/**"
       - "scripts/**"
       - "package.json"
       - "package-lock.json"
@@ -74,5 +75,9 @@ jobs:
       - name: Test read-only iDempiere database guards
         run: npm run test:idempiere-db
 
+      - name: Test ERP maintenance service
+        run: python3 -m unittest discover -s ops/erp-maintenance -p 'test_*.py'
+
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 102
+        run: npm run audit:mcp-tools -- --max 103
+
