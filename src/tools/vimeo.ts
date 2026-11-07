@@ -280,6 +280,7 @@ function zipGripVideoSection(videoId: string) {
 	return {
 		id: ZIPGRIP_VIDEO_SECTION_ID,
 		elType: "section",
+		isInner: false,
 		settings: {
 			structure: "10",
 			content_width: { unit: "px", size: 1100, sizes: [] },
@@ -294,12 +295,14 @@ function zipGripVideoSection(videoId: string) {
 			{
 				id: ZIPGRIP_VIDEO_COLUMN_ID,
 				elType: "column",
+				isInner: false,
 				settings: { _column_size: 100, _inline_size: null },
 				elements: [
 					{
 						id: ZIPGRIP_VIDEO_HEADING_ID,
 						elType: "widget",
 						widgetType: "heading",
+						isInner: false,
 						settings: {
 							title: ZIPGRIP_VIDEO_HEADING,
 							header_size: "h2",
@@ -313,6 +316,7 @@ function zipGripVideoSection(videoId: string) {
 						id: ZIPGRIP_VIDEO_HTML_ID,
 						elType: "widget",
 						widgetType: "html",
+						isInner: false,
 						settings: {
 							html: `<div style="position:relative;padding-top:56.25%;overflow:hidden;background:#000;"><iframe src="${playerUrl}" title="ZipGrip outdoor blinds at Koolewong" style="position:absolute;inset:0;width:100%;height:100%;border:0;" allow="autoplay; fullscreen; picture-in-picture; clipboard-write; encrypted-media; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div>`,
 						},
