@@ -84,6 +84,7 @@ class MaintenanceTests(unittest.TestCase):
         restore = next(i for i, args in enumerate(self.calls) if args[0] == "/usr/bin/pg_restore" and "--dbname" in args)
         stop = next(i for i, args in enumerate(self.calls) if "stop" in args)
         self.assertLess(restore, stop)
+        self.assertNotIn("--single-transaction", self.calls[restore])
         self.assertIn("ENCODING 'UTF8' LOCALE_PROVIDER libc LC_COLLATE 'C' LC_CTYPE 'C'",
                       next(args[-1] for args in self.calls if args[-1].startswith("CREATE DATABASE")))
         for args in self.calls:

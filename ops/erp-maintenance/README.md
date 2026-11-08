@@ -83,7 +83,7 @@ Poll the same job after timeouts; do not invent a new start request to retry bli
 SQLite retains jobs/plans and a cross-process lock prevents overlapping jobs.
 
 The service dumps test and production in custom format, checks archive listings and
-SHA-256, creates an isolated candidate, restores transactionally, applies TEST settings
+SHA-256, creates an isolated candidate, restores with exit-on-error, applies TEST settings
 and asserts them before stopping TEST. It blocks old test connections, terminates only
 sessions for that test name, renames old test to test*_old_<job> and candidate to the
 configured test name, then starts TEST and runs its health probe. Production is only

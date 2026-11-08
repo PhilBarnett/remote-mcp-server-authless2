@@ -270,7 +270,7 @@ class Engine:
             admin = c["admin_service"]
             self.sql(admin, f'CREATE DATABASE "{candidate}" OWNER "{c["test_owner"]}" TEMPLATE template0'
                      " ENCODING 'UTF8' LOCALE_PROVIDER libc LC_COLLATE 'C' LC_CTYPE 'C'")
-            self.run(["/usr/bin/pg_restore", "--no-password", "--exit-on-error", "--single-transaction",
+            self.run(["/usr/bin/pg_restore", "--no-password", "--exit-on-error",
                       "--no-owner", "--no-privileges", "--no-subscriptions", "--role", c["test_owner"], "--dbname", self.conn(admin, candidate), str(source)], c, capture=False)
             # Overlay SQL/verification are root-owned installation files, never caller supplied.
             for key in ("overlay_sql", "verify_sql"):
