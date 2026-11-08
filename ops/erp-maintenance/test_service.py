@@ -48,7 +48,8 @@ class MaintenanceTests(unittest.TestCase):
                     service = args[args.index("--dbname") + 1].split("=", 1)[1]
                     db = {c["production_service"]: "idempiere", c["test_service"]: "idempiere_test", c["admin_service"]: "postgres"}[service]
                     return json.dumps({"database": db, "address": "127.0.0.1", "port": "5432",
-                                       "role": c["identities"][service]["role"], "oid": 100})
+                                       "role": c["identities"][service]["role"], "oid": 100,
+                                       "encoding": "UTF8", "locale_provider": "c", "collation": "C", "ctype": "C"})
             return ""
         self.engine = m.Engine(str(self.config_path), run)
 
@@ -83,6 +84,8 @@ class MaintenanceTests(unittest.TestCase):
         restore = next(i for i, args in enumerate(self.calls) if args[0] == "/usr/bin/pg_restore" and "--dbname" in args)
         stop = next(i for i, args in enumerate(self.calls) if "stop" in args)
         self.assertLess(restore, stop)
+        self.assertIn("ENCODING 'UTF8' LOCALE_PROVIDER libc LC_COLLATE 'C' LC_CTYPE 'C'",
+                      next(args[-1] for args in self.calls if args[-1].startswith("CREATE DATABASE")))
         for args in self.calls:
             if args[0] == "/usr/bin/psql" and any("CREATE DATABASE" in x or "ALTER DATABASE" in x for x in args):
                 self.assertIn("service=" + self.c["admin_service"], args)

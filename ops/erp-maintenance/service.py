@@ -128,7 +128,9 @@ class Engine:
     def identity(self, service, expected_db):
         raw = self.sql(service, "SELECT json_build_object('database',current_database(), 'address',"
                        "coalesce(inet_server_addr()::text,'local'), 'port',current_setting('port'),"
-                       " 'role',current_user, 'oid',(SELECT oid FROM pg_database WHERE datname=current_database()))")
+                       " 'role',current_user, 'oid',oid, 'encoding',pg_encoding_to_char(encoding),"
+                       " 'locale_provider',datlocprovider, 'collation',datcollate, 'ctype',datctype)"
+                       " FROM pg_database WHERE datname=current_database()")
         value = json.loads(raw)
         if value["database"] != expected_db:
             raise MaintenanceError("DATABASE_IDENTITY_MISMATCH")
@@ -152,6 +154,10 @@ class Engine:
             raise MaintenanceError("SOURCE_EQUALS_TARGET")
         if (target["address"], target["port"]) != (admin["address"], admin["port"]):
             raise MaintenanceError("ADMIN_SERVER_MISMATCH")
+        if operation == "refresh_test" and (
+                source["encoding"], source["locale_provider"], source["collation"], source["ctype"]
+        ) != ("UTF8", "c", "C", "C"):
+            raise MaintenanceError("SOURCE_ENCODING_OR_LOCALE_MISMATCH")
         # This root-owned probe must certify isolation of the TEST application, including outbound jobs/email.
         self.run([c["isolation_probe"]], c)
         if operation == "refresh_test" and not c.get("refresh_enabled", False):
@@ -262,7 +268,8 @@ class Engine:
             source, source_backup = self.backup(c["production_service"], job, "production")
             backups.append(source_backup)
             admin = c["admin_service"]
-            self.sql(admin, f'CREATE DATABASE "{candidate}" OWNER "{c["test_owner"]}" TEMPLATE template0')
+            self.sql(admin, f'CREATE DATABASE "{candidate}" OWNER "{c["test_owner"]}" TEMPLATE template0'
+                     " ENCODING 'UTF8' LOCALE_PROVIDER libc LC_COLLATE 'C' LC_CTYPE 'C'")
             self.run(["/usr/bin/pg_restore", "--no-password", "--exit-on-error", "--single-transaction",
                       "--no-owner", "--no-privileges", "--no-subscriptions", "--role", c["test_owner"], "--dbname", self.conn(admin, candidate), str(source)], c, capture=False)
             # Overlay SQL/verification are root-owned installation files, never caller supplied.
