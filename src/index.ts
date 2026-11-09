@@ -13001,6 +13001,155 @@ function createServer() {
 	);
 
 
+	// Premium Roller release: intentionally separate from the draft-only generic patch.
+	const rollerReleaseIds = [
+	  "690277bc4d9ea", "690277bc3f85c", "690277bceca41", "690277bcbd016",
+	  "690277bc8ef80", "690277bc12235", "690277bccf759", "690277bc5132a",
+	  "690277bcedc47", "690277bc6099a", "690277bcc9525", "69f338431af48",
+	  "69f33001190b7", "69f330ef6a093",
+	];
+	const rollerReleaseRule = z.object({
+	  field: wapfVisualFieldId, condition: z.literal("=="),
+	  value: wapfVisualChoiceSlug, generated: z.boolean(),
+	}).strict();
+	const rollerReleaseSchema = z.object({
+	  action: z.enum(["preview", "apply"]),
+	  product_id: z.literal(4788), expected_product_name: z.literal("Premium Roller Blinds"),
+	  expected_meta_data_id: genericWapfId, expected_field_group_sha256: genericWapfHash,
+	  condition_updates: z.array(z.object({
+	    field_id: wapfVisualFieldId, expected_label: z.string().max(300),
+	    conditionals: z.array(z.object({ rules: z.array(rollerReleaseRule).min(1).max(12) }).strict()).min(1).max(30),
+	  }).strict()).min(1).max(14),
+	  explorer_remotes: z.object({
+	    one_channel: wapfPatchExistingImage,
+	    sixteen_channel: wapfPatchExistingImage,
+	  }).strict().optional(),
+	  expected_plan_sha256: genericWapfHash.optional(),
+	  confirmation: z.literal("CONFIRM APPLY PREMIUM ROLLER RELEASE").optional(),
+	}).strict();
+	type RollerReleaseInput = z.infer<typeof rollerReleaseSchema>;
+	
+	function rollerReleaseIdentity(product: any) {
+	  if (product.id !== 4788 || product.name !== "Premium Roller Blinds" ||
+	      product.status !== "publish" || product.catalog_visibility !== "visible") {
+	    throw new Error("Premium Roller live identity or publication state changed.");
+	  }
+	}
+	
+	async function prepareRollerRelease(args: RollerReleaseInput) {
+	  const product = await (await wcFetch("products/4788")).json<any>();
+	  rollerReleaseIdentity(product);
+	  const wapf = genericWapf(product);
+	  const beforeHash = await genericWapfHashOf(wapf.meta.value);
+	  if (wapf.meta.id !== args.expected_meta_data_id || beforeHash !== args.expected_field_group_sha256) {
+	    throw new Error("Live WAPF changed; inspect and preview again. Nothing written.");
+	  }
+	  const group = structuredClone(wapf.group);
+	  const fieldIds = group.fields.map(genericWapfFieldId);
+	  if (new Set(fieldIds).size !== fieldIds.length) throw new Error("Ambiguous WAPF field identities.");
+	  const updates = args.condition_updates;
+	  if (new Set(updates.map(x => x.field_id)).size !== updates.length) throw new Error("Duplicate field update.");
+	  const changes: any[] = [];
+	  for (const update of updates) {
+	    if (!rollerReleaseIds.includes(update.field_id)) throw new Error("Field is outside the roller release allowlist.");
+	    const field = group.fields.find((f: any) => genericWapfFieldId(f) === update.field_id);
+	    if (!field || wapfFieldLabel(field) !== update.expected_label) throw new Error("Field label or identity changed.");
+	    for (const condition of update.conditionals) {
+	      for (const rule of condition.rules) {
+	        const source = group.fields.find((f: any) => genericWapfFieldId(f) === rule.field);
+	        if (!source?.options?.choices?.some((c: any) => c.slug === rule.value) || rule.field === update.field_id) {
+	          throw new Error("Conditional refers to a missing choice or itself.");
+	        }
+	      }
+	    }
+	    changes.push({ field_id: update.field_id, property: "conditionals", before: field.conditionals, after: update.conditionals });
+	    field.conditionals = structuredClone(update.conditionals);
+	  }
+	  if (args.explorer_remotes) {
+	    const field = group.fields.find((f: any) => genericWapfFieldId(f) === "69f330ef6a093");
+	    if (field?.label !== "Remote control options - Alpha" || field.type !== "image-swatch") throw new Error("Alpha field changed.");
+	    const choices = field.options?.choices;
+	    const expected = [
+	      ["0xqij", "Alpha 1 channel", "77"],
+	      ["csn4i", "Alpha 8 channel", "88"],
+	      ["sfea6", "Alpha 16 channel", "88"],
+	      ["6njqw", "No remote required on this blind", "0"],
+	    ];
+	    if (!Array.isArray(choices) || choices.length !== 4 || expected.some(([slug, label, amount], i) =>
+	      choices[i].slug !== slug || choices[i].label !== label || String(choices[i].pricing_amount) !== amount ||
+	      choices[i].pricing_type !== (i === 3 ? "none" : "fixed"))) throw new Error("Alpha remote choices or prices changed.");
+	    const removed = "csn4i";
+	    if (JSON.stringify({ ...group, fields: group.fields.filter((f: any) => f !== field) }).includes(removed)) {
+	      throw new Error("The removed eight-channel choice is still referenced elsewhere.");
+	    }
+	    const images = [args.explorer_remotes.one_channel, args.explorer_remotes.sixteen_channel];
+	    if (images[0].attachment_id === images[1].attachment_id) throw new Error("Explorer images must be distinct.");
+	    const media = await loadWapfPatchMedia(images, false);
+	    const before = structuredClone(choices);
+	    field.options.choices = [choices[0], choices[2], choices[3]];
+	    for (let i = 0; i < 2; i++) {
+	      const image = media.get(wapfPatchImageKey(images[i]))!;
+	      if (new URL(image.source_url).origin !== "https://online.blindmotion.com.au") throw new Error("Explorer image must be hosted on live.");
+	      Object.assign(field.options.choices[i], {
+	        label: i === 0 ? "Alpha Explorer 1 channel remote" : "Alpha Explorer 16 channel remote",
+	        pricing_type: "fixed", pricing_amount: 66, image: image.source_url, attachment: image.attachment,
+	      });
+	    }
+	    changes.push({ field_id: field.id, property: "options.choices", before, after: field.options.choices });
+	  }
+	  const value = typeof wapf.meta.value === "string" ? JSON.stringify(group) : group;
+	  const afterHash = await genericWapfHashOf(value);
+	  if (afterHash === beforeHash) throw new Error("No changes to release.");
+	  const planHash = await genericWapfHashOf({ version: 1, product_id: 4788, meta_data_id: wapf.meta.id, beforeHash, afterHash, changes });
+	  return { product, wapf, value, beforeHash, afterHash, planHash, changes };
+	}
+	
+	server.registerTool("manage_premium_roller_release", {
+	  description: "Preview/apply the scoped live Premium Roller 4788 release: only 14 allowlisted visibility rules and optional Alpha Explorer 1/16 remotes at AUD66, retaining no-remote. Preserves other fields, formulas, content and publication. Requires current metadata/group and preview hashes; returns full WAPF backup; verifies exact write and guarded rollback. No generic published-product editing or media upload.",
+	  inputSchema: rollerReleaseSchema,
+	}, async (args) => {
+	  try {
+	    const plan = await prepareRollerRelease(args);
+	    const backup = { product_id: 4788, meta_data_id: plan.wapf.meta.id, field_group_sha256: plan.beforeHash, value: plan.wapf.meta.value };
+	    if (args.action === "preview") return toolResult({ write_performed: false, plan_sha256: plan.planHash,
+	      before_field_group_sha256: plan.beforeHash, after_field_group_sha256: plan.afterHash, changes: plan.changes, backup });
+	    if (args.confirmation !== "CONFIRM APPLY PREMIUM ROLLER RELEASE" || args.expected_plan_sha256 !== plan.planHash) {
+	      throw new Error("Exact release confirmation and current preview hash required.");
+	    }
+	    // Recheck after media validation, immediately before the single metadata write.
+	    const current = await (await wcFetch("products/4788")).json<any>();
+	    rollerReleaseIdentity(current);
+	    const currentWapf = genericWapf(current);
+	    if (currentWapf.meta.id !== plan.wapf.meta.id || await genericWapfHashOf(currentWapf.meta.value) !== plan.beforeHash) {
+	      throw new Error("Concurrent edit detected before write; nothing written.");
+	    }
+	    const put = (value: unknown) => wcWrite("products/4788", { meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value }] });
+	    let writeError: unknown;
+	    try { await put(plan.value); } catch (error) { writeError = error; }
+	    // Reconcile even when the write response is lost; never blindly repeat a write.
+	    let verified: any;
+	    try { verified = await (await wcFetch("products/4788")).json<any>(); }
+	    catch { return toolResult({ updated: "unknown", manual_reconciliation_required: true, backup,
+	      expected_after_field_group_sha256: plan.afterHash, message: "Write outcome cannot be read. Do not retry apply or rollback until inspected." }); }
+	    const observedWapf = genericWapf(verified);
+	    const observedHash = await genericWapfHashOf(observedWapf.meta.value);
+	    const identityMatches = verified.id === 4788 && verified.name === "Premium Roller Blinds" &&
+	      verified.status === "publish" && verified.catalog_visibility === "visible" && observedWapf.meta.id === plan.wapf.meta.id;
+	    if (observedHash === plan.afterHash && identityMatches) return toolResult({ updated: true, product_id: 4788,
+	      before_field_group_sha256: plan.beforeHash, after_field_group_sha256: observedHash, changes: plan.changes, backup });
+	    if (observedHash === plan.beforeHash) throw new Error("Release did not persist; original WAPF remains. " + String(writeError ?? ""));
+	    // Only roll back our exact output, never an intervening third-party edit.
+	    if (observedHash !== plan.afterHash || observedWapf.meta.id !== plan.wapf.meta.id) return toolResult({ updated: "unknown",
+	      manual_reconciliation_required: true, observed_field_group_sha256: observedHash, backup,
+	      message: "Unexpected WAPF state. Automatic rollback withheld to preserve possible concurrent edits." });
+	    await put(plan.wapf.meta.value);
+	    const restored = await (await wcFetch("products/4788")).json<any>();
+	    if (await genericWapfHashOf(genericWapf(restored).meta.value) !== plan.beforeHash) throw new Error("Rollback verification failed; manual reconciliation required.");
+	    return toolResult({ updated: false, rolled_back: true, backup, message: "Publication/identity verification failed; original WAPF restored. Investigate concurrent product changes." });
+	  } catch (error) { return toolError(error); }
+	});
+	
+
 	/* Guarded outdoor-fabric replacement for live or draft WAPF products. The
 	 * caller supplies every product, field, label, colour and source URL at
 	 * runtime. Pricing is copied from the existing selector choices and verified
