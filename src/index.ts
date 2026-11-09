@@ -12934,73 +12934,6 @@ function createServer() {
 		return { product, wapf, beforeHash, afterHash, planHash, updatedFields, updatedValue };
 	}
 
-	server.registerTool(
-		"preview_wapf_field_reconfiguration",
-		{
-			description: "Preview a parameter-driven WAPF field reconfiguration on one exact draft/hidden product. Validates field identities, complete replacement choices, prices, conditions, existing media and hash-locked remote images; detects orphaned references and performs no writes.",
-			inputSchema: wapfPatchBase,
-		},
-		async (args) => {
-			try {
-				const plan = await buildWapfPatchPlan(args);
-				return toolResult({ write_performed: false,
-					product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
-					before_field_group_sha256: plan.beforeHash, plan_sha256: plan.planHash,
-					removed_fields: args.remove_fields, replaced_fields: args.replace_fields.map((field) => ({
-						field_id: field.field_id, old_label: field.expected_label, new_label: field.new_label,
-						new_type: field.new_type, choice_count: field.choices.length, condition_group_count: field.condition_groups.length,
-						choices: field.choices.map((choice) => ({ label: choice.label, slug: choice.slug,
-							pricing_type: choice.pricing_type, pricing_amount: choice.pricing_amount, image: choice.image })),
-					})),
-					resulting_field_count: plan.updatedFields.length,
-				});
-			} catch (error) { return toolError(error); }
-		},
-	);
-
-	server.registerTool(
-		"apply_wapf_field_reconfiguration_guarded",
-		{
-			description: "Apply one exact previewed, parameter-driven WAPF field reconfiguration to a draft/hidden product. Revalidates the product hash, fields, prices, conditions and hash-locked media; uploads missing remote images, changes only the WAPF field group, verifies the exact result and rolls back on failure. Cannot publish.",
-			inputSchema: wapfPatchBase.extend({ expected_plan_sha256: genericWapfHash,
-				confirmation: z.literal(wapfPatchConfirmation) }),
-		},
-		async (args) => {
-			try {
-				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
-				const preview = await buildWapfPatchPlan(args, false, product);
-				if (preview.planHash !== args.expected_plan_sha256) throw new Error("The deterministic WAPF plan changed after preview; refusing write.");
-				const plan = await buildWapfPatchPlan(args, true, product);
-				if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) throw new Error("The applied WAPF plan changed while resolving media; refusing write.");
-				try {
-					await wcWrite("products/" + args.product_id, { meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }] });
-					const verified = await (await wcFetch("products/" + args.product_id)).json<any>();
-					const verifiedHash = await genericWapfHashOf(genericWapf(verified).meta.value);
-					if (verified.id !== args.product_id || verified.name !== args.expected_product_name || verified.status !== "draft" ||
-						verified.catalog_visibility !== "hidden" || verifiedHash !== plan.afterHash) {
-						throw new Error("Post-write WAPF field reconfiguration verification failed.");
-					}
-					return toolResult({ updated: true, product_id: verified.id,
-						removed_field_ids: args.remove_fields.map((field) => field.field_id),
-						replaced_field_ids: args.replace_fields.map((field) => field.field_id),
-						before_field_group_sha256: plan.beforeHash, after_field_group_sha256: verifiedHash,
-						field_count: plan.updatedFields.length,
-						untouched: ["product identity", "draft/hidden state", "unselected WAPF fields", "non-WAPF product data"],
-					});
-				} catch (writeError) {
-					await wcWrite("products/" + args.product_id, { meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }] });
-					const rolledBack = await (await wcFetch("products/" + args.product_id)).json<any>();
-					if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
-						throw new Error("WAPF field reconfiguration and exact rollback verification both failed.");
-					}
-					throw new Error("WAPF field reconfiguration failed; exact rollback succeeded: " +
-						(writeError instanceof Error ? writeError.message : String(writeError)));
-				}
-			} catch (error) { return toolError(error); }
-		},
-	);
-
-
 	// Premium Roller release: intentionally separate from the draft-only generic patch.
 	const rollerReleaseIds = [
 	  "690277bc4d9ea", "690277bc3f85c", "690277bceca41", "690277bcbd016",
@@ -13104,10 +13037,7 @@ function createServer() {
 	  return { product, wapf, value, beforeHash, afterHash, planHash, changes };
 	}
 	
-	server.registerTool("manage_premium_roller_release", {
-	  description: "Preview/apply the scoped live Premium Roller 4788 release: only 14 allowlisted visibility rules and optional Alpha Explorer 1/16 remotes at AUD66, retaining no-remote. Preserves other fields, formulas, content and publication. Requires current metadata/group and preview hashes; returns full WAPF backup; verifies exact write and guarded rollback. No generic published-product editing or media upload.",
-	  inputSchema: rollerReleaseSchema,
-	}, async (args) => {
+	async function handleRollerRelease(args: RollerReleaseInput) {
 	  try {
 	    const plan = await prepareRollerRelease(args);
 	    const backup = { product_id: 4788, meta_data_id: plan.wapf.meta.id, field_group_sha256: plan.beforeHash, value: plan.wapf.meta.value };
@@ -13147,8 +13077,75 @@ function createServer() {
 	    if (await genericWapfHashOf(genericWapf(restored).meta.value) !== plan.beforeHash) throw new Error("Rollback verification failed; manual reconciliation required.");
 	    return toolResult({ updated: false, rolled_back: true, backup, message: "Publication/identity verification failed; original WAPF restored. Investigate concurrent product changes." });
 	  } catch (error) { return toolError(error); }
-	});
+	}
 	
+	server.registerTool(
+		"preview_wapf_field_reconfiguration",
+		{
+			description: "Preview a parameter-driven WAPF field reconfiguration on one exact draft/hidden product. Validates field identities, complete replacement choices, prices, conditions, existing media and hash-locked remote images; detects orphaned references and performs no writes for the legacy draft input. With action preview/apply, supports the dedicated live Premium Roller 4788 release only: 14 allowlisted conditional fields and optional Explorer 1/16 remotes at AUD66. Live apply requires exact confirmation and preview hash, returns full backup, verifies writes and guards rollback. Preserves all other content and publication.",
+			inputSchema: z.union([rollerReleaseSchema, wapfPatchBase]),
+		},
+		async (args) => {
+			if ("action" in args) return handleRollerRelease(args);
+			try {
+				const plan = await buildWapfPatchPlan(args);
+				return toolResult({ write_performed: false,
+					product: { id: plan.product.id, name: plan.product.name, status: plan.product.status, catalog_visibility: plan.product.catalog_visibility },
+					before_field_group_sha256: plan.beforeHash, plan_sha256: plan.planHash,
+					removed_fields: args.remove_fields, replaced_fields: args.replace_fields.map((field) => ({
+						field_id: field.field_id, old_label: field.expected_label, new_label: field.new_label,
+						new_type: field.new_type, choice_count: field.choices.length, condition_group_count: field.condition_groups.length,
+						choices: field.choices.map((choice) => ({ label: choice.label, slug: choice.slug,
+							pricing_type: choice.pricing_type, pricing_amount: choice.pricing_amount, image: choice.image })),
+					})),
+					resulting_field_count: plan.updatedFields.length,
+				});
+			} catch (error) { return toolError(error); }
+		},
+	);
+
+	server.registerTool(
+		"apply_wapf_field_reconfiguration_guarded",
+		{
+			description: "Apply one exact previewed, parameter-driven WAPF field reconfiguration to a draft/hidden product. Revalidates the product hash, fields, prices, conditions and hash-locked media; uploads missing remote images, changes only the WAPF field group, verifies the exact result and rolls back on failure. Cannot publish.",
+			inputSchema: wapfPatchBase.extend({ expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal(wapfPatchConfirmation) }),
+		},
+		async (args) => {
+			try {
+				const product = await (await wcFetch("products/" + args.product_id)).json<any>();
+				const preview = await buildWapfPatchPlan(args, false, product);
+				if (preview.planHash !== args.expected_plan_sha256) throw new Error("The deterministic WAPF plan changed after preview; refusing write.");
+				const plan = await buildWapfPatchPlan(args, true, product);
+				if (plan.planHash !== args.expected_plan_sha256 || !plan.afterHash) throw new Error("The applied WAPF plan changed while resolving media; refusing write.");
+				try {
+					await wcWrite("products/" + args.product_id, { meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.updatedValue }] });
+					const verified = await (await wcFetch("products/" + args.product_id)).json<any>();
+					const verifiedHash = await genericWapfHashOf(genericWapf(verified).meta.value);
+					if (verified.id !== args.product_id || verified.name !== args.expected_product_name || verified.status !== "draft" ||
+						verified.catalog_visibility !== "hidden" || verifiedHash !== plan.afterHash) {
+						throw new Error("Post-write WAPF field reconfiguration verification failed.");
+					}
+					return toolResult({ updated: true, product_id: verified.id,
+						removed_field_ids: args.remove_fields.map((field) => field.field_id),
+						replaced_field_ids: args.replace_fields.map((field) => field.field_id),
+						before_field_group_sha256: plan.beforeHash, after_field_group_sha256: verifiedHash,
+						field_count: plan.updatedFields.length,
+						untouched: ["product identity", "draft/hidden state", "unselected WAPF fields", "non-WAPF product data"],
+					});
+				} catch (writeError) {
+					await wcWrite("products/" + args.product_id, { meta_data: [{ id: plan.wapf.meta.id, key: "_wapf_fieldgroup", value: plan.wapf.meta.value }] });
+					const rolledBack = await (await wcFetch("products/" + args.product_id)).json<any>();
+					if (await genericWapfHashOf(genericWapf(rolledBack).meta.value) !== plan.beforeHash) {
+						throw new Error("WAPF field reconfiguration and exact rollback verification both failed.");
+					}
+					throw new Error("WAPF field reconfiguration failed; exact rollback succeeded: " +
+						(writeError instanceof Error ? writeError.message : String(writeError)));
+				}
+			} catch (error) { return toolError(error); }
+		},
+	);
+
 
 	/* Guarded outdoor-fabric replacement for live or draft WAPF products. The
 	 * caller supplies every product, field, label, colour and source URL at
