@@ -13,10 +13,13 @@ export function isRollerOnlySampleOrder(order: any): boolean {
 	let selected = false;
 	for (const item of items) {
 		const product = meta(item, "Product");
-		const roller = meta(item, "Type of Roller Blinds");
+		const rollerSelections = (Array.isArray(item?.meta_data) ? item.meta_data : []).filter(
+			(m: any) => ["type of indoor blinds", "type of roller blinds"].includes(text(m.key)),
+		);
+		const roller = rollerSelections.length === 1 ? text(rollerSelections[0].value) : "";
 		const outdoor = meta(item, "Type of Outdoor Blinds");
-		if (!product && !roller && !outdoor && !(item.meta_data ?? []).some((m: any) => ["product", "type of roller blinds", "type of outdoor blinds"].includes(text(m.key)))) continue;
-		if (product !== "indoor blinds" || !["everyday roller blinds", "premium roller blinds"].includes(roller)) return false;
+		if (!product && !rollerSelections.length && !outdoor && !(item.meta_data ?? []).some((m: any) => ["product", "type of outdoor blinds"].includes(text(m.key)))) continue;
+		if (product !== "indoor blinds" || outdoor || !["everyday roller blinds", "premium roller blinds"].includes(roller)) return false;
 		selected = true;
 	}
 	return selected;
