@@ -24,3 +24,26 @@ test('roller purchase excludes samples, unrelated products and unpaid orders',()
  assert.equal(isRollerPurchaseOrder(order([{product_id:111,total:'100'}],{total:'110'})),false);
  assert.equal(isRollerPurchaseOrder(order([{product_id:3839,total:'NaN'}],{total:'110'})),false);
 });
+
+test('current indoor selector classifies explicit roller samples without landing attribution', () => {
+ const currentSample = (range) => ({
+  product_id: 128,
+  meta_data: [
+   {key: 'Product', value: 'Indoor Blinds'},
+   {key: 'Type of Indoor Blinds', value: range},
+  ],
+ });
+ const everyday = currentSample('Everyday Roller Blinds');
+ const premium = currentSample('Premium Roller Blinds');
+ assert.equal(isRollerOnlySampleOrder(order([everyday, premium])), true);
+ assert.equal(isRollerOnlySampleOrder(order([sample(), premium])), true);
+ assert.equal(isRollerOnlySampleOrder(order([everyday, currentSample('Roman Blinds')])), false);
+ assert.equal(isRollerOnlySampleOrder(order([everyday, {
+  product_id: 128,
+  meta_data: [{key: 'Type of Indoor Blinds', value: 'Roman Blinds'}],
+ }])), false);
+ assert.equal(isRollerOnlySampleOrder(order([{
+  ...everyday,
+  meta_data: [...everyday.meta_data, {key: 'Type of Roller Blinds', value: 'Premium Roller Blinds'}],
+ }])), false);
+});
