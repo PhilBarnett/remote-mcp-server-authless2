@@ -1,8 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { matchesSampleAttribution } from '../src/tools/sample-cohort-attribution.ts';
 import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from '../src/tools/roller-cohort.ts';
 const sample = (product='Indoor Blinds', roller='Everyday Roller Blinds') => ({product_id:128,meta_data:[{key:'Product',value:product},{key:'Type of Roller Blinds',value:roller}]});
 const order = (items, extra={}) => ({status:'completed',total:'0.00',line_items:items,...extra});
+test('sample attribution compares only supplied fields against the WooCommerce UTM values', () => {
+ const attribution = {utm_source: ' fb ', utm_medium: 'paid', utm_campaign: '52667333206000'};
+ assert.equal(matchesSampleAttribution(attribution, {campaign: '52667333206000'}), true);
+ assert.equal(matchesSampleAttribution(attribution, {source: 'fb', medium: 'paid'}), true);
+ assert.equal(matchesSampleAttribution(attribution, {source: 'fb', campaign: '52667333206001'}), false);
+ assert.equal(matchesSampleAttribution({...attribution, utm_campaign: null}, {campaign: '52667333206000'}), false);
+});
 test('explicit roller selection wins over conflicting advertising attribution',()=>{
  assert.equal(isRollerOnlySampleOrder(order([sample()],{attribution:{sample_intent:'Outdoor'}})),true);
  assert.equal(isRollerOnlySampleOrder(order([sample('Indoor Blinds','Premium Roller Blinds')])),true);

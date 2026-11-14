@@ -9,6 +9,7 @@ import { EQUINOX_PRICING_PATHS, verifyEquinoxPricing, assertEquinoxPricingReadOn
 import { purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnosticResult } from "./tools/ga4-purchase-diagnostics";
 import { canonicalItemReporting } from "./tools/ga4-item-reporting";
 import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from "./tools/roller-cohort";
+import { matchesSampleAttribution } from "./tools/sample-cohort-attribution";
 import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
@@ -5357,12 +5358,20 @@ function createServer() {
 		"get_sample_to_purchase_cohort",
 		{
 			description:
-				"Measure all-product, ZipGrip or roller-only Fabric Sample to genuine-purchase conversion using privacy-safe first-party WooCommerce matching. Customer identifiers are used only inside the Worker; no customer PII or reusable identity key is returned.",
+				"Measure all-product, ZipGrip or roller-only Fabric Sample to genuine-purchase conversion using privacy-safe first-party WooCommerce matching. Optionally filter by WooCommerce source, medium or campaign on the customer's first qualifying sample in the cohort. Filtered results are aggregate only.",
 			inputSchema: z.object({
 				start_date: z.string().date(),
 				end_date: z.string().date(),
 				as_of_date: z.string().date().optional(),
 				product_scope: z.enum(["all", "zipgrip", "roller"]).default("all"),
+				sample_attribution: z.object({
+					source: z.string().trim().min(1).max(200).optional(),
+					medium: z.string().trim().min(1).max(200).optional(),
+					campaign: z.string().trim().min(1).max(200).optional(),
+				}).refine((filter) => Object.values(filter).some(Boolean), {
+					message: "Supply at least one sample attribution field.",
+				}).optional(),
+				aggregate_only: z.boolean().default(false),
 				gross_margin_pct: z.number().min(0).max(100).default(51),
 				windows_days: z
 					.array(z.number().int().min(7).max(365))
@@ -5376,6 +5385,8 @@ function createServer() {
 			end_date,
 			as_of_date,
 			product_scope,
+			sample_attribution,
+			aggregate_only,
 			gross_margin_pct,
 			windows_days,
 		}) => {
@@ -5400,6 +5411,7 @@ function createServer() {
 
 				const windows = [...new Set(windows_days)].sort((a, b) => a - b);
 				const orders = await getAllOrders(start_date, asOfDate);
+				const hideMatches = aggregate_only || Boolean(sample_attribution);
 				const sampleOrders = orders
 					.filter((order) => {
 						const orderMs = cohortDateMs(orderSydneyDate(order));
@@ -5506,7 +5518,14 @@ function createServer() {
 					}
 				}
 
-				const matchableCustomers = customers.filter((customer) => customer.matchable);
+				const sampleOrdersById = new Map(sampleOrders.map((order) => [Number(order.id), order]));
+				const cohortCustomers = sample_attribution
+					? customers.filter((customer) => matchesSampleAttribution(
+						safeOrderAttribution(sampleOrdersById.get(customer.first_sample_order_id)),
+						sample_attribution,
+					))
+					: customers;
+				const matchableCustomers = cohortCustomers.filter((customer) => customer.matchable);
 
 				function purchaseMatchMethod(customer: CohortCustomer, order: any) {
 					const purchaseEmail = normaliseCohortEmail(order?.billing?.email);
@@ -5625,6 +5644,10 @@ function createServer() {
 							: grossRevenue;
 					const maturedCount = matured.length;
 					const convertedCount = conversions.length;
+					const purchaseOrderCount = conversions.reduce(
+						(total, conversion) => total + conversion.purchase_order_ids.length,
+						0,
+					);
 					const matchMethodCounts = conversions.reduce(
 						(counts, conversion) => {
 							counts[conversion.match_method] =
@@ -5640,13 +5663,13 @@ function createServer() {
 						converted_customers: convertedCount,
 						conversion_rate: maturedCount ? convertedCount / maturedCount : null,
 						match_methods: matchMethodCounts,
-						purchase_order_count: conversions.reduce(
-							(total, conversion) => total + conversion.purchase_order_ids.length,
-							0,
-						),
+						purchase_order_count: purchaseOrderCount,
 						gross_revenue_aud: Number(grossRevenue.toFixed(2)),
 						refunds_aud: Number(refunds.toFixed(2)),
 						net_revenue_aud: Number(netRevenue.toFixed(2)),
+						average_net_order_value_aud: purchaseOrderCount
+							? Number((netRevenue / purchaseOrderCount).toFixed(2))
+							: null,
 						scoped_product_revenue_aud: Number(scopedProductRevenue.toFixed(2)),
 						average_net_revenue_per_converted_customer_aud: convertedCount
 							? Number((netRevenue / convertedCount).toFixed(2))
@@ -5675,7 +5698,7 @@ function createServer() {
 									).toFixed(2),
 								)
 								: null,
-						matches: conversions,
+						...(!hideMatches && { matches: conversions }),
 					};
 				});
 
@@ -5688,13 +5711,15 @@ function createServer() {
 						product_scope,
 						gross_margin_pct,
 					},
-					sample_order_count: sampleOrders.length,
-					unique_sample_customers: customers.length,
+					sample_order_count: sample_attribution
+						? cohortCustomers.reduce((count, customer) => count + customer.sample_order_ids.length, 0)
+						: sampleOrders.length,
+					unique_sample_customers: cohortCustomers.length,
 					matchable_sample_customers: matchableCustomers.length,
 					unmatchable_sample_customers:
-						customers.length - matchableCustomers.length,
-					identity_coverage_rate: customers.length
-						? matchableCustomers.length / customers.length
+						cohortCustomers.length - matchableCustomers.length,
+					identity_coverage_rate: cohortCustomers.length
+						? matchableCustomers.length / cohortCustomers.length
 						: null,
 					windows: windowResults,
 					privacy: {
@@ -5703,9 +5728,13 @@ function createServer() {
 						customer_id_returned: false,
 						reusable_customer_key_returned: false,
 						matching_performed_inside_worker: true,
+						aggregate_only: hideMatches,
 						match_priority: ["email", "phone", "customer_id"],
 					},
 					methodology: {
+						sample_attribution: sample_attribution
+							? "Exact WooCommerce UTM values on each customer's first qualifying sample order inside the requested cohort dates. Sample order count includes all qualifying sample orders from the selected customers in those dates. Later purchase attribution does not affect the match. This does not measure view-through or incremental attribution."
+							: null,
 						scoped_revenue_definition: "Scoped product revenue uses discounted line totals excluding tax and shipping, before refunds. Gross/net order revenue includes all products, tax and shipping; order-level refunds cannot be allocated to roller lines. This is observed revenue, not incremental value.",
 						sample_definition:
 							product_scope === "roller" ? "Zero-total processing/completed sample-only order with explicit Everyday/Premium roller selections; mixed and unknown selections excluded. Landing attribution is not used." : product_scope === "zipgrip"
