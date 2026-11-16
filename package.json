@@ -15,7 +15,7 @@
 		"type-check": "tsc --noEmit",
 		"audit:mcp-tools": "node scripts/audit-mcp-tools.mjs",
 		"test:mcp-auth": "node scripts/test-mcp-auth.mjs",
-		"test:meta-comments": "node --experimental-strip-types --test scripts/test-meta-comments.mjs && node scripts/test-meta-comments-runtime.mjs",
+		"test:meta-comments": "node --experimental-strip-types --test scripts/test-meta-comments.mjs && node scripts/test-meta-comments-runtime.mjs && node --test scripts/test-facebook-pricing-reply.mjs",
 		"test:vimeo": "node --experimental-strip-types --test scripts/test-vimeo.mjs"
 	},
 	"dependencies": {

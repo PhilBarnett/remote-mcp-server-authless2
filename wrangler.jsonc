@@ -8,6 +8,10 @@
 	"name": "remote-mcp-server-authless2",
 	"keep_vars": true,
 	"kv_namespaces": [{ "binding": "OAUTH_KV" }],
+	"durable_objects": {
+		"bindings": [{ "name": "FACEBOOK_REPLY_LEDGER", "class_name": "FacebookReplyLedger" }],
+	},
+	"migrations": [{ "tag": "facebook-reply-ledger-v1", "new_sqlite_classes": ["FacebookReplyLedger"] }],
 	"main": "src/index.ts",
 	"compatibility_date": "2026-07-02",
 	"compatibility_flags": ["nodejs_compat"],

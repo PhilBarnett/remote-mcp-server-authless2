@@ -10,7 +10,8 @@ import { purchaseDiagnosticSchema, purchaseDiagnosticRequest, purchaseDiagnostic
 import { canonicalItemReporting } from "./tools/ga4-item-reporting";
 import { isRollerOnlySampleOrder, isRollerPurchaseOrder, rollerPurchaseLineRevenue } from "./tools/roller-cohort";
 import { matchesSampleAttribution } from "./tools/sample-cohort-attribution";
-import { env } from "cloudflare:workers";
+import { DurableObject, env } from "cloudflare:workers";
+import { facebookPricingReplySchema, runFacebookPricingReply } from "./tools/facebook-pricing-reply";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
@@ -8150,6 +8151,32 @@ function createServer() {
 	);
 
 	server.registerTool(
+		"publish_facebook_pricing_reply",
+		{
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+			description:
+				"Check status, preview, or publish one templated pricing reply on an owned Blindmotion Facebook Page. Publish only when the user has authorised automatic replies for this Page and purpose. Accepts no arbitrary reply text. Unclear product context, non-pricing questions and uncertain outcomes go to human review. Never repeat an unconfirmed write.",
+			inputSchema: facebookPricingReplySchema,
+		},
+		async (args) => {
+			try {
+				const bindings = env as unknown as Env & FacebookReplyBindings;
+				const token = bindings.META_COMMENTS_ACCESS_TOKEN?.trim();
+				const stub = args.action === "publish"
+					? bindings.FACEBOOK_REPLY_LEDGER?.getByName(args.page_id + ":" + args.comment_id.replace(/^\d+_/, ""))
+					: undefined;
+				const ledger = stub && {
+					reserve: () => stub.reserve(),
+					save: (replyId: string) => stub.save(replyId),
+				};
+				return toolResult(await runFacebookPricingReply(args, getMetaConfig(), token, ledger));
+			} catch (error) {
+				return toolError(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"get_meta_lead_campaign_assets",
 		{
 			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -16177,6 +16204,27 @@ function registerEquinoxTools(server: McpServer) {
 		} catch (error) { return toolError(error); }
 	});
 	return server;
+}
+
+interface FacebookReplyBindings {
+	META_COMMENTS_ACCESS_TOKEN?: string;
+	FACEBOOK_REPLY_LEDGER?: DurableObjectNamespace<FacebookReplyLedger>;
+}
+
+// Each object is scoped to one Page and parent comment. The pending record remains
+// if execution stops after a publish attempt, so a retry cannot post twice.
+export class FacebookReplyLedger extends DurableObject {
+	reserve(): boolean {
+		return this.ctx.storage.transactionSync(() => {
+			const sql = this.ctx.storage.sql;
+			sql.exec("CREATE TABLE IF NOT EXISTS reply (id INTEGER PRIMARY KEY, reply_id TEXT)");
+			return sql.exec("INSERT INTO reply (id) VALUES (1) ON CONFLICT DO NOTHING RETURNING id").toArray().length === 1;
+		});
+	}
+
+	save(replyId: string): void {
+		this.ctx.storage.sql.exec("UPDATE reply SET reply_id = ? WHERE id = 1", replyId);
+	}
 }
 
 const handler = createMcpHandler(createServer);
