@@ -54,7 +54,7 @@ jobs:
       - name: Test exact Google budget controls
         run: node --experimental-strip-types --test scripts/test-google-budget-controls.mjs
 
-      - name: Test read-only Meta comments
+      - name: Test Meta comment reads and guarded pricing replies
         run: npm run test:meta-comments
 
       - name: Test read-only iDempiere database guards
@@ -64,7 +64,7 @@ jobs:
         run: npm run test:vimeo
 
       - name: Enforce MCP tool ceiling
-        run: npm run audit:mcp-tools -- --max 102
+        run: npm run audit:mcp-tools -- --max 103
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
