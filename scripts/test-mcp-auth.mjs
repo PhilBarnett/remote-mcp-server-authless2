@@ -123,8 +123,8 @@ try {
 	assert.ok(toolsText.includes("set_staging_product_publication_guarded"));
 	const decode = text => JSON.parse(text.startsWith("event:") ? text.split("\n").find(line => line.startsWith("data: ")).slice(6) : text);
 	const listedTools = decode(toolsText).result.tools;
-	assert.equal(listedTools.length, 108);
-	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 108);
+	assert.equal(listedTools.length, 109);
+	assert.equal(new Set(listedTools.map(tool => tool.name )).size, 109);
 	assert.equal(listedTools.find(tool => tool.name === "read_idempiere_database").annotations.readOnlyHint, true);
 	const dbDisabled = decode(await (await rpc(token.access_token, "tools/call", { name: "read_idempiere_database", arguments: { action: "status" } })).text()).result;
 	assert.equal(dbDisabled.isError, true);
@@ -138,6 +138,12 @@ try {
 	assert.deepEqual(JSON.parse(vimeoConnection.content[0].text), { configured: false, upload_ready: false, required_secret: "VIMEO_ACCESS_TOKEN" });
 	const socialReader = listedTools.find(tool => tool.name === "get_meta_lead_campaign_assets");
 	assert.equal(socialReader.annotations.readOnlyHint, true);
+	const pricingReply = listedTools.find(tool => tool.name === "publish_facebook_pricing_reply");
+	assert.equal(pricingReply.annotations.readOnlyHint, false);
+	const pricingStatus = decode(await (await rpc(token.access_token, "tools/call", {
+		name: "publish_facebook_pricing_reply", arguments: { action: "status" },
+	})).text()).result;
+	assert.equal(JSON.parse(pricingStatus.content[0].text).posted, false);
 	assert.ok(socialReader.inputSchema.properties.comment_request.properties.action.enum.includes("instagram_comments"));
 	assert.ok(!(socialReader.inputSchema.required ?? []).includes("comment_request"));
 	const commentInventory = await rpc(token.access_token, "tools/call", {name:"get_meta_lead_campaign_assets",arguments:{comment_request:{action:"inventory"}}});
