@@ -8166,7 +8166,23 @@ function createServer() {
 		async ({ page_id, search, form_limit, media_limit, comment_request }) => {
 			try {
 				if (comment_request) {
-					return toolResult(await readMetaComments(createCommentReader(getMetaConfig), getMetaConfig(), comment_request));
+					const config = getMetaConfig();
+					const workerEnv = env as unknown as Record<string, string | undefined>;
+					const commentsToken = workerEnv.META_COMMENTS_ACCESS_TOKEN?.trim();
+					const readAds = createCommentReader(() => config);
+					const readSocial = commentsToken
+						? createCommentReader(() => ({ ...config, accessToken: commentsToken }))
+						: readAds;
+
+					return toolResult(await readMetaComments(
+						(path, params, pageToken) => {
+							// Ownership checks and ad-source lookups need the ad-account credential.
+							const read = path.startsWith(`${config.adAccountId}/`) ? readAds : readSocial;
+							return read(path, params, pageToken);
+						},
+						config,
+						comment_request,
+					));
 				}
 				const { adAccountId } = getMetaConfig();
 				const pages = await getOwnedMetaPages();
