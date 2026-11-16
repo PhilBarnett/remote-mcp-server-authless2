@@ -2,6 +2,19 @@
 
 This business MCP server requires OAuth authentication on Cloudflare Workers. It implements the MCP 2026-07-28 specification while remaining compatible with legacy clients for ordinary tool calls.
 
+## Meta comments credential
+
+Set the optional `META_COMMENTS_ACCESS_TOKEN` Cloudflare Worker secret to a dedicated
+Meta system-user token for social reads. The worker derives Facebook Page tokens
+from this credential. Page ownership checks and ad-source queries still use
+`META_ACCESS_TOKEN`, as do the existing ads and leads tools. With no dedicated
+secret, the comment reader uses the original credential. An invalid dedicated
+credential fails the social read without a retry against the original token.
+
+Keep the dedicated system user scoped to owned social assets and the integration
+app. Verify both Facebook Pages with a known post that has comments. Verify
+Instagram separately against a known media item with comments.
+
 ## Get started:
 
 [![Deploy to Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/ai/tree/main/demos/remote-mcp-authless)
