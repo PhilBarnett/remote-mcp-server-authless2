@@ -1567,12 +1567,13 @@ async function stagingPluginDeploymentRequest(body: unknown) {
 	return response.json<any>();
 }
 
-async function productImageWcFetch(environment: ProductImageEnvironment, path: string) {
+async function productImageWcFetch(environment: ProductImageEnvironment, path: string, noRedirect = false) {
 	if (environment === "live") return wcFetch(path);
 	const access = stagingProductImageAccess();
 	const url = new URL(`${access.baseUrl}/wp-json/wc/v3/${path}`);
 	url.searchParams.set("_blindmotion_read", crypto.randomUUID());
 	const response = await fetch(url.toString(), {
+		...(noRedirect ? { redirect: "error" as const } : {}),
 		headers: {
 			Authorization: access.auth,
 			Accept: "application/json",
@@ -1589,11 +1590,13 @@ async function productImageWcWrite(
 	environment: ProductImageEnvironment,
 	path: string,
 	body: unknown,
+	noRedirect = false,
 ) {
 	if (environment === "live") return wcWrite(path, body);
 	const access = stagingProductImageAccess();
 	const response = await fetch(`${access.baseUrl}/wp-json/wc/v3/${path}`, {
 		method: "PUT",
+		...(noRedirect ? { redirect: "error" as const } : {}),
 		headers: {
 			Authorization: access.auth,
 			Accept: "application/json",
@@ -1607,10 +1610,11 @@ async function productImageWcWrite(
 	return response;
 }
 
-async function productImageWpFetch(environment: ProductImageEnvironment, path: string) {
+async function productImageWpFetch(environment: ProductImageEnvironment, path: string, noRedirect = false) {
 	if (environment === "live") return wpFetch(path);
 	const access = stagingProductImageAccess();
 	const response = await fetch(`${access.baseUrl}/wp-json/wp/v2/${path}`, {
+		...(noRedirect ? { redirect: "error" as const } : {}),
 		headers: { Authorization: access.auth, Accept: "application/json" },
 	});
 	if (!response.ok) {
@@ -12041,7 +12045,7 @@ function createServer() {
 			throw new Error("Refusing noncanonical staging origin.");
 		}
 		const get = async (site: "live" | "staging") =>
-			(await productImageWcFetch(site, path)).json<any>();
+			(await productImageWcFetch(site, path, site === "staging")).json<any>();
 		const [source, target] = await Promise.all([get("live"), get("staging")]);
 		for (const p of [source, target]) {
 			if (p.id !== 128 || p.name !== "Fabric Sample" || p.type !== "simple") {
@@ -12123,7 +12127,7 @@ function createServer() {
 		}
 		const media = await (await productImageWpFetch("staging",
 			"media?slug=" + encodeURIComponent(slugs.join(",")) +
-			"&per_page=100&_fields=id,source_url,media_details")).json<any[]>();
+			"&per_page=100&_fields=id,source_url,media_details", true)).json<any[]>();
 		if (!Array.isArray(media)) throw new Error("Unable to read staging curtain swatch attachments.");
 		for (const choice of candidateChoices) {
 			const pathName = uploadPath(choice.image, liveHost);
@@ -12168,6 +12172,8 @@ function createServer() {
 	async function runStagingFabricSampleCurtainMerge(args: {
 		operation: "preview_staging_fabric_sample_curtain_merge" | "apply_staging_fabric_sample_curtain_merge";
 		expected_plan_sha256?: string;
+		saved_backup_field_group_sha256?: string;
+		staging_edit_window_confirmed?: true;
 	}) {
 		const plan = await stagingFabricSampleCurtainPlan();
 		const receipt = {
@@ -12184,10 +12190,18 @@ function createServer() {
 			curtain_choice_slugs: plan.slugs,
 		};
 		if (args.operation === "preview_staging_fabric_sample_curtain_merge") {
-			return toolResult({ ...receipt, read_only: true, write_performed: false });
+			return toolResult({ ...receipt, read_only: true, write_performed: false,
+				apply_requires: "Save the pre-change staging WAPF backup and pause all edits to product 128 until verified readback. This is not an atomic compare-and-set; no automatic rollback.",
+			});
 		}
 		if (args.expected_plan_sha256 !== plan.planHash) throw new Error("Staging merge differs from the approved preview.");
 		if (!plan.missing) return toolResult({ ...receipt, verified: true, write_performed: false });
+		// The Woo endpoint does not implement compare-and-set. An operator must
+		// keep admin edits, imports and API sync paused across the GET/PUT window.
+		if (args.staging_edit_window_confirmed !== true ||
+			args.saved_backup_field_group_sha256 !== plan.beforeHash) {
+			throw new Error("Apply requires a saved pre-change WAPF backup and a confirmed quiet staging edit window.");
+		}
 		const verify = async () => {
 			const product = await plan.get("staging");
 			const readback = genericWapf(product);
@@ -12200,7 +12214,7 @@ function createServer() {
 		};
 		const write = (value: unknown) => productImageWcWrite("staging", plan.path, {
 			meta_data: [{ id: plan.metaId, key: "_wapf_fieldgroup", value }],
-		});
+		}, true);
 		if (!(await verify()).before) throw new Error("Concurrent staging edit detected; no write.");
 		try {
 			await write(plan.after);
@@ -12224,7 +12238,7 @@ function createServer() {
 		"copy_wapf_product_option_fields_guarded",
 		{
 			description:
-				"Copy selected WAPF fields, preview/apply exact number-field or choice labels, or preview/apply the fixed staging-only Fabric Sample curtain field merge. Supply choice_slug for a choice label. Writes preserve IDs, slugs, prices, images, calculations, conditions and product publication; complete-group verification and rollback apply.",
+				"Copy selected WAPF fields, preview/apply exact number-field or choice labels, or preview/apply the fixed staging-only Fabric Sample curtain field merge. Supply choice_slug for a choice label. Writes preserve IDs, slugs, prices, images, calculations, conditions and product publication; complete-group verification applies. Existing copy/label edits have rollback; the staging Fabric Sample merge requires a saved backup and quiet edit window and does not automatically roll back.",
 			inputSchema: z.union([z.object({
 				source_product_id: genericWapfId,
 				source_product_name: z.string().trim().min(1).max(500),
@@ -12241,6 +12255,8 @@ function createServer() {
 			}), z.object({
 				operation: z.literal("apply_staging_fabric_sample_curtain_merge"),
 				expected_plan_sha256: genericWapfHash,
+				saved_backup_field_group_sha256: genericWapfHash,
+				staging_edit_window_confirmed: z.literal(true),
 				confirmation: z.literal("CONFIRM MERGE STAGING FABRIC SAMPLE CURTAIN FIELDS"),
 			})]),
 		},
