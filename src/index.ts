@@ -12034,11 +12034,197 @@ function createServer() {
 		},
 	);
 
+	async function stagingFabricSampleCurtainPlan() {
+		// Live is a read-only source. Never take a product ID or write environment from a caller.
+		const path = "products/128";
+		if (stagingProductImageAccess().baseUrl !== "https://staging-online.blindmotion.com.au") {
+			throw new Error("Refusing noncanonical staging origin.");
+		}
+		const get = async (site: "live" | "staging") =>
+			(await productImageWcFetch(site, path)).json<any>();
+		const [source, target] = await Promise.all([get("live"), get("staging")]);
+		for (const p of [source, target]) {
+			if (p.id !== 128 || p.name !== "Fabric Sample" || p.type !== "simple") {
+				throw new Error("Fabric Sample identity failed.");
+			}
+		}
+		const src = genericWapf(source);
+		const dst = genericWapf(target);
+		const rootId = "6530c0f493ed3";
+		const spec = [
+			["6ae62acaa636f", "Sheer Fabric Collection", "image-swatch", rootId, "8b19e"],
+			["6ae62acaddec5", "Horizon Colours", "multi-image-swatch", "6ae62acaa636f", "2c3bc"],
+			["6ae62aca5d4c8", "Novo Colours", "multi-image-swatch", "6ae62acaa636f", "8d432"],
+			["6ae62acace367", "Outlook Colours", "multi-image-swatch", "6ae62acaa636f", "64067"],
+			["6ae62aca2c3bb", "Blockout Fabric Collection", "image-swatch", rootId, "70453"],
+			["6ae62aca26b51", "Apollo Colours", "multi-image-swatch", "6ae62aca2c3bb", "09a68"],
+			["6ae62acada7a7", "Brighton Colours", "multi-image-swatch", "6ae62aca2c3bb", "4b30e"],
+			["6ae62aca53fa2", "Daintree Colours", "multi-image-swatch", "6ae62aca2c3bb", "98513"],
+		] as const;
+		const fixedChoices = [["8b19e", "Curtain Sheers"], ["70453", "Curtain Blockouts"]] as const;
+		const byId = (fields: any[], id: string) => fields.filter((f: any) => f.id === id);
+		const one = (values: any[], label: string) => {
+			if (values.length !== 1) throw new Error("Expected one exact " + label + ".");
+			return values[0];
+		};
+		const choices = (field: any) => {
+			const cs = field?.options?.choices;
+			if (!Array.isArray(cs) || !cs.length || cs.some(c => !c?.slug || !c?.label)
+				|| new Set(cs.map(c => c.slug)).size !== cs.length) {
+				throw new Error("Invalid choices for " + field?.id + ".");
+			}
+			return cs;
+		};
+		const sourceRoot = one(byId(src.group.fields, rootId), "source Product selector");
+		const stagedRoot = one(byId(dst.group.fields, rootId), "staging Product selector");
+		for (const root of [sourceRoot, stagedRoot]) {
+			if (root.label !== "Product" || root.type !== "image-swatch") throw new Error("Unexpected Product selector.");
+		}
+		for (const [slug, label] of [["41lfj", "Indoor Blinds"], ["a0gtb", "Outdoor Blinds"]]) {
+			one(choices(stagedRoot).filter(c => c.slug === slug && c.label === label), label);
+		}
+		const stagedChoices = fixedChoices.map(([slug, label]) =>
+			choices(stagedRoot).filter(c => c.slug === slug || c.label === label).length);
+		const stagedFields = spec.map(([id, label]) =>
+			dst.group.fields.filter((f: any) => f.id === id || f.label === label).length);
+		const missing = [...stagedChoices, ...stagedFields].every(c => c === 0);
+		const allPresent = [...stagedChoices, ...stagedFields].every(c => c === 1);
+		if (!missing && !allPresent) throw new Error("Staging contains partial or colliding curtain fields/choices; refusing overwrite.");
+		const addedChoices = fixedChoices.map(([slug, label]) => structuredClone(
+			one(choices(sourceRoot).filter(c => c.slug === slug && c.label === label), "live " + label)));
+		const addedFields = spec.map(([id, label, type, parent, slug]) => {
+			const field = structuredClone(one(byId(src.group.fields, id), label));
+			const rules = field.conditionals?.[0]?.rules;
+			if (field.label !== label || field.type !== type ||
+				field.conditionals?.length !== 1 || rules?.length !== 1 ||
+				rules[0].field !== parent || rules[0].value !== slug || rules[0].condition !== "==" ||
+				(rules[0].generated !== false && rules[0].generated !== undefined) ||
+				(field.parent_clone?.length ?? 0) !== 0) {
+				throw new Error("Unexpected live condition or field structure for " + label + ".");
+			}
+			one(choices(one(byId(src.group.fields, parent), "reference field")).filter(c => c.slug === slug), "reference choice");
+			return field;
+		});
+		// Only use existing staging media. Resolve by exact upload path (including registered image sizes),
+		// never by live attachment ID, filename alone, or an unverified host rewrite.
+		const candidateChoices = [...addedChoices, ...addedFields.flatMap(choices)];
+		const uploadPath = (value: string, host: string) => {
+			const u = new URL(value);
+			if (u.origin !== "https://" + host || !u.pathname.startsWith("/wp-content/uploads/") ||
+				u.search || u.hash) throw new Error("Unexpected Fabric Sample image origin or path.");
+			return u.pathname;
+		};
+		const liveHost = "online.blindmotion.com.au";
+		const stagingHost = "staging-online.blindmotion.com.au";
+		const slugs = [...new Set(candidateChoices.map(c =>
+			uploadPath(c.image, liveHost).split("/").at(-1)!.replace(/\.[^.]+$/, "").replace(/-\d+x\d+$/, "")))];
+		if (slugs.length > 100 || slugs.some(s => !/^[a-z0-9-]+$/i.test(s))) {
+			throw new Error("Unexpected Fabric Sample attachment slugs.");
+		}
+		const media = await (await productImageWpFetch("staging",
+			"media?slug=" + encodeURIComponent(slugs.join(",")) +
+			"&per_page=100&_fields=id,source_url,media_details")).json<any[]>();
+		if (!Array.isArray(media)) throw new Error("Unable to read staging curtain swatch attachments.");
+		for (const choice of candidateChoices) {
+			const pathName = uploadPath(choice.image, liveHost);
+			const candidates = media.flatMap(item => {
+				const urls = [item.source_url, ...Object.values(item.media_details?.sizes ?? {})
+					.map((s: any) => s.source_url)].filter((v): v is string => typeof v === "string");
+				const matched = urls.find(u => uploadPath(u, stagingHost) === pathName);
+				return matched && Number.isInteger(item.id) && item.id > 0 ? [{ id: item.id, image: matched }] : [];
+			});
+			const attachment = one(candidates, "staging swatch matching upload path " + pathName);
+			choice.image = attachment.image;
+			choice.attachment = attachment.id;
+		}
+		const identity = (p: any) => ({ id: p.id, name: p.name, type: p.type, status: p.status,
+			catalog_visibility: p.catalog_visibility, regular_price: p.regular_price, sale_price: p.sale_price,
+			price: p.price });
+		const before = dst.meta.value;
+		const nextGroup = structuredClone(dst.group);
+		if (missing) {
+			const root = one(byId(nextGroup.fields, rootId), "staging Product selector");
+			root.options.choices.push(...addedChoices);
+			nextGroup.fields.push(...addedFields);
+		} else {
+			// Idempotent reruns still verify complete field/choice equivalence.
+			const exact = (a: unknown, b: unknown) => !firstCanonicalWapfDifference(a, b);
+			if (addedChoices.some(c => !exact(c, one(choices(stagedRoot).filter(x => x.slug === c.slug), c.slug))) ||
+				addedFields.some(f => !exact(f, one(byId(dst.group.fields, f.id), f.id)))) {
+				throw new Error("Existing staging curtain data differs from the reviewed source; refusing overwrite.");
+			}
+		}
+		const after = missing ? (typeof before === "string" ? JSON.stringify(nextGroup) : nextGroup) : before;
+		const sourceHash = await genericWapfHashOf(src.meta.value);
+		const beforeHash = await genericWapfHashOf(before);
+		const afterHash = await genericWapfHashOf(after);
+		const targetIdentity = identity(target);
+		const planHash = await genericWapfHashOf({ sourceHash, beforeHash, afterHash, targetIdentity, metaId: dst.meta.id });
+		return { get, path, identity, targetIdentity, metaId: dst.meta.id, before, after,
+			sourceHash, beforeHash, afterHash, planHash, missing, oldCount: dst.group.fields.length,
+			newCount: nextGroup.fields.length, fieldIds: spec.map(s => s[0]), slugs: fixedChoices.map(c => c[0]) };
+	}
+
+	async function runStagingFabricSampleCurtainMerge(args: {
+		operation: "preview_staging_fabric_sample_curtain_merge" | "apply_staging_fabric_sample_curtain_merge";
+		expected_plan_sha256?: string;
+	}) {
+		const plan = await stagingFabricSampleCurtainPlan();
+		const receipt = {
+			environment: "staging",
+			product_id: 128,
+			source_field_group_sha256: plan.sourceHash,
+			before_field_group_sha256: plan.beforeHash,
+			after_field_group_sha256: plan.afterHash,
+			plan_sha256: plan.planHash,
+			already_current: !plan.missing,
+			before_field_count: plan.oldCount,
+			after_field_count: plan.newCount,
+			curtain_field_ids: plan.fieldIds,
+			curtain_choice_slugs: plan.slugs,
+		};
+		if (args.operation === "preview_staging_fabric_sample_curtain_merge") {
+			return toolResult({ ...receipt, read_only: true, write_performed: false });
+		}
+		if (args.expected_plan_sha256 !== plan.planHash) throw new Error("Staging merge differs from the approved preview.");
+		if (!plan.missing) return toolResult({ ...receipt, verified: true, write_performed: false });
+		const verify = async () => {
+			const product = await plan.get("staging");
+			const readback = genericWapf(product);
+			if (JSON.stringify(plan.identity(product)) !== JSON.stringify(plan.targetIdentity) ||
+				readback.meta.id !== plan.metaId) throw new Error("Unexpected staging product identity/state.");
+			const equivalent = (value: unknown) => !firstCanonicalWapfDifference(
+				parseWapfFieldGroup(value), readback.group);
+			return { before: (await genericWapfHashOf(readback.meta.value)) === plan.beforeHash,
+				after: equivalent(plan.after) };
+		};
+		const write = (value: unknown) => productImageWcWrite("staging", plan.path, {
+			meta_data: [{ id: plan.metaId, key: "_wapf_fieldgroup", value }],
+		});
+		if (!(await verify()).before) throw new Error("Concurrent staging edit detected; no write.");
+		try {
+			await write(plan.after);
+		} catch {
+			const result = await verify();
+			if (result.after) {
+				// A network response can be lost after WordPress saves the exact plan.
+				return toolResult({ ...receipt, verified: true, write_performed: true, recovered_readback: true });
+			}
+			if (result.before) throw new Error("Staging write failed; original group verified.");
+			throw new Error("Staging outcome is neither the original nor planned group; refusing overwrite.");
+		}
+		const result = await verify();
+		if (!result.after) throw new Error(result.before
+			? "Staging did not save the plan; original group verified."
+			: "Staging readback differs from both known groups; refusing to overwrite a possible concurrent edit.");
+		return toolResult({ ...receipt, verified: true, write_performed: true });
+	}
+
 	server.registerTool(
 		"copy_wapf_product_option_fields_guarded",
 		{
 			description:
-				"Copy selected WAPF fields or preview/apply exact number-field labels and selected choice labels on live or staging. Supply choice_slug for a choice label. Writes preserve IDs, slugs, prices, images, calculations, conditions and product publication; complete-group verification and rollback apply.",
+				"Copy selected WAPF fields, preview/apply exact number-field or choice labels, or preview/apply the fixed staging-only Fabric Sample curtain field merge. Supply choice_slug for a choice label. Writes preserve IDs, slugs, prices, images, calculations, conditions and product publication; complete-group verification and rollback apply.",
 			inputSchema: z.union([z.object({
 				source_product_id: genericWapfId,
 				source_product_name: z.string().trim().min(1).max(500),
@@ -12050,11 +12236,21 @@ function createServer() {
 				target_field_indices_to_replace: z.array(genericWapfIndex).max(100),
 				insert_at_index: genericWapfIndex,
 				confirmation: z.literal(genericWapfConfirmation),
-			}), wapfLabelPreview, wapfLabelApply]),
+			}), wapfLabelPreview, wapfLabelApply, z.object({
+				operation: z.literal("preview_staging_fabric_sample_curtain_merge"),
+			}), z.object({
+				operation: z.literal("apply_staging_fabric_sample_curtain_merge"),
+				expected_plan_sha256: genericWapfHash,
+				confirmation: z.literal("CONFIRM MERGE STAGING FABRIC SAMPLE CURTAIN FIELDS"),
+			})]),
 		},
 		async (args) => {
 			try {
 				if ("operation" in args) {
+					if (args.operation === "preview_staging_fabric_sample_curtain_merge" ||
+						args.operation === "apply_staging_fabric_sample_curtain_merge") {
+						return await runStagingFabricSampleCurtainMerge(args);
+					}
 					const plan = await wapfLabelPlan(args);
 					if (args.operation === "preview_field_labels") {
 						return toolResult({
