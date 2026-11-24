@@ -1542,6 +1542,55 @@ function stagingPluginDeploymentAccess() {
 	};
 }
 
+// Use the vendor's native local-fields API as a read-only preflight. Never
+// grant APF's default admin capability or proxy arbitrary WordPress requests.
+async function inspectStagingZipGripApf() {
+	const access = stagingProductImageAccess();
+	const url = "https://staging-online.blindmotion.com.au/wp-json/wc-product-fields/v1/products/1301/group";
+	const read = await fetch(url, {
+		method: "GET",
+		redirect: "manual",
+		signal: AbortSignal.timeout(15000),
+		headers: { Authorization: access.auth, Accept: "application/json", "Cache-Control": "no-cache, no-store" },
+	});
+	const status = read.status;
+	// A usable response proves read access only, not Extended support, write
+	// permission, checkout behaviour, or ERP mapping.
+	let fields: unknown[] = [];
+	const isJson = (read.headers.get("content-type") ?? "").split(";")[0].trim() === "application/json";
+	if (status === 200 && isJson) {
+		// Cap the authenticated response without relying on Content-Length.
+		const reader = read.body?.getReader();
+		if (!reader) throw new Error("Missing staging APF response body.");
+		const decoder = new TextDecoder("utf-8", { fatal: true });
+		let bytes = 0;
+		let raw = "";
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			bytes += value.byteLength;
+			if (bytes > 524_288) {
+				await reader.cancel();
+				throw new Error("Staging APF response exceeds 512 KiB.");
+			}
+			raw += decoder.decode(value, { stream: true });
+		}
+		const data = JSON.parse(raw + decoder.decode());
+		if (!Array.isArray(data?.fields)) throw new Error("Unexpected staging APF group shape.");
+		fields = data.fields;
+	}
+	const motor = fields.filter((field: any) => field?.id === "6714d03055df1");
+	const outcome = status === 200 && isJson && motor.length === 1 ? "readable_zipgrip_group" :
+		status === 401 || status === 403 ? "existing_identity_not_authorized" :
+		status === 404 ? "route_or_local_group_not_found" :
+		status >= 300 && status < 400 ? "redirect_refused" : "unexpected_response";
+	return toolResult({
+		environment: "staging", host: "staging-online.blindmotion.com.au", product_id: 1301,
+		outcome, http_status: status, observed_products_field: fields.some((field: any) => field?.type === "products"),
+		write_performed: false, write_access_verified: false, browser_or_erp_verified: false,
+	});
+}
+
 async function stagingPluginDeploymentRequest(body: unknown) {
 	const access = stagingPluginDeploymentAccess();
 	const response = await fetch(
@@ -6318,6 +6367,7 @@ function createServer() {
 				"Inspect, install or update one reviewed allowlisted Blindmotion WordPress plugin on the exact staging origin. Inspection is read-only. Deployment hash-locks ZIP bytes, verifies current version and fixed identity, activates and verifies with transactional rollback. Also reads bounded plugin source, dry-runs sample routing and inspects/previews/applies hash-locked product descriptions with verified rollback. Also supports roller_maintenance inspect/preview/apply for staging WAPF settings and exact existing snippet replacements, preserving IDs and publication. Cannot target live or arbitrary plugins.",
 			inputSchema: z.discriminatedUnion("action", [
                 ...stagingWorkSchemas,
+                z.object({ action: z.literal("inspect_zipgrip_apf") }).strict(),
                 z.object({ action: z.literal("roller_maintenance"), request: rollerMaintenance.schema }).strict(),
 				z.object({
 					action: z.literal("inspect"),
@@ -6338,6 +6388,7 @@ function createServer() {
 		},
 		async (input) => {
 			try {
+                if (input.action === "inspect_zipgrip_apf") return inspectStagingZipGripApf();
                 if (input.action === "roller_maintenance") return rollerMaintenance.run(input.request);
                 if (input.action !== "inspect" && input.action !== "deploy") {
                     return runStagingWork(stagingPluginDeploymentRequest, input, input.action === "apply_content");
