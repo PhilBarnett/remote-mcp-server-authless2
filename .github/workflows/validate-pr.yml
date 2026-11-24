@@ -50,6 +50,9 @@ jobs:
       - name: Test fixed live sample-routing update and PHP release
         run: node scripts/test-sample-routing-update.mjs
 
+      - name: Test staging Fabric Sample media diagnostics
+        run: npm run test:staging-media
+
       - name: Test product image and choice-label guards
         run: node --experimental-strip-types scripts/test-product-option-edits.mjs
 
