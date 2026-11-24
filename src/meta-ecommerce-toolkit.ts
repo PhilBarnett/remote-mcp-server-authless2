@@ -8,6 +8,8 @@ const META_ECOMMERCE_AD_CREATE_CONFIRMATION = "CONFIRM CREATE PAUSED META ECOMME
 const META_AD_STATUS_CONFIRMATION = "CONFIRM META AD STATUS CHANGE";
 const META_ECOMMERCE_LAUNCH_CONFIRMATION = "CONFIRM LAUNCH META ECOMMERCE CAMPAIGN";
 const META_MAX_LIST_ITEMS = 500;
+const META_DUPLICATE_MAX_PAGES = 20;
+const META_AD_SCHEDULE_FIELD = "ad_schedule_end_time";
 
 type MetaConfig = {
 	accessToken: string;
@@ -384,15 +386,124 @@ async function assertSalesAdsetForCreation(adsetId: string, destinationUrl: stri
 	return { adset, campaign };
 }
 
-async function refuseDuplicateAdName(name: string) {
+// Never follow a provider-supplied pagination URL (it can contain credentials).
+// Carry only the cursor into the same fixed, owned account edge. An incomplete
+// inventory is not permission to create an ad that might already exist.
+async function refuseDuplicateAdName(name: string, scope?: { adsetId: string; videoIds: string[]; destination: string }) {
 	const { adAccountId } = getToolkitMetaConfig();
-	const response = await toolkitMetaRequest(`${adAccountId}/ads`, "GET", {
-		fields: "id,name,status",
-		limit: META_MAX_LIST_ITEMS,
-	});
-	if ((response?.data ?? []).some((item: any) => String(item.name ?? "") === name)) {
-		throw new Error(`An ad named ${name} already exists in the configured ad account.`);
+	const cursors = new Set<string>();
+	let after: string | undefined;
+	for (let page = 0; page < META_DUPLICATE_MAX_PAGES; page++) {
+		const response = await toolkitMetaRequest(`${adAccountId}/ads`, "GET", {
+			fields: scope ? "id,name,status,adset_id,creative{id,object_story_spec,asset_feed_spec}" : "id,name,status",
+			limit: META_MAX_LIST_ITEMS,
+			after,
+		});
+		if (!Array.isArray(response?.data)) throw new Error("Meta ad duplicate inventory is incomplete.");
+		for (const item of response.data) {
+			if (String(item?.name ?? "") === name) throw new Error(`An ad named ${name} already exists in the configured ad account.`);
+			if (scope && !/^\d+$/.test(String(item?.adset_id ?? ""))) throw new Error("Meta ad inventory entry did not identify its ad set; nothing created.");
+			if (!scope || String(item.adset_id) !== scope.adsetId) continue;
+			if (!item.creative?.id || (!item.creative.object_story_spec && !item.creative.asset_feed_spec)) {
+				throw new Error(`Cannot rule out a duplicate: creative for ad ${String(item.id)} is unavailable.`);
+			}
+			const existingVideos = collectVideoIds(item.creative);
+			if (!scope.videoIds.some((id) => existingVideos.has(id))) continue;
+			const destinations = collectDestinationUrls(item.creative);
+			// Reworded offer copy is not reliable evidence of distinct intent. For
+			// time-limited sales, block reused source video to the same landing
+			// page inside the target set, even if the operation name changed.
+			if (!destinations.length || destinations.some((url) => sameSalesLandingPage(url, scope.destination))) {
+				throw new Error(`Potential duplicate source video on ad ${String(item.id)} in the target ad set. Inspect it by ID; nothing created.`);
+			}
+		}
+		if (!response.paging?.next) return;
+		const cursor = response.paging?.cursors?.after;
+		if (typeof cursor !== "string" || !cursor || cursors.has(cursor)) {
+			throw new Error("Meta ad duplicate inventory pagination is incomplete.");
+		}
+		cursors.add(cursor);
+		after = cursor;
 	}
+	throw new Error("Meta ad duplicate inventory exceeded its safe page limit.");
+}
+
+function sameSalesLandingPage(left: string, right: string) {
+	try {
+		const a = new URL(left), b = new URL(right);
+		return a.origin === b.origin && a.pathname.replace(/\/$/, "") === b.pathname.replace(/\/$/, "");
+	} catch {
+		return false;
+	}
+}
+
+// The caller supplies an explicit offset, never an account- or server-local
+// wall-clock date. Compare instants, not provider-specific display offsets.
+function normalizeMetaAdCutoff(value: string, now = Date.now()) {
+	const match = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(Z|[+-]\d{2}:\d{2})$/.exec(value);
+	if (!match) throw new Error("Ad cutoff must be RFC 3339 with explicit time zone and whole seconds.");
+	const wall = Date.parse(`${match[1]}T${match[2]}Z`);
+	const stamp = Date.parse(value);
+	if (!Number.isFinite(wall) || !Number.isFinite(stamp) || new Date(wall).toISOString().slice(0, 19) !== `${match[1]}T${match[2]}` || stamp <= now) {
+		throw new Error("Ad cutoff is not a valid future instant.");
+	}
+	return new Date(stamp).toISOString().replace(".000Z", "Z");
+}
+
+function metaAdCutoffMatches(observed: unknown, expected: string) {
+	// Graph usually returns ISO with a numeric offset without a colon.
+	if (typeof observed !== "string") return false;
+	const strict = observed.replace(/\.000(?=Z|[+-])/, "").replace(/([+-]\d{2})(\d{2})$/, "$1:$2");
+	try { return normalizeMetaAdCutoff(strict, 0) === expected; } catch { return false; }
+}
+
+async function readOwnedAdSchedule(id: string, expectedWhenSupported: boolean) {
+	try {
+		const ad = await assertAccountObject(id, "ad", META_AD_SCHEDULE_FIELD);
+		const schedule = ad[META_AD_SCHEDULE_FIELD];
+		if (schedule !== undefined && schedule !== null && (typeof schedule !== "string" || !schedule)) {
+			throw new Error("Meta returned an invalid ad schedule field.");
+		}
+		return { supported: true, cutoff: (schedule ?? null) as string | null };
+	} catch (error) {
+		// A version which explicitly rejects this single field can still
+		// serve old, non-timed workflows. Never swallow auth/ownership/errors
+		// or downgrade a request for a known deadline.
+		const message = error instanceof Error ? error.message : String(error);
+		if (!expectedWhenSupported && /code=100\b/.test(message) &&
+			/(?:nonexisting|unknown) field/i.test(message) && message.includes(META_AD_SCHEDULE_FIELD)) {
+			return { supported: false, cutoff: null };
+		}
+		throw error;
+	}
+}
+
+async function inspectExactOwnedSalesAd(adId: string, adsetId: string, campaignId: string, expectedCampaignName: string) {
+	// A dashboard-only draft may have a UI ID but does not resolve as a
+	// Graph ad. This path never publishes, converts or replaces it.
+	const [ad, adset, campaign] = await Promise.all([
+		assertAccountObject(adId, "ad", "status,effective_status,adset_id,campaign_id,creative{id,name,object_story_spec,asset_feed_spec,url_tags}"),
+		assertAccountObject(adsetId, "adset", "status,effective_status,campaign_id"),
+		assertAccountObject(campaignId, "campaign", "status,effective_status,objective"),
+	]);
+	if (String(ad.adset_id) !== adsetId || String(ad.campaign_id) !== campaignId ||
+		String(adset.campaign_id) !== campaignId || campaign.name !== expectedCampaignName || campaign.objective !== "OUTCOME_SALES") {
+		throw new Error("Meta ad, ad-set or sales campaign did not match the requested parents.");
+	}
+	const schedule = await readOwnedAdSchedule(adId, false);
+	return {
+		graph_visible: true,
+		read_only: true,
+		ad: {
+			id: ad.id, name: ad.name, status: ad.status, effective_status: ad.effective_status,
+			creative_id: ad.creative?.id ?? null,
+			video_ids: [...collectVideoIds(ad.creative)],
+			destination_urls: collectDestinationUrls(ad.creative),
+			ad_schedule_end_time: schedule.cutoff, schedule_field_supported: schedule.supported,
+		},
+		adset: { id: adset.id, name: adset.name, status: adset.status, effective_status: adset.effective_status },
+		campaign: { id: campaign.id, name: campaign.name, status: campaign.status, effective_status: campaign.effective_status },
+	};
 }
 
 function collectStringsByKey(value: unknown, keys: Set<string>, results: string[] = []) {
@@ -565,21 +676,30 @@ async function createWebsiteSalesPlacementCreative(input: {
 	);
 }
 
-async function createPausedAd(adsetId: string, name: string, creativeId: string) {
+async function createPausedAd(adsetId: string, name: string, creativeId: string, cutoff?: string, campaignId?: string) {
 	const { adAccountId } = getToolkitMetaConfig();
 	const created = await toolkitMetaPost(`${adAccountId}/ads`, {
 		name,
 		adset_id: adsetId,
 		status: "PAUSED",
 		creative: JSON.stringify({ creative_id: creativeId }),
+		[META_AD_SCHEDULE_FIELD]: cutoff,
 	});
+	const createdId = String(created?.id ?? "");
+	if (!/^\d+$/.test(createdId)) throw new Error("Meta did not return an ad ID. Inspect the target set before retrying; creation may have occurred.");
 	const verified = await assertAccountObject(
-		String(created.id),
+		createdId,
 		"ad",
-		"adset_id,campaign_id,status,effective_status,creative{id,name,object_story_spec,asset_feed_spec,url_tags}",
+		`adset_id,campaign_id,status,effective_status,creative{id,name,object_story_spec,asset_feed_spec,url_tags}${cutoff ? `,${META_AD_SCHEDULE_FIELD}` : ""}`,
 	);
 	if (verified.status !== "PAUSED" || String(verified.adset_id) !== adsetId) {
 		throw new Error("Created ad failed PAUSED/ad-set verification.");
+	}
+	if (cutoff && (verified.name !== name || String(verified.campaign_id) !== campaignId || String(verified.creative?.id) !== creativeId)) {
+		throw new Error(`Ad ${createdId} was created, but exact identity did not verify; inspect that ID and do not retry or activate.`);
+	}
+	if (cutoff && !metaAdCutoffMatches(verified[META_AD_SCHEDULE_FIELD], cutoff)) {
+		throw new Error(`Ad ${String(verified.id)} was created PAUSED, but its provider cutoff did not verify; inspect that ID, do not recreate or activate.`);
 	}
 	return verified;
 }
@@ -914,16 +1034,20 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				video_id: z.string().regex(/^\d+$/),
 				expected_video_title: z.string().max(255),
 				...websiteAdCopySchema,
+				ad_schedule_end_time: z.string().max(35).optional(),
+				known_existing_ad_id: z.string().regex(/^\d+$/).optional(),
 				confirmation: z.literal(META_ECOMMERCE_AD_CREATE_CONFIRMATION),
 			}),
 		},
-		async ({ adset_id, video_id, expected_video_title, page_id, name, primary_text, headline, description, cta_type, destination_url, utm }) => {
+		async ({ adset_id, video_id, expected_video_title, page_id, name, primary_text, headline, description, cta_type, destination_url, utm, ad_schedule_end_time, known_existing_ad_id }) => {
 			try {
-				await assertSalesAdsetForCreation(adset_id, destination_url);
+				if (known_existing_ad_id) throw new Error(`Ad ${known_existing_ad_id} was supplied as existing. Inspect it by ID, not via create.`);
+				const cutoff = ad_schedule_end_time === undefined ? undefined : normalizeMetaAdCutoff(ad_schedule_end_time);
+				const { campaign } = await assertSalesAdsetForCreation(adset_id, destination_url);
 				await assertOwnedPage(page_id);
 				await assertOwnedVideo(video_id, { title: expected_video_title });
-				await refuseDuplicateAdName(name);
 				const tracking = buildMetaDestination(destination_url, utm);
+				await refuseDuplicateAdName(name, cutoff ? { adsetId: adset_id, videoIds: [video_id], destination: tracking.destinationUrl } : undefined);
 				const creative = await createWebsiteSalesVideoCreative({
 					name,
 					pageId: page_id,
@@ -936,7 +1060,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					urlTags: tracking.urlTags,
 				});
 				if (!creative?.id) throw new Error("Meta did not return a creative ID.");
-				const ad = await createPausedAd(adset_id, name, String(creative.id));
+				const ad = await createPausedAd(adset_id, name, String(creative.id), cutoff, String(campaign.id));
 				if (!collectVideoIds(ad.creative).has(video_id)) {
 					throw new Error("Created ad did not verify against the intended video.");
 				}
@@ -973,12 +1097,16 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				video_9x16_expected_width: z.number().int().positive().max(10000),
 				video_9x16_expected_height: z.number().int().positive().max(10000),
 				...websiteAdCopySchema,
+				ad_schedule_end_time: z.string().max(35).optional(),
+				known_existing_ad_id: z.string().regex(/^\d+$/).optional(),
 				confirmation: z.literal(META_ECOMMERCE_AD_CREATE_CONFIRMATION),
 			}),
 		},
 		async (args) => {
 			try {
-				await assertSalesAdsetForCreation(args.adset_id, args.destination_url);
+				if (args.known_existing_ad_id) throw new Error(`Ad ${args.known_existing_ad_id} was supplied as existing. Inspect it by ID, not via create.`);
+				const cutoff = args.ad_schedule_end_time === undefined ? undefined : normalizeMetaAdCutoff(args.ad_schedule_end_time);
+				const { campaign } = await assertSalesAdsetForCreation(args.adset_id, args.destination_url);
 				await assertOwnedPage(args.page_id);
 				await assertOwnedVideo(args.video_4x5_id, {
 					title: args.video_4x5_expected_name,
@@ -994,8 +1122,8 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					width: args.video_9x16_expected_width,
 					height: args.video_9x16_expected_height,
 				});
-				await refuseDuplicateAdName(args.name);
 				const tracking = buildMetaDestination(args.destination_url, args.utm);
+				await refuseDuplicateAdName(args.name, cutoff ? { adsetId: args.adset_id, videoIds: [args.video_4x5_id, args.video_9x16_id], destination: tracking.destinationUrl } : undefined);
 				const creative = await createWebsiteSalesPlacementCreative({
 					name: args.name,
 					pageId: args.page_id,
@@ -1009,7 +1137,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					urlTags: tracking.urlTags,
 				});
 				if (!creative?.id) throw new Error("Meta did not return a creative ID.");
-				const ad = await createPausedAd(args.adset_id, args.name, String(creative.id));
+				const ad = await createPausedAd(args.adset_id, args.name, String(creative.id), cutoff);
 				const creativeVideos = Array.isArray(ad.creative?.asset_feed_spec?.videos)
 					? ad.creative.asset_feed_spec.videos
 					: [];
@@ -1051,7 +1179,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"set_meta_ad_status_guarded",
 		{
 			description:
-				"Switch exactly one owned Meta ad between PAUSED and ACTIVE after exact ad/ad-set/campaign identity checks. Activation requires both parents already ACTIVE. Cannot archive or delete.",
+				"Switch exactly one owned Meta ad between PAUSED and ACTIVE after exact ad/ad-set/campaign identity checks. Activation requires both parents already ACTIVE and exact verification of a future cutoff for scheduled ads. Cannot archive or delete.",
 			inputSchema: z.object({
 				ad_id: z.string().regex(/^\d+$/),
 				expected_ad_name: z.string().trim().min(3).max(200),
@@ -1061,6 +1189,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				expected_campaign_name: z.string().trim().min(3).max(200),
 				expected_current_status: z.enum(["PAUSED", "ACTIVE"]),
 				new_status: z.enum(["PAUSED", "ACTIVE"]),
+				expected_ad_schedule_end_time: z.string().max(35).optional(),
 				confirmation: z.literal(META_AD_STATUS_CONFIRMATION),
 			}),
 		},
@@ -1085,7 +1214,31 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				if (args.new_status === "ACTIVE" && (adset.status !== "ACTIVE" || campaign.status !== "ACTIVE")) {
 					throw new Error("Ad activation requires ACTIVE campaign and ad set parents.");
 				}
+				let expectedCutoff: string | undefined;
+				if (args.new_status === "ACTIVE") {
+					expectedCutoff = args.expected_ad_schedule_end_time === undefined ? undefined : normalizeMetaAdCutoff(args.expected_ad_schedule_end_time);
+					const schedule = await readOwnedAdSchedule(args.ad_id, expectedCutoff !== undefined);
+					if (schedule.cutoff !== null && expectedCutoff === undefined) {
+						throw new Error("Scheduled ads require the exact expected ad cutoff before activation.");
+					}
+					if (expectedCutoff && !metaAdCutoffMatches(schedule.cutoff, expectedCutoff)) {
+						throw new Error("Ad cutoff changed or is unverified; activation refused.");
+					}
+				} else if (args.expected_ad_schedule_end_time !== undefined) {
+					throw new Error("Do not include a future cutoff when pausing an ad.");
+				}
 				const verified = await setMetaStatus(args.ad_id, args.new_status);
+				if (expectedCutoff) {
+					try {
+						const readback = await readOwnedAdSchedule(args.ad_id, true);
+						if (!metaAdCutoffMatches(readback.cutoff, expectedCutoff)) throw new Error("Ad cutoff changed during activation.");
+					} catch {
+						// Only the exact previously owned ad is rolled back. No parent
+						// or sibling status is touched if provider readback goes stale.
+						const rollback = await setMetaStatus(args.ad_id, "PAUSED").catch(() => null);
+						throw new Error(`Activation cutoff readback failed for ad ${args.ad_id}; rollback ${rollback?.status === "PAUSED" ? "verified PAUSED" : "not verified; inspect ad immediately"}.`);
+					}
+				}
 				if (verified.status !== args.new_status) throw new Error("Meta did not apply the requested ad status.");
 				return textResult({ changed: true, deleted: false, archived: false, ad: verified });
 			} catch (error) {
@@ -1098,14 +1251,20 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"inspect_meta_ecommerce_campaign_prelaunch",
 		{
 			description:
-				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch.",
+				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts.",
 			inputSchema: z.object({
 				campaign_id: z.string().regex(/^\d+$/),
 				expected_campaign_name: z.string().trim().min(3).max(200),
+				ad_id: z.string().regex(/^\d+$/).optional(),
+				expected_adset_id: z.string().regex(/^\d+$/).optional(),
 			}),
 		},
-		async ({ campaign_id, expected_campaign_name }) => {
+		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id }) => {
 			try {
+				if (ad_id !== undefined || expected_adset_id !== undefined) {
+					if (!ad_id || !expected_adset_id) throw new Error("Exact ad inspection requires both ad_id and expected_adset_id.");
+					return textResult(await inspectExactOwnedSalesAd(ad_id, expected_adset_id, campaign_id, expected_campaign_name));
+				}
 				return textResult(await buildPreflight(campaign_id, expected_campaign_name));
 			} catch (error) {
 				return errorResult(error);
