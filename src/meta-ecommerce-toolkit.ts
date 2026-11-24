@@ -687,13 +687,18 @@ async function createPausedAd(adsetId: string, name: string, creativeId: string,
 	});
 	const createdId = String(created?.id ?? "");
 	if (!/^\d+$/.test(createdId)) throw new Error("Meta did not return an ad ID. Inspect the target set before retrying; creation may have occurred.");
-	const verified = await assertAccountObject(
-		createdId,
-		"ad",
-		`adset_id,campaign_id,status,effective_status,creative{id,name,object_story_spec,asset_feed_spec,url_tags}${cutoff ? `,${META_AD_SCHEDULE_FIELD}` : ""}`,
-	);
+	let verified: Awaited<ReturnType<typeof assertAccountObject>>;
+	try {
+		verified = await assertAccountObject(
+			createdId,
+			"ad",
+			`adset_id,campaign_id,status,effective_status,creative{id,name,object_story_spec,asset_feed_spec,url_tags}${cutoff ? `,${META_AD_SCHEDULE_FIELD}` : ""}`,
+		);
+	} catch {
+		throw new Error(`Meta returned created ad ID ${createdId}, but readback failed. Inspect that exact ID; do not retry creation or activate it.`);
+	}
 	if (verified.status !== "PAUSED" || String(verified.adset_id) !== adsetId) {
-		throw new Error("Created ad failed PAUSED/ad-set verification.");
+		throw new Error(`Ad ${createdId} failed PAUSED/ad-set verification. Inspect that exact ID; do not retry or activate it.`);
 	}
 	if (cutoff && (verified.name !== name || String(verified.campaign_id) !== campaignId || String(verified.creative?.id) !== creativeId)) {
 		throw new Error(`Ad ${createdId} was created, but exact identity did not verify; inspect that ID and do not retry or activate.`);
@@ -1062,7 +1067,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				if (!creative?.id) throw new Error("Meta did not return a creative ID.");
 				const ad = await createPausedAd(adset_id, name, String(creative.id), cutoff, String(campaign.id));
 				if (!collectVideoIds(ad.creative).has(video_id)) {
-					throw new Error("Created ad did not verify against the intended video.");
+					throw new Error(`Ad ${String(ad.id)} did not verify against the intended video. Inspect that exact ID; do not retry or activate it.`);
 				}
 				return textResult({
 					created: true,
@@ -1137,26 +1142,21 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					urlTags: tracking.urlTags,
 				});
 				if (!creative?.id) throw new Error("Meta did not return a creative ID.");
-				const ad = await createPausedAd(args.adset_id, args.name, String(creative.id), cutoff);
+				const ad = await createPausedAd(args.adset_id, args.name, String(creative.id), cutoff, String(campaign.id));
 				const creativeVideos = Array.isArray(ad.creative?.asset_feed_spec?.videos)
 					? ad.creative.asset_feed_spec.videos
 					: [];
-				const verifiedLabels = new Set(
-					creativeVideos.flatMap((video: any) =>
-						Array.isArray(video?.adlabels)
-							? video.adlabels.map((label: any) => String(label?.name ?? ""))
-							: [],
-					),
-				);
-				const allCreativeVideosHaveIds =
-					creativeVideos.length === 2 &&
-					creativeVideos.every((video: any) => /^\d+$/.test(String(video?.video_id ?? "")));
-				if (
-					!allCreativeVideosHaveIds ||
-					!verifiedLabels.has("video_feed_4x5") ||
-					!verifiedLabels.has("video_vertical_9x16")
-				) {
-					throw new Error("Created placement ad did not verify both labeled placement videos.");
+				// Two labels alone do not verify that Meta kept the right video
+				// in each placement after the create request.
+				const matches = (label: string, videoId: string) => creativeVideos.filter((video: any) =>
+					String(video?.video_id ?? "") === videoId &&
+					Array.isArray(video?.adlabels) && video.adlabels.some((item: any) => item?.name === label)
+				).length === 1;
+				if (creativeVideos.length !== 2 ||
+					!matches("video_feed_4x5", args.video_4x5_id) ||
+					!matches("video_vertical_9x16", args.video_9x16_id) ||
+					String(creativeVideos[0]?.video_id) === String(creativeVideos[1]?.video_id)) {
+					throw new Error(`Ad ${String(ad.id)} did not verify both exact labeled placement videos. Inspect that exact ID; do not retry or activate it.`);
 				}
 				return textResult({
 					created: true,
