@@ -700,6 +700,35 @@ async function registerOwnedVideoThumbnail(videoId: string, bytes: Uint8Array) {
 	return hash;
 }
 
+async function prepareSinglePausedMetaAd(
+	input: { adset_id: string; video_id: string; expected_video_title: string; page_id: string; name: string;
+		destination_url: string; utm: UtmInput; ad_schedule_end_time?: string; known_existing_ad_id?: string },
+	setStage: (stage: string) => void,
+	scope?: { campaignId: string; campaignName: string },
+) {
+	const { adset_id, video_id, expected_video_title, page_id, name, destination_url, utm, ad_schedule_end_time, known_existing_ad_id } = input;
+	if (known_existing_ad_id) throw new Error(`Ad ${known_existing_ad_id} was supplied as existing. Inspect it by ID, not via create.`);
+	const cutoff = ad_schedule_end_time === undefined ? undefined : normalizeMetaAdCutoff(ad_schedule_end_time);
+	setStage("parent_validation");
+	const { campaign } = await assertSalesAdsetForCreation(adset_id, destination_url);
+	if (scope && (String(campaign.id) !== scope.campaignId || campaign.name !== scope.campaignName)) {
+		throw new Error("Target ad set does not match the exact requested campaign.");
+	}
+	setStage("page_ownership");
+	await assertOwnedPage(page_id);
+	setStage("video_ownership");
+	await assertOwnedVideo(video_id, { title: expected_video_title });
+	setStage("destination_validation");
+	const tracking = buildMetaDestination(destination_url, utm);
+	setStage("duplicate_inventory");
+	await refuseDuplicateAdName(name, cutoff ? { adsetId: adset_id, videoIds: [video_id], destination: tracking.destinationUrl } : undefined);
+	setStage("thumbnail_metadata");
+	const thumbnail = await getOwnedVideoThumbnail(video_id);
+	setStage("thumbnail_bytes");
+	const bytes = await readOwnedVideoThumbnailBytes(video_id, thumbnail.uri);
+	return { campaign, tracking, cutoff, thumbnail, bytes };
+}
+
 async function createWebsiteSalesVideoCreative(input: {
 	name: string;
 	pageId: string;
@@ -1170,7 +1199,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"create_meta_website_sales_video_ad_paused",
 		{
 			description:
-				"Create one PAUSED website-sales video ad from an explicitly validated owned Meta video. Parent campaign/ad set may be ACTIVE or PAUSED but must have a verified OUTCOME_SALES website destination. Supports same-site UTM tracking and cannot activate delivery. inspect_only performs all read-only checks including duplicate inventory and thumbnail bytes, with no writes.",
+				"Create one PAUSED website-sales video ad from an explicitly validated owned Meta video. Parent campaign/ad set may be ACTIVE or PAUSED but must have a verified OUTCOME_SALES website destination. Supports same-site UTM tracking and cannot activate delivery.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				video_id: z.string().regex(/^\d+$/),
@@ -1178,33 +1207,15 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				...websiteAdCopySchema,
 				ad_schedule_end_time: z.string().max(35).optional(),
 				known_existing_ad_id: z.string().regex(/^\d+$/).optional(),
-				inspect_only: z.boolean().optional(),
 				confirmation: z.literal(META_ECOMMERCE_AD_CREATE_CONFIRMATION),
 			}),
 		},
-		async ({ adset_id, video_id, expected_video_title, page_id, name, primary_text, headline, description, cta_type, destination_url, utm, ad_schedule_end_time, known_existing_ad_id, inspect_only }) => {
+		async ({ adset_id, video_id, expected_video_title, page_id, name, primary_text, headline, description, cta_type, destination_url, utm, ad_schedule_end_time, known_existing_ad_id }) => {
 			let stage = "input", adId = known_existing_ad_id, creativeId: string | undefined;
 			try {
-				if (known_existing_ad_id) throw new Error(`Ad ${known_existing_ad_id} was supplied as existing. Inspect it by ID, not via create.`);
-				const cutoff = ad_schedule_end_time === undefined ? undefined : normalizeMetaAdCutoff(ad_schedule_end_time);
-				stage = "parent_validation";
-				const { campaign } = await assertSalesAdsetForCreation(adset_id, destination_url);
-				stage = "page_ownership";
-				await assertOwnedPage(page_id);
-				stage = "video_ownership";
-				await assertOwnedVideo(video_id, { title: expected_video_title });
-				stage = "destination_validation";
-				const tracking = buildMetaDestination(destination_url, utm);
-				stage = "duplicate_inventory";
-				await refuseDuplicateAdName(name, cutoff ? { adsetId: adset_id, videoIds: [video_id], destination: tracking.destinationUrl } : undefined);
-				stage = "thumbnail_metadata";
-				const thumbnail = await getOwnedVideoThumbnail(video_id);
-				stage = "thumbnail_bytes";
-				const bytes = await readOwnedVideoThumbnailBytes(video_id, thumbnail.uri);
-				if (inspect_only) return textResult({
-					ok: true, created: false, activation_performed: false, read_only_checks_passed: true,
-					video_id, width: thumbnail.width, height: thumbnail.height, cutoff: cutoff ?? null,
-				});
+				const { campaign, tracking, cutoff, bytes } = await prepareSinglePausedMetaAd({
+					adset_id, video_id, expected_video_title, page_id, name, destination_url, utm, ad_schedule_end_time, known_existing_ad_id,
+				}, (next) => { stage = next; });
 				stage = "thumbnail_image_registration";
 				const thumbnailHash = await registerOwnedVideoThumbnail(video_id, bytes);
 				stage = "creative_create";
@@ -1412,17 +1423,43 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"inspect_meta_ecommerce_campaign_prelaunch",
 		{
 			description:
-				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts. Supplying thumbnail_video_id instead verifies owned video and reports thumbnail dimensions without downloading or creating anything.",
+				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts. Supplying thumbnail_video_id instead verifies owned video and reports thumbnail dimensions without downloading or creating anything. Supplying paused_ad_preflight instead runs the exact ad's bounded thumbnail download and duplicate checks, without POST.",
 			inputSchema: z.object({
 				campaign_id: z.string().regex(/^\d+$/),
 				expected_campaign_name: z.string().trim().min(3).max(200),
 				ad_id: z.string().regex(/^\d+$/).optional(),
 				expected_adset_id: z.string().regex(/^\d+$/).optional(),
 				thumbnail_video_id: z.string().regex(/^\d+$/).optional(),
+				paused_ad_preflight: z.object({
+					adset_id: z.string().regex(/^\d+$/), video_id: z.string().regex(/^\d+$/),
+					expected_video_title: z.string().max(255), page_id: z.string().regex(/^\d+$/),
+					name: z.string().trim().min(3).max(200), destination_url: z.string().url(), utm: z.object({
+						source: z.string().optional(), medium: z.string().optional(), campaign: z.string().optional(),
+						content: z.string().optional(), term: z.string().optional(),
+					}),
+					ad_schedule_end_time: z.string().max(35).optional(),
+					known_existing_ad_id: z.string().regex(/^\d+$/).optional(),
+				}).optional(),
 			}),
 		},
-		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id, thumbnail_video_id }) => {
+		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id, thumbnail_video_id, paused_ad_preflight }) => {
 			try {
+				if (paused_ad_preflight) {
+					let stage = "input";
+					try {
+						if (thumbnail_video_id || ad_id || expected_adset_id) throw new Error("Select one inspection mode.");
+						const { cutoff, thumbnail } = await prepareSinglePausedMetaAd(
+							paused_ad_preflight, (next) => { stage = next; },
+							{ campaignId: campaign_id, campaignName: expected_campaign_name },
+						);
+						return textResult({
+							ok: true, created: false, activation_performed: false, read_only_checks_passed: true,
+							video_id: paused_ad_preflight.video_id, width: thumbnail.width, height: thumbnail.height, cutoff: cutoff ?? null,
+						});
+					} catch (error) {
+						return pausedCreateFailure(stage, error, paused_ad_preflight.known_existing_ad_id);
+					}
+				}
 				if (thumbnail_video_id) {
 					if (ad_id || expected_adset_id) throw new Error("Inspect an exact ad or an owned video thumbnail, not both.");
 					await assertOwnedVideo(thumbnail_video_id);
