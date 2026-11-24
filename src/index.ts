@@ -1,3 +1,4 @@
+import { stagingMediaDiagnostics, stagingMediaMatches } from "./tools/staging-media-matches";
 import { googleExactBudgetSchema, prepareExactBudget, verifyExactBudget } from "./tools/google-budget-controls";
 import { idempiereDbSchema, readIdempiereDb, type DbEnv } from "./tools/idempiere-db";
 import { googleBudgetDiagnostics } from "./tools/google-budget-diagnostics";
@@ -12135,19 +12136,24 @@ function createServer() {
 		if (slugs.length > 100 || slugs.some(s => !/^[a-z0-9-]+$/i.test(s))) {
 			throw new Error("Unexpected Fabric Sample attachment slugs.");
 		}
-		const media = await (await productImageWpFetch("staging",
+		const mediaResponse = await productImageWpFetch("staging",
 			"media?slug=" + encodeURIComponent(slugs.join(",")) +
-			"&per_page=100&_fields=id,source_url,media_details", true)).json<any[]>();
+			"&per_page=100&_fields=id,source_url,media_details", true);
+		const media = await mediaResponse.json<unknown>();
 		if (!Array.isArray(media)) throw new Error("Unable to read staging curtain swatch attachments.");
-		for (const choice of candidateChoices) {
-			const pathName = uploadPath(choice.image, liveHost);
-			const candidates = media.flatMap(item => {
-				const urls = [item.source_url, ...Object.values(item.media_details?.sizes ?? {})
-					.map((s: any) => s.source_url)].filter((v): v is string => typeof v === "string");
-				const matched = urls.find(u => uploadPath(u, stagingHost) === pathName);
-				return matched && Number.isInteger(item.id) && item.id > 0 ? [{ id: item.id, image: matched }] : [];
-			});
-			const attachment = one(candidates, "staging swatch matching upload path " + pathName);
+		const paths = candidateChoices.map(choice => uploadPath(choice.image, liveHost));
+		const matches = stagingMediaMatches(paths, media, url => uploadPath(url, stagingHost));
+		// A bounded slug query can miss an attachment; never infer that it does not exist elsewhere.
+		const totalPages = mediaResponse.headers.get("X-WP-TotalPages");
+		const inventoryTruncated = media.length > 100 || (totalPages !== null
+			? !/^\d+$/.test(totalPages) || Number(totalPages) > 1 : media.length >= 100);
+		const mediaDiagnostics = stagingMediaDiagnostics(paths.length, matches, inventoryTruncated);
+		if (inventoryTruncated || mediaDiagnostics.unmatched_count > 0 || mediaDiagnostics.ambiguous_count > 0) {
+			return { blocked: true as const, mediaDiagnostics, oldCount: dst.group.fields.length };
+		}
+		const exactMatches = new Map(matches.map(entry => [entry.path, entry.matches[0]]));
+		for (const [i, choice] of candidateChoices.entries()) {
+			const attachment = exactMatches.get(paths[i])!;
 			choice.image = attachment.image;
 			choice.attachment = attachment.id;
 		}
@@ -12174,7 +12180,7 @@ function createServer() {
 		const afterHash = await genericWapfHashOf(after);
 		const targetIdentity = identity(target);
 		const planHash = await genericWapfHashOf({ sourceHash, beforeHash, afterHash, targetIdentity, metaId: dst.meta.id });
-		return { get, path, identity, targetIdentity, metaId: dst.meta.id, before, after,
+		return { blocked: false as const, mediaDiagnostics, get, path, identity, targetIdentity, metaId: dst.meta.id, before, after,
 			sourceHash, beforeHash, afterHash, planHash, missing, oldCount: dst.group.fields.length,
 			newCount: nextGroup.fields.length, fieldIds: spec.map(s => s[0]), slugs: fixedChoices.map(c => c[0]) };
 	}
@@ -12186,7 +12192,18 @@ function createServer() {
 		staging_edit_window_confirmed?: true;
 	}) {
 		const plan = await stagingFabricSampleCurtainPlan();
+		if (plan.blocked) {
+			if (args.operation !== "preview_staging_fabric_sample_curtain_merge") {
+				throw new Error("Staging media is unresolved; no write. Run the staging Fabric Sample preview for details.");
+			}
+			return toolResult({
+				environment: "staging", product_id: 128, read_only: true, write_performed: false,
+				blocked: true, blocker: "unresolved_staging_media", before_field_count: plan.oldCount,
+				media_diagnostics: plan.mediaDiagnostics,
+			});
+		}
 		const receipt = {
+			media_diagnostics: plan.mediaDiagnostics,
 			environment: "staging",
 			product_id: 128,
 			source_field_group_sha256: plan.sourceHash,
