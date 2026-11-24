@@ -76,13 +76,18 @@ class MetaProviderError extends Error {
 	}
 }
 
+// Repository TypeScript targets a library without the native Error options.
+class CausedMetaError extends Error {
+	constructor(message: string, readonly cause: unknown) { super(message); }
+}
+
 class DuplicateMetaAdError extends Error {
 	constructor(message: string, readonly adId: string) { super(message); }
 }
 
 function pausedCreateFailure(stage: string, error: unknown, adId?: string, creativeId?: string) {
 	let original = error;
-	while (original instanceof Error && original.cause && original !== original.cause) original = original.cause;
+	while (original instanceof CausedMetaError) original = original.cause;
 	const provider = original instanceof MetaProviderError ? original : undefined;
 	const duplicate = original instanceof DuplicateMetaAdError ? original.adId : undefined;
 	const safeId = (value?: string) => value && /^\d+$/.test(value) ? value : undefined;
@@ -169,9 +174,7 @@ async function toolkitMetaPost(
 	} catch (error) {
 		if (!diagnosticContext) throw error;
 		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(
-			`${message} [creative_diagnostic=${JSON.stringify(diagnosticContext)}]`, { cause: error },
-		);
+		throw new CausedMetaError(`${message} [creative_diagnostic=${JSON.stringify(diagnosticContext)}]`, error);
 	}
 }
 
@@ -611,7 +614,7 @@ async function getOwnedVideoThumbnail(videoId: string) {
 	try {
 		response = await toolkitMetaRequest(`${videoId}/thumbnails`, "GET", { fields: "uri,width,height,is_preferred", limit: 50 });
 	} catch (error) {
-		throw new Error(`Meta did not allow thumbnail inspection for owned video ${videoId}.`, { cause: error });
+		throw new CausedMetaError(`Meta did not allow thumbnail inspection for owned video ${videoId}.`, error);
 	}
 	const thumbnails: unknown[] = Array.isArray(response?.data) ? response.data : [];
 	const eligible = thumbnails.flatMap((item) => {
@@ -690,7 +693,7 @@ async function registerOwnedVideoThumbnail(videoId: string, bytes: Uint8Array) {
 	try {
 		result = await toolkitMetaPost(`${adAccountId}/adimages`, { bytes: btoa(binary) });
 	} catch (error) {
-		throw new Error(`Meta did not confirm thumbnail registration for video ${videoId}. No creative or ad was created.`, { cause: error });
+		throw new CausedMetaError(`Meta did not confirm thumbnail registration for video ${videoId}. No creative or ad was created.`, error);
 	}
 	const images = Object.values(result?.images ?? {});
 	const hash = images[0]?.hash;
@@ -861,7 +864,7 @@ async function createPausedAd(adsetId: string, name: string, creativeId: string,
 			`adset_id,campaign_id,status,effective_status,creative{id,name,object_story_spec,asset_feed_spec,url_tags}${cutoff ? `,${META_AD_SCHEDULE_FIELD}` : ""}`,
 		);
 	} catch (error) {
-		throw new Error(`Meta returned created ad ID ${createdId}, but readback failed. Inspect that exact ID; do not retry creation or activate it.`, { cause: error });
+		throw new CausedMetaError(`Meta returned created ad ID ${createdId}, but readback failed. Inspect that exact ID; do not retry creation or activate it.`, error);
 	}
 	if (verified.status !== "PAUSED" || String(verified.adset_id) !== adsetId) {
 		throw new Error(`Ad ${createdId} failed PAUSED/ad-set verification. Inspect that exact ID; do not retry or activate it.`);
