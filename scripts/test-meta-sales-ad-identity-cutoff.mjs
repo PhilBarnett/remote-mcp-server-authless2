@@ -8,7 +8,7 @@ const source = fs.readFileSync(new URL("../src/meta-ecommerce-toolkit.ts", impor
 const js = ts.transpileModule(source.replace(/^import .*;[ \t]*$/gm, ""), {
 	compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
-const account = "123", campaign = "234", adset = "345", page = "456", ad = "567", video = "678", creative = "789";
+const account = "123", campaign = "234", adset = "345", page = "456", ad = "567", video = "678", vertical = "679", creative = "789";
 const landing = "https://example.test/everyday/";
 const cutoff = "2099-11-30T23:59:00+11:00", canonical = "2099-11-30T12:59:00Z";
 const createName = "Scoped sale once";
@@ -29,14 +29,14 @@ const statusInput = { ad_id: ad, expected_ad_name: createName, expected_adset_id
 
 function harness(options = {}) {
 	const calls = [], tools = {};
-	let state = options.status ?? "PAUSED", created = false, scheduleReads = 0;
+	let state = options.status ?? "PAUSED", created = false, scheduleReads = 0, placements;
 	const mockFetch = async (url, opts) => {
 		const u = new URL(url), method = opts.method, path = u.pathname.slice(7);
 		const params = Object.fromEntries(method === "GET" ? u.searchParams : opts.body);
 		calls.push({ method, path, params });
 		assert.equal(String(url).startsWith("https://graph.facebook.com/v27.0/"), true);
 		if (method === "POST") {
-			if (path === `act_${account}/adcreatives`) return Response.json({ id: creative });
+			if (path === `act_${account}/adcreatives`) { placements = params.asset_feed_spec ? JSON.parse(params.asset_feed_spec) : undefined; return Response.json({ id: creative }); }
 			if (path === `act_${account}/ads`) { created = true; return Response.json({ id: ad }); }
 			if (path === ad) { state = params.status; return Response.json({ success: true }); }
 			throw new Error("Unexpected POST " + path);
@@ -44,10 +44,11 @@ function harness(options = {}) {
 		if (path === adset) return Response.json(parents[0]);
 		if (path === campaign) return Response.json(parents[1]);
 		if (path === `act_${account}/promote_pages`) return Response.json({ data: [{ id: page }] });
-		if (path === `act_${account}/advideos`) return Response.json({ data: [{ id: video, title: "Owned sales video" }] });
+		if (path === `act_${account}/advideos`) return Response.json({ data: [{ id: video, title: "Owned sales video", created_time: "2099-01-01T00:00:00Z", length: 30, format: [{ width: 1080, height: 1350 }] }, { id: vertical, title: "Owned vertical video", created_time: "2099-01-01T00:00:00Z", length: 30, format: [{ width: 1080, height: 1920 }] }] });
 		if (path === page) return Response.json({ instagram_business_account: { id: "876" } });
 		if (path === `act_${account}/ads`) return Response.json(options.inventory?.(params.after) ?? { data: [] });
 		if (path === ad) {
+			if (created && options.failedReadback) return Response.json({ error: { message: "Forbidden", code: 200 } }, { status: 403 });
 			if (options.invisible) return Response.json({ error: { message: "Unsupported get request", code: 100, error_subcode: 33 } }, { status: 400 });
 			if (options.wrongOwner) return Response.json(providerAd({ account_id: "000" }));
 			if (options.mismatchedParent) return Response.json(providerAd({ adset_id: "000" }));
@@ -55,7 +56,8 @@ function harness(options = {}) {
 				if (options.legacyNoField) return Response.json({ error: { message: "Tried accessing nonexisting field (ad_schedule_end_time) on node type (Ad)", code: 100 } }, { status: 400 });
 				++scheduleReads;
 				const value = options.cutoff?.({ created, scheduleReads, state }) ?? (options.noCutoff ? undefined : "2099-11-30T23:59:00+1100");
-				return Response.json(providerAd({ status: state, ad_schedule_end_time: value }));
+				const actualPlacements = options.swapPlacementIds && placements ? { ...placements, videos: placements.videos.map((v, i) => ({ ...v, video_id: placements.videos[1 - i].video_id })) } : placements;
+				return Response.json(providerAd({ status: state, ad_schedule_end_time: value, ...(actualPlacements ? { creative: { id: creative, asset_feed_spec: actualPlacements } } : {}) }));
 			}
 			return Response.json(providerAd({ status: state }));
 		}
@@ -152,4 +154,24 @@ test("cutoff drift at readback rolls back only the previously validated ad", asy
 	const r = await h.run(update, statusInput);
 	assert.equal(r.isError, true); assert.match(errorText(r), /rollback verified PAUSED/);
 	assert.deepEqual(h.posts().map(p => [p.path, p.params.status]), [[ad, "ACTIVE"], [ad, "PAUSED"]]);
+});
+
+test("timed placement exact campaign, cutoff and source videos verify; swapped IDs fail", async () => {
+	const place = "create_meta_website_sales_placement_video_ad_paused";
+	const spec = { ...createInput, video_4x5_id: video, video_4x5_expected_name: "Owned sales video", video_4x5_expected_created_time: "2099-01-01T00:00:00Z",
+		video_4x5_expected_length_seconds: 30, video_4x5_expected_width: 1080, video_4x5_expected_height: 1350,
+		video_9x16_id: vertical, video_9x16_expected_name: "Owned vertical video", video_9x16_expected_created_time: "2099-01-01T00:00:00Z",
+		video_9x16_expected_length_seconds: 30, video_9x16_expected_width: 1080, video_9x16_expected_height: 1920 };
+	for (const swapPlacementIds of [false, true]) {
+		const h = harness({ swapPlacementIds }), r = await h.run(place, spec);
+		assert.equal(h.posts()[1].params.ad_schedule_end_time, canonical);
+		assert.equal(h.posts()[1].params.status, "PAUSED");
+		if (swapPlacementIds) { assert.equal(r.isError, true); assert.match(errorText(r), /Ad 567 did not verify both exact labeled placement videos/); }
+		else { assert.equal(r.isError, undefined); assert.equal(JSON.parse(r.content[0].text).ad.campaign_id, campaign); }
+	}
+});
+test("after successful POST, even when GET is forbidden preserve created ID in error", async () => {
+	const h = harness({ failedReadback: true }), r = await h.run(create, createInput);
+	assert.equal(r.isError, true); assert.match(errorText(r), /created ad ID 567.*do not retry/);
+	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adcreatives`, `act_${account}/ads`]);
 });
