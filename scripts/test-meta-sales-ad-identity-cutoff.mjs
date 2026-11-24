@@ -193,7 +193,7 @@ test("timed placement exact campaign, cutoff and source videos verify; swapped I
 test("after successful POST, even when GET is forbidden preserve created ID in error", async () => {
 	const h = harness({ failedReadback: true }), r = await h.run(create, createInput);
 	assert.equal(r.isError, true); assert.match(errorText(r), /created ad ID 567.*do not retry/);
-	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adcreatives`, `act_${account}/ads`]);
+	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adimages`, `act_${account}/adcreatives`, `act_${account}/ads`]);
 });
 
 test("reports owned thumbnail dimensions without showing URI, downloading or creating it", async () => {
