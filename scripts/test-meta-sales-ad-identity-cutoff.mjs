@@ -11,6 +11,9 @@ const js = ts.transpileModule(source.replace(/^import .*;[ \t]*$/gm, ""), {
 const account = "123", campaign = "234", adset = "345", page = "456", ad = "567", video = "678", vertical = "679", creative = "789";
 const landing = "https://example.test/everyday/";
 const cutoff = "2099-11-30T23:59:00+11:00", canonical = "2099-11-30T12:59:00Z";
+const thumbnailUrl = "https://scontent.example.fbcdn.net/thumbnail.jpg?signature=fixture";
+const thumbnailHash = "ab".repeat(16);
+const thumbnailBytes = Uint8Array.of(255, 216, 255, 217);
 const createName = "Scoped sale once";
 const providerAd = (data = {}) => ({ id: ad, account_id: account, name: createName, adset_id: adset, campaign_id: campaign,
 	status: "PAUSED", effective_status: "PAUSED", creative: { id: creative, object_story_spec: { video_data: { video_id: video, call_to_action: { value: { link: landing } } } } }, ...data });
@@ -31,11 +34,22 @@ function harness(options = {}) {
 	const calls = [], tools = {};
 	let state = options.status ?? "PAUSED", created = false, scheduleReads = 0, placements;
 	const mockFetch = async (url, opts) => {
-		const u = new URL(url), method = opts.method, path = u.pathname.slice(7);
+		const u = new URL(url);
+		if (u.hostname.endsWith(".fbcdn.net")) {
+			assert.equal(url, thumbnailUrl);
+			assert.equal(opts.redirect, "error");
+			assert.equal(opts.credentials, "omit");
+			assert.equal(opts.headers, undefined);
+			calls.push({ method: "GET", path: "cdn-thumbnail" });
+			if (options.badDownload) return new Response("not an image", { headers: { "content-type": "image/jpeg" } });
+			return new Response(thumbnailBytes, { headers: { "content-type": "image/jpeg" } });
+		}
+		const method = opts.method, path = u.pathname.slice(7);
 		const params = Object.fromEntries(method === "GET" ? u.searchParams : opts.body);
 		calls.push({ method, path, params });
 		assert.equal(String(url).startsWith("https://graph.facebook.com/v27.0/"), true);
 		if (method === "POST") {
+			if (path === `act_${account}/adimages`) return Response.json({ images: options.invalidHash ? {} : { bytes: { hash: thumbnailHash } } });
 			if (path === `act_${account}/adcreatives`) { placements = params.asset_feed_spec ? JSON.parse(params.asset_feed_spec) : undefined; return Response.json({ id: creative }); }
 			if (path === `act_${account}/ads`) { created = true; return Response.json({ id: ad }); }
 			if (path === ad) { state = params.status; return Response.json({ success: true }); }
@@ -45,6 +59,9 @@ function harness(options = {}) {
 		if (path === campaign) return Response.json(parents[1]);
 		if (path === `act_${account}/promote_pages`) return Response.json({ data: [{ id: page }] });
 		if (path === `act_${account}/advideos`) return Response.json({ data: [{ id: video, title: "Owned sales video", created_time: "2099-01-01T00:00:00Z", length: 30, format: [{ width: 1080, height: 1350 }] }, { id: vertical, title: "Owned vertical video", created_time: "2099-01-01T00:00:00Z", length: 30, format: [{ width: 1080, height: 1920 }] }] });
+		if (path === `${video}/thumbnails`) return Response.json({ data: options.badThumbnail
+			? [{ uri: "https://evilfbcdn.net/wrong.jpg", width: 1080, height: 1920 }, { uri: thumbnailUrl, width: 160, height: 160 }]
+			: [{ uri: thumbnailUrl, width: 1080, height: 1920, is_preferred: true }] });
 		if (path === page) return Response.json({ instagram_business_account: { id: "876" } });
 		if (path === `act_${account}/ads`) return Response.json(options.inventory?.(params.after) ?? { data: [] });
 		if (path === ad) {
@@ -109,15 +126,18 @@ test("validates dates before any provider calls", async () => {
 test("creates and verifies exactly one paused ad with equivalent cutoff", async () => {
 	const h = harness(), r = await h.run(create, createInput);
 	assert.equal(r.isError, undefined);
-	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adcreatives`, `act_${account}/ads`]);
-	const post = h.posts()[1].params;
+	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adimages`, `act_${account}/adcreatives`, `act_${account}/ads`]);
+	assert.equal(h.posts()[0].params.bytes, Buffer.from(thumbnailBytes).toString("base64"));
+	const creativeData = JSON.parse(h.posts()[1].params.object_story_spec).video_data;
+	assert.equal(creativeData.image_hash, thumbnailHash); assert.equal(creativeData.image_url, undefined);
+	const post = h.posts()[2].params;
 	assert.equal(post.status, "PAUSED"); assert.equal(post.ad_schedule_end_time, canonical);
 	assert.equal(JSON.parse(r.content[0].text).ad.id, ad);
 });
 test("reports exact created id and forbids activation/retry when provider drops cutoff", async () => {
 	const h = harness({ noCutoff: true }), r = await h.run(create, createInput);
 	assert.equal(r.isError, true); assert.match(errorText(r), /Ad 567 was created PAUSED/);
-	assert.equal(h.posts().length, 2); assert.equal(h.posts().some(p => p.params.status === "ACTIVE"), false);
+	assert.equal(h.posts().length, 3); assert.equal(h.posts().some(p => p.params.status === "ACTIVE"), false);
 });
 test("refuses renamed same video on later page even with new UTM; no creation", async () => {
 	const h = harness({ inventory: (cursor) => cursor === undefined
@@ -173,5 +193,29 @@ test("timed placement exact campaign, cutoff and source videos verify; swapped I
 test("after successful POST, even when GET is forbidden preserve created ID in error", async () => {
 	const h = harness({ failedReadback: true }), r = await h.run(create, createInput);
 	assert.equal(r.isError, true); assert.match(errorText(r), /created ad ID 567.*do not retry/);
-	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adcreatives`, `act_${account}/ads`]);
+	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adimages`, `act_${account}/adcreatives`, `act_${account}/ads`]);
+});
+
+test("reports owned thumbnail dimensions without showing URI, downloading or creating it", async () => {
+	const h = harness();
+	const r = await h.run(inspect, { campaign_id: campaign, expected_campaign_name: parents[1].name, thumbnail_video_id: video });
+	assert.deepEqual(JSON.parse(errorText(r)), { video_id: video, thumbnail_available: true, width: 1080, height: 1920 });
+	assert.equal(h.calls.some(c => c.path === "cdn-thumbnail"), false);
+	assert.deepEqual(h.posts(), []);
+});
+test("rejects missing, small or untrusted thumbnail and bad image bytes before any writes", async () => {
+	for (const options of [{ badThumbnail: true }, { badDownload: true }]) {
+		const h = harness(options);
+		const r = await h.run(create, createInput);
+		assert.equal(r.isError, true);
+		assert.match(errorText(r), /thumbnail/);
+		assert.doesNotMatch(errorText(r), /signature|fbcdn/);
+		assert.deepEqual(h.posts(), []);
+	}
+});
+test("does not create creative or ad if Graph returns no usable owned image hash", async () => {
+	const h = harness({ invalidHash: true });
+	const r = await h.run(create, createInput);
+	assert.match(errorText(r), /did not return one valid thumbnail hash/);
+	assert.deepEqual(h.posts().map(c => c.path), [`act_${account}/adimages`]);
 });
