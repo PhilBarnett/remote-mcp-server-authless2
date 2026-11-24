@@ -68,6 +68,9 @@ jobs:
       - name: Test legacy Meta website destination guard
         run: node scripts/test-meta-legacy-roller-destination.mjs
 
+      - name: Test Meta sales ad identity, deduplication and cutoff
+        run: node --test scripts/test-meta-sales-ad-identity-cutoff.mjs
+
       - name: Test Google budget diagnostics
         run: node --experimental-strip-types --test scripts/test-google-budget-diagnostics.mjs
 

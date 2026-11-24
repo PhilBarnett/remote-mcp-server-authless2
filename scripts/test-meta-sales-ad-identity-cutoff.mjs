@@ -1,0 +1,177 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import test from "node:test";
+import ts from "typescript";
+import { z } from "zod";
+
+const source = fs.readFileSync(new URL("../src/meta-ecommerce-toolkit.ts", import.meta.url), "utf8");
+const js = ts.transpileModule(source.replace(/^import .*;[ \t]*$/gm, ""), {
+	compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+}).outputText;
+const account = "123", campaign = "234", adset = "345", page = "456", ad = "567", video = "678", vertical = "679", creative = "789";
+const landing = "https://example.test/everyday/";
+const cutoff = "2099-11-30T23:59:00+11:00", canonical = "2099-11-30T12:59:00Z";
+const createName = "Scoped sale once";
+const providerAd = (data = {}) => ({ id: ad, account_id: account, name: createName, adset_id: adset, campaign_id: campaign,
+	status: "PAUSED", effective_status: "PAUSED", creative: { id: creative, object_story_spec: { video_data: { video_id: video, call_to_action: { value: { link: landing } } } } }, ...data });
+const parents = [
+	{ id: adset, account_id: account, name: "Warm audience", campaign_id: campaign, status: "ACTIVE", destination_type: "WEBSITE", optimization_goal: "OFFSITE_CONVERSIONS" },
+	{ id: campaign, account_id: account, name: "Existing sales", status: "ACTIVE", objective: "OUTCOME_SALES" },
+];
+const createInput = {
+	adset_id: adset, video_id: video, expected_video_title: "Owned sales video", page_id: page, name: createName,
+	primary_text: "20% off for this event", headline: "20% off", cta_type: "SHOP_NOW", destination_url: landing, utm: {},
+	ad_schedule_end_time: cutoff, confirmation: "CONFIRM CREATE PAUSED META ECOMMERCE AD",
+};
+const statusInput = { ad_id: ad, expected_ad_name: createName, expected_adset_id: adset, expected_adset_name: parents[0].name,
+	expected_campaign_id: campaign, expected_campaign_name: parents[1].name, expected_current_status: "PAUSED", new_status: "ACTIVE",
+	expected_ad_schedule_end_time: cutoff, confirmation: "CONFIRM META AD STATUS CHANGE" };
+
+function harness(options = {}) {
+	const calls = [], tools = {};
+	let state = options.status ?? "PAUSED", created = false, scheduleReads = 0, placements;
+	const mockFetch = async (url, opts) => {
+		const u = new URL(url), method = opts.method, path = u.pathname.slice(7);
+		const params = Object.fromEntries(method === "GET" ? u.searchParams : opts.body);
+		calls.push({ method, path, params });
+		assert.equal(String(url).startsWith("https://graph.facebook.com/v27.0/"), true);
+		if (method === "POST") {
+			if (path === `act_${account}/adcreatives`) { placements = params.asset_feed_spec ? JSON.parse(params.asset_feed_spec) : undefined; return Response.json({ id: creative }); }
+			if (path === `act_${account}/ads`) { created = true; return Response.json({ id: ad }); }
+			if (path === ad) { state = params.status; return Response.json({ success: true }); }
+			throw new Error("Unexpected POST " + path);
+		}
+		if (path === adset) return Response.json(parents[0]);
+		if (path === campaign) return Response.json(parents[1]);
+		if (path === `act_${account}/promote_pages`) return Response.json({ data: [{ id: page }] });
+		if (path === `act_${account}/advideos`) return Response.json({ data: [{ id: video, title: "Owned sales video", created_time: "2099-01-01T00:00:00Z", length: 30, format: [{ width: 1080, height: 1350 }] }, { id: vertical, title: "Owned vertical video", created_time: "2099-01-01T00:00:00Z", length: 30, format: [{ width: 1080, height: 1920 }] }] });
+		if (path === page) return Response.json({ instagram_business_account: { id: "876" } });
+		if (path === `act_${account}/ads`) return Response.json(options.inventory?.(params.after) ?? { data: [] });
+		if (path === ad) {
+			if (created && options.failedReadback) return Response.json({ error: { message: "Forbidden", code: 200 } }, { status: 403 });
+			if (options.invisible) return Response.json({ error: { message: "Unsupported get request", code: 100, error_subcode: 33 } }, { status: 400 });
+			if (options.wrongOwner) return Response.json(providerAd({ account_id: "000" }));
+			if (options.mismatchedParent) return Response.json(providerAd({ adset_id: "000" }));
+			if (params.fields?.split(",").includes("ad_schedule_end_time")) {
+				if (options.legacyNoField) return Response.json({ error: { message: "Tried accessing nonexisting field (ad_schedule_end_time) on node type (Ad)", code: 100 } }, { status: 400 });
+				++scheduleReads;
+				const value = options.cutoff?.({ created, scheduleReads, state }) ?? (options.noCutoff ? undefined : "2099-11-30T23:59:00+1100");
+				const actualPlacements = options.swapPlacementIds && placements ? { ...placements, videos: placements.videos.map((v, i) => ({ ...v, video_id: placements.videos[1 - i].video_id })) } : placements;
+				return Response.json(providerAd({ status: state, ad_schedule_end_time: value, ...(actualPlacements ? { creative: { id: creative, asset_feed_spec: actualPlacements } } : {}) }));
+			}
+			return Response.json(providerAd({ status: state }));
+		}
+		throw new Error("Unexpected GET " + path);
+	};
+	const exports = {};
+	new Function("exports", "env", "z", "fetch", "console", js)(
+		exports, { META_ACCESS_TOKEN: "fixture-not-a-secret", META_AD_ACCOUNT_ID: account, META_API_VERSION: "v27.0", WC_SITE: landing }, z, mockFetch, { error() {} },
+	);
+	exports.registerMetaEcommerceToolkit({ registerTool(name, options, run) { tools[name] = [options.inputSchema, run]; } });
+	return {
+		calls, posts: () => calls.filter(c => c.method === "POST"),
+		async run(name, params) { const [schema, run] = tools[name]; return run(schema.parse(params)); },
+	};
+}
+const create = "create_meta_website_sales_video_ad_paused", update = "set_meta_ad_status_guarded", inspect = "inspect_meta_ecommerce_campaign_prelaunch";
+const readArgs = { ad_id: ad, expected_adset_id: adset, campaign_id: campaign, expected_campaign_name: parents[1].name };
+const errorText = (r) => r.content[0].text;
+
+test("reads exact owned published ad and normalized provider-supplied fields without changes", async () => {
+	const h = harness(), r = await h.run(inspect, readArgs);
+	const result = JSON.parse(r.content[0].text);
+	assert.equal(result.ad.id, ad); assert.deepEqual(result.ad.video_ids, [video]);
+	assert.equal(result.ad.ad_schedule_end_time, "2099-11-30T23:59:00+1100");
+	assert.deepEqual(h.posts(), []);
+});
+test("unpublished or unavailable id never becomes permission to create", async () => {
+	const h = harness({ invisible: true }), r = await h.run(inspect, readArgs);
+	assert.equal(r.isError, true); assert.match(errorText(r), /Unsupported get request/);
+	const rr = await h.run(create, { ...createInput, known_existing_ad_id: ad });
+	assert.equal(rr.isError, true); assert.match(errorText(rr), /Inspect it by ID/);
+	assert.deepEqual(h.posts(), []);
+});
+test("rejects mismatched parent and ownership before any write", async () => {
+	for (const options of [{ wrongOwner: true }, { mismatchedParent: true }]) {
+		const h = harness(options);
+		assert.equal((await h.run(inspect, readArgs)).isError, true);
+		assert.equal((await h.run(update, statusInput)).isError, true);
+		assert.deepEqual(h.posts(), []);
+	}
+});
+test("validates dates before any provider calls", async () => {
+	for (const date of ["2099-11-30T23:59:00", "2099-02-31T23:59:00Z", "2020-01-01T00:00:00Z"]) {
+		const h = harness();
+		assert.equal((await h.run(create, { ...createInput, ad_schedule_end_time: date })).isError, true);
+		assert.deepEqual(h.calls, []);
+	}
+});
+test("creates and verifies exactly one paused ad with equivalent cutoff", async () => {
+	const h = harness(), r = await h.run(create, createInput);
+	assert.equal(r.isError, undefined);
+	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adcreatives`, `act_${account}/ads`]);
+	const post = h.posts()[1].params;
+	assert.equal(post.status, "PAUSED"); assert.equal(post.ad_schedule_end_time, canonical);
+	assert.equal(JSON.parse(r.content[0].text).ad.id, ad);
+});
+test("reports exact created id and forbids activation/retry when provider drops cutoff", async () => {
+	const h = harness({ noCutoff: true }), r = await h.run(create, createInput);
+	assert.equal(r.isError, true); assert.match(errorText(r), /Ad 567 was created PAUSED/);
+	assert.equal(h.posts().length, 2); assert.equal(h.posts().some(p => p.params.status === "ACTIVE"), false);
+});
+test("refuses renamed same video on later page even with new UTM; no creation", async () => {
+	const h = harness({ inventory: (cursor) => cursor === undefined
+		? { data: [], paging: { next: "https://ignored.invalid/?sensitive=fixture", cursors: { after: "page2" } } }
+		: { data: [providerAd({ name: "Other title", status: "ACTIVE" })] } });
+	const r = await h.run(create, { ...createInput, destination_url: landing + "?utm_source=facebook" });
+	assert.equal(r.isError, true); assert.match(errorText(r), /Potential duplicate/);
+	assert.deepEqual(h.posts(), []);
+});
+test("rejects partial inventory or a repeated pagination cursor", async () => {
+	for (const inventory of [() => ({ data: [], paging: { next: "next" } }),
+		() => ({ data: [], paging: { next: "next", cursors: { after: "same" } } }),
+		() => ({ data: [{ id: "999", name: "unreadable", adset_id: adset }] }),
+	]) {
+		const h = harness({ inventory }), r = await h.run(create, createInput);
+		assert.equal(r.isError, true); assert.deepEqual(h.posts(), []);
+	}
+});
+test("requires reviewed matching cutoff before activating a timed ad", async () => {
+	for (const [options, expected] of [[{}, undefined], [{}, "2099-12-02T00:00:00Z"], [{ noCutoff: true }, cutoff], [{ legacyNoField: true }, cutoff]]) {
+		const h = harness(options), r = await h.run(update, { ...statusInput, expected_ad_schedule_end_time: expected });
+		assert.equal(r.isError, true); assert.deepEqual(h.posts(), []);
+	}
+});
+test("activates exact owned ad only and leaves ordinary untimed activation compatible", async () => {
+	for (const [options, expected] of [[{}, cutoff], [{ noCutoff: true }, undefined], [{ legacyNoField: true }, undefined]]) {
+		const h = harness(options), r = await h.run(update, { ...statusInput, expected_ad_schedule_end_time: expected });
+		assert.equal(r.isError, undefined);
+		assert.deepEqual(h.posts(), [{ method: "POST", path: ad, params: { status: "ACTIVE" } }]);
+	}
+});
+test("cutoff drift at readback rolls back only the previously validated ad", async () => {
+	const h = harness({ cutoff: ({ scheduleReads }) => scheduleReads <= 1 ? "2099-11-30T23:59:00+1100" : "2099-12-01T00:59:00+1100" });
+	const r = await h.run(update, statusInput);
+	assert.equal(r.isError, true); assert.match(errorText(r), /rollback verified PAUSED/);
+	assert.deepEqual(h.posts().map(p => [p.path, p.params.status]), [[ad, "ACTIVE"], [ad, "PAUSED"]]);
+});
+
+test("timed placement exact campaign, cutoff and source videos verify; swapped IDs fail", async () => {
+	const place = "create_meta_website_sales_placement_video_ad_paused";
+	const spec = { ...createInput, video_4x5_id: video, video_4x5_expected_name: "Owned sales video", video_4x5_expected_created_time: "2099-01-01T00:00:00Z",
+		video_4x5_expected_length_seconds: 30, video_4x5_expected_width: 1080, video_4x5_expected_height: 1350,
+		video_9x16_id: vertical, video_9x16_expected_name: "Owned vertical video", video_9x16_expected_created_time: "2099-01-01T00:00:00Z",
+		video_9x16_expected_length_seconds: 30, video_9x16_expected_width: 1080, video_9x16_expected_height: 1920 };
+	for (const swapPlacementIds of [false, true]) {
+		const h = harness({ swapPlacementIds }), r = await h.run(place, spec);
+		assert.equal(h.posts()[1].params.ad_schedule_end_time, canonical);
+		assert.equal(h.posts()[1].params.status, "PAUSED");
+		if (swapPlacementIds) { assert.equal(r.isError, true); assert.match(errorText(r), /Ad 567 did not verify both exact labeled placement videos/); }
+		else { assert.equal(r.isError, undefined); assert.equal(JSON.parse(r.content[0].text).ad.campaign_id, campaign); }
+	}
+});
+test("after successful POST, even when GET is forbidden preserve created ID in error", async () => {
+	const h = harness({ failedReadback: true }), r = await h.run(create, createInput);
+	assert.equal(r.isError, true); assert.match(errorText(r), /created ad ID 567.*do not retry/);
+	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adcreatives`, `act_${account}/ads`]);
+});
