@@ -602,7 +602,9 @@ async function registerOwnedVideoThumbnail(videoId: string) {
 	const mimeTypes = new Set(["image/jpeg", "image/png"]);
 	let bytes: Uint8Array;
 	try {
-		const response = await fetch(uri, { redirect: "error", credentials: "omit", signal: AbortSignal.timeout(10000) });
+		// Worker fetch has no cookie jar; send no headers, and explicitly omit credentials on runtimes that support it.
+		const init = { redirect: "error", credentials: "omit", signal: AbortSignal.timeout(10000) } as const;
+		const response = await fetch(uri, init);
 		const mime = response.headers.get("content-type")?.split(";")[0].trim();
 		const declared = Number(response.headers.get("content-length"));
 		if (!response.ok || !mime || !mimeTypes.has(mime) || declared > maxBytes || !response.body) {
