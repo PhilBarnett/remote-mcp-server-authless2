@@ -566,10 +566,101 @@ function buildMetaCreativeDiagnostic(
 	};
 }
 
+// Query only after the caller verifies the video belongs to our ad account.
+async function getOwnedVideoThumbnail(videoId: string) {
+	let response;
+	try {
+		response = await toolkitMetaRequest(`${videoId}/thumbnails`, "GET", { fields: "uri,width,height,is_preferred", limit: 50 });
+	} catch {
+		throw new Error(`Meta did not allow thumbnail inspection for owned video ${videoId}.`);
+	}
+	const thumbnails: unknown[] = Array.isArray(response?.data) ? response.data : [];
+	const eligible = thumbnails.flatMap((item) => {
+		if (!item || typeof item !== "object") return [];
+		const { uri, width, height, is_preferred } = item as Record<string, unknown>;
+		// Do not fall back to the often low-resolution preview picture or rewrite a signed CDN URL.
+		if (typeof uri !== "string" || uri.length > 4096 || /[\s\\]/.test(uri) ||
+			typeof width !== "number" || typeof height !== "number" ||
+			!Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+			width < 256 || height < 256 || width > 8192 || height > 8192) return [];
+		let url: URL;
+		try { url = new URL(uri); } catch { return []; }
+		if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash ||
+			!/^scontent(?:-[a-z0-9-]+)?(?:\.[a-z0-9-]+)*\.fbcdn\.net$/.test(url.hostname)) return [];
+		return [{ uri, width, height, area: width * height, preferred: is_preferred === true }];
+	});
+	eligible.sort((a, b) => b.area - a.area || Number(b.preferred) - Number(a.preferred));
+	if (!eligible[0]) throw new Error(`Owned Meta video ${videoId} has no suitable thumbnail (HTTPS Meta CDN, at least 256 × 256). No creative or ad was created.`);
+	return eligible[0];
+}
+
+// Meta prohibits using its signed CDN URL as creative image_url. Send only
+// vetted bytes to our account's image library, then use the returned image_hash.
+async function registerOwnedVideoThumbnail(videoId: string) {
+	const { uri } = await getOwnedVideoThumbnail(videoId);
+	const maxBytes = 4 * 1024 * 1024;
+	const mimeTypes = new Set(["image/jpeg", "image/png"]);
+	let bytes: Uint8Array;
+	try {
+		const response = await fetch(uri, { redirect: "error", credentials: "omit", signal: AbortSignal.timeout(10000) });
+		const mime = response.headers.get("content-type")?.split(";")[0].trim();
+		const declared = Number(response.headers.get("content-length"));
+		if (!response.ok || !mime || !mimeTypes.has(mime) || declared > maxBytes || !response.body) {
+			await response.body?.cancel();
+			throw new Error("Invalid thumbnail response.");
+		}
+		const reader = response.body.getReader();
+		const chunks: Uint8Array[] = [];
+		let length = 0;
+		try {
+			while (true) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				length += value.length;
+				if (length > maxBytes) throw new Error("Thumbnail exceeds size limit.");
+				chunks.push(value);
+			}
+		} finally {
+			await reader.cancel();
+		}
+		bytes = new Uint8Array(length);
+		let offset = 0;
+		for (const chunk of chunks) {
+			bytes.set(chunk, offset);
+			offset += chunk.length;
+		}
+		const signature = mime === "image/jpeg"
+			? [255, 216, 255]
+			: [137, 80, 78, 71, 13, 10, 26, 10];
+		if (!signature.every((byte, i) => bytes[i] === byte)) throw new Error("Unexpected thumbnail bytes.");
+	} catch {
+		// Signed CDN URLs and untrusted response details never appear in diagnostics.
+		throw new Error(`Owned Meta video ${videoId} thumbnail could not be retrieved safely. No image, creative or ad was created.`);
+	}
+	let binary = "";
+	for (let i = 0; i < bytes.length; i += 8192) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+	}
+	const { adAccountId } = getToolkitMetaConfig();
+	let result: { images?: Record<string, { hash?: unknown }> };
+	try {
+		result = await toolkitMetaPost(`${adAccountId}/adimages`, { bytes: btoa(binary) });
+	} catch {
+		throw new Error(`Meta did not confirm thumbnail registration for video ${videoId}. No creative or ad was created.`);
+	}
+	const images = Object.values(result?.images ?? {});
+	const hash = images[0]?.hash;
+	if (images.length !== 1 || typeof hash !== "string" || !/^[a-f0-9]{32}$/i.test(hash)) {
+		throw new Error(`Meta did not return one valid thumbnail hash for video ${videoId}. No creative or ad was created.`);
+	}
+	return hash;
+}
+
 async function createWebsiteSalesVideoCreative(input: {
 	name: string;
 	pageId: string;
 	videoId: string;
+	thumbnailHash: string;
 	primaryText: string;
 	headline: string;
 	description?: string;
@@ -581,6 +672,7 @@ async function createWebsiteSalesVideoCreative(input: {
 	const instagramUserId = await resolveInstagramUserId(input.pageId);
 	const videoData: Record<string, unknown> = {
 		video_id: input.videoId,
+		image_hash: input.thumbnailHash,
 		message: input.primaryText,
 		title: input.headline,
 		call_to_action: {
@@ -1057,6 +1149,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					name,
 					pageId: page_id,
 					videoId: video_id,
+					thumbnailHash: await registerOwnedVideoThumbnail(video_id),
 					primaryText: primary_text,
 					headline,
 					description,
@@ -1251,16 +1344,23 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"inspect_meta_ecommerce_campaign_prelaunch",
 		{
 			description:
-				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts.",
+				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts. Supplying thumbnail_video_id instead verifies owned video and reports thumbnail dimensions without downloading or creating anything.",
 			inputSchema: z.object({
 				campaign_id: z.string().regex(/^\d+$/),
 				expected_campaign_name: z.string().trim().min(3).max(200),
 				ad_id: z.string().regex(/^\d+$/).optional(),
 				expected_adset_id: z.string().regex(/^\d+$/).optional(),
+				thumbnail_video_id: z.string().regex(/^\d+$/).optional(),
 			}),
 		},
-		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id }) => {
+		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id, thumbnail_video_id }) => {
 			try {
+				if (thumbnail_video_id) {
+					if (ad_id || expected_adset_id) throw new Error("Inspect an exact ad or an owned video thumbnail, not both.");
+					await assertOwnedVideo(thumbnail_video_id);
+					const { width, height } = await getOwnedVideoThumbnail(thumbnail_video_id);
+					return textResult({ video_id: thumbnail_video_id, thumbnail_available: true, width, height });
+				}
 				if (ad_id !== undefined || expected_adset_id !== undefined) {
 					if (!ad_id || !expected_adset_id) throw new Error("Exact ad inspection requires both ad_id and expected_adset_id.");
 					return textResult(await inspectExactOwnedSalesAd(ad_id, expected_adset_id, campaign_id, expected_campaign_name));
