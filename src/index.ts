@@ -12121,7 +12121,7 @@ function createServer() {
 		const liveHost = "online.blindmotion.com.au";
 		const stagingHost = "staging-online.blindmotion.com.au";
 		const slugs = [...new Set(candidateChoices.map(c =>
-			uploadPath(c.image, liveHost).split("/").at(-1)!.replace(/\.[^.]+$/, "").replace(/-\d+x\d+$/, "")))];
+			(uploadPath(c.image, liveHost).split("/").pop() ?? "").replace(/\.[^.]+$/, "").replace(/-\d+x\d+$/, "")))];
 		if (slugs.length > 100 || slugs.some(s => !/^[a-z0-9-]+$/i.test(s))) {
 			throw new Error("Unexpected Fabric Sample attachment slugs.");
 		}
