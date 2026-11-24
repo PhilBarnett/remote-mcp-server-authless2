@@ -69,6 +69,40 @@ function getToolkitMetaConfig(): MetaConfig {
 	};
 }
 
+// Graph error text may include signed URLs or request details. Only typed numeric fields cross the create-result boundary.
+class MetaProviderError extends Error {
+	constructor(message: string, readonly httpStatus: number, readonly providerCode?: number, readonly providerSubcode?: number) {
+		super(message);
+	}
+}
+
+class DuplicateMetaAdError extends Error {
+	constructor(message: string, readonly adId: string) { super(message); }
+}
+
+function pausedCreateFailure(stage: string, error: unknown, adId?: string, creativeId?: string) {
+	let original = error;
+	while (original instanceof Error && original.cause && original !== original.cause) original = original.cause;
+	const provider = original instanceof MetaProviderError ? original : undefined;
+	const duplicate = original instanceof DuplicateMetaAdError ? original.adId : undefined;
+	const safeId = (value?: string) => value && /^\d+$/.test(value) ? value : undefined;
+	return textResult({
+		ok: false,
+		// A failed response after POST does not establish absence.
+		created: stage === "ad_create" || stage === "ad_readback" ? null : false,
+		activation_performed: false,
+		stage,
+		provider_http_status: provider?.httpStatus,
+		provider_code: provider?.providerCode,
+		provider_subcode: provider?.providerSubcode,
+		ad_id: safeId(adId ?? duplicate),
+		creative_id: safeId(creativeId),
+		may_have_created_ad: stage === "ad_create" || stage === "ad_readback",
+		do_not_retry: true,
+		next_action: "Inspect the exact ad or target ad-set inventory before any further creation. Do not activate an unverified ad.",
+	});
+}
+
 async function toolkitMetaRequest(
 	path: string,
 	method: "GET" | "POST",
@@ -111,7 +145,12 @@ async function toolkitMetaRequest(
 			metaError?.error_subcode !== undefined ? `subcode=${metaError.error_subcode}` : null,
 			metaError?.fbtrace_id ? `fbtrace_id=${metaError.fbtrace_id}` : null,
 		].filter(Boolean).join("; ");
-		throw new Error(`Meta request failed (${response.status}): ${detail}${diagnostics ? ` [${diagnostics}]` : ""}`);
+		throw new MetaProviderError(
+			`Meta request failed (${response.status}): ${detail}${diagnostics ? ` [${diagnostics}]` : ""}`,
+			response.status,
+			Number.isSafeInteger(metaError?.code) ? metaError.code : undefined,
+			Number.isSafeInteger(metaError?.error_subcode) ? metaError.error_subcode : undefined,
+		);
 	}
 	return parsed;
 }
@@ -131,7 +170,7 @@ async function toolkitMetaPost(
 		if (!diagnosticContext) throw error;
 		const message = error instanceof Error ? error.message : String(error);
 		throw new Error(
-			`${message} [creative_diagnostic=${JSON.stringify(diagnosticContext)}]`,
+			`${message} [creative_diagnostic=${JSON.stringify(diagnosticContext)}]`, { cause: error },
 		);
 	}
 }
@@ -401,7 +440,7 @@ async function refuseDuplicateAdName(name: string, scope?: { adsetId: string; vi
 		});
 		if (!Array.isArray(response?.data)) throw new Error("Meta ad duplicate inventory is incomplete.");
 		for (const item of response.data) {
-			if (String(item?.name ?? "") === name) throw new Error(`An ad named ${name} already exists in the configured ad account.`);
+			if (String(item?.name ?? "") === name) throw new DuplicateMetaAdError(`An ad named ${name} already exists in the configured ad account.`, String(item.id));
 			if (scope && !/^\d+$/.test(String(item?.adset_id ?? ""))) throw new Error("Meta ad inventory entry did not identify its ad set; nothing created.");
 			if (!scope || String(item.adset_id) !== scope.adsetId) continue;
 			if (!item.creative?.id || (!item.creative.object_story_spec && !item.creative.asset_feed_spec)) {
@@ -414,7 +453,7 @@ async function refuseDuplicateAdName(name: string, scope?: { adsetId: string; vi
 			// time-limited sales, block reused source video to the same landing
 			// page inside the target set, even if the operation name changed.
 			if (!destinations.length || destinations.some((url) => sameSalesLandingPage(url, scope.destination))) {
-				throw new Error(`Potential duplicate source video on ad ${String(item.id)} in the target ad set. Inspect it by ID; nothing created.`);
+				throw new DuplicateMetaAdError(`Potential duplicate source video on ad ${String(item.id)} in the target ad set. Inspect it by ID; nothing created.`, String(item.id));
 			}
 		}
 		if (!response.paging?.next) return;
@@ -571,8 +610,8 @@ async function getOwnedVideoThumbnail(videoId: string) {
 	let response;
 	try {
 		response = await toolkitMetaRequest(`${videoId}/thumbnails`, "GET", { fields: "uri,width,height,is_preferred", limit: 50 });
-	} catch {
-		throw new Error(`Meta did not allow thumbnail inspection for owned video ${videoId}.`);
+	} catch (error) {
+		throw new Error(`Meta did not allow thumbnail inspection for owned video ${videoId}.`, { cause: error });
 	}
 	const thumbnails: unknown[] = Array.isArray(response?.data) ? response.data : [];
 	const eligible = thumbnails.flatMap((item) => {
@@ -594,10 +633,7 @@ async function getOwnedVideoThumbnail(videoId: string) {
 	return eligible[0];
 }
 
-// Meta prohibits using its signed CDN URL as creative image_url. Send only
-// vetted bytes to our account's image library, then use the returned image_hash.
-async function registerOwnedVideoThumbnail(videoId: string) {
-	const { uri } = await getOwnedVideoThumbnail(videoId);
+async function readOwnedVideoThumbnailBytes(videoId: string, uri: string) {
 	const maxBytes = 4 * 1024 * 1024;
 	const mimeTypes = new Set(["image/jpeg", "image/png"]);
 	let bytes: Uint8Array;
@@ -639,6 +675,12 @@ async function registerOwnedVideoThumbnail(videoId: string) {
 		// Signed CDN URLs and untrusted response details never appear in diagnostics.
 		throw new Error(`Owned Meta video ${videoId} thumbnail could not be retrieved safely. No image, creative or ad was created.`);
 	}
+	return bytes;
+}
+
+// Meta prohibits using its signed CDN URL as creative image_url. Send only
+// vetted bytes to our account's image library, then use the returned image_hash.
+async function registerOwnedVideoThumbnail(videoId: string, bytes: Uint8Array) {
 	let binary = "";
 	for (let i = 0; i < bytes.length; i += 8192) {
 		binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
@@ -647,8 +689,8 @@ async function registerOwnedVideoThumbnail(videoId: string) {
 	let result: { images?: Record<string, { hash?: unknown }> };
 	try {
 		result = await toolkitMetaPost(`${adAccountId}/adimages`, { bytes: btoa(binary) });
-	} catch {
-		throw new Error(`Meta did not confirm thumbnail registration for video ${videoId}. No creative or ad was created.`);
+	} catch (error) {
+		throw new Error(`Meta did not confirm thumbnail registration for video ${videoId}. No creative or ad was created.`, { cause: error });
 	}
 	const images = Object.values(result?.images ?? {});
 	const hash = images[0]?.hash;
@@ -770,7 +812,7 @@ async function createWebsiteSalesPlacementCreative(input: {
 	);
 }
 
-async function createPausedAd(adsetId: string, name: string, creativeId: string, cutoff?: string, campaignId?: string) {
+async function createPausedAd(adsetId: string, name: string, creativeId: string, cutoff?: string, campaignId?: string, onCreated?: (id: string) => void) {
 	const { adAccountId } = getToolkitMetaConfig();
 	const created = await toolkitMetaPost(`${adAccountId}/ads`, {
 		name,
@@ -781,6 +823,7 @@ async function createPausedAd(adsetId: string, name: string, creativeId: string,
 	});
 	const createdId = String(created?.id ?? "");
 	if (!/^\d+$/.test(createdId)) throw new Error("Meta did not return an ad ID. Inspect the target set before retrying; creation may have occurred.");
+	onCreated?.(createdId);
 	let verified: Awaited<ReturnType<typeof assertAccountObject>>;
 	try {
 		verified = await assertAccountObject(
@@ -788,8 +831,8 @@ async function createPausedAd(adsetId: string, name: string, creativeId: string,
 			"ad",
 			`adset_id,campaign_id,status,effective_status,creative{id,name,object_story_spec,asset_feed_spec,url_tags}${cutoff ? `,${META_AD_SCHEDULE_FIELD}` : ""}`,
 		);
-	} catch {
-		throw new Error(`Meta returned created ad ID ${createdId}, but readback failed. Inspect that exact ID; do not retry creation or activate it.`);
+	} catch (error) {
+		throw new Error(`Meta returned created ad ID ${createdId}, but readback failed. Inspect that exact ID; do not retry creation or activate it.`, { cause: error });
 	}
 	if (verified.status !== "PAUSED" || String(verified.adset_id) !== adsetId) {
 		throw new Error(`Ad ${createdId} failed PAUSED/ad-set verification. Inspect that exact ID; do not retry or activate it.`);
@@ -1127,7 +1170,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"create_meta_website_sales_video_ad_paused",
 		{
 			description:
-				"Create one PAUSED website-sales video ad from an explicitly validated owned Meta video. Parent campaign/ad set may be ACTIVE or PAUSED but must have a verified OUTCOME_SALES website destination. Supports same-site UTM tracking and cannot activate delivery.",
+				"Create one PAUSED website-sales video ad from an explicitly validated owned Meta video. Parent campaign/ad set may be ACTIVE or PAUSED but must have a verified OUTCOME_SALES website destination. Supports same-site UTM tracking and cannot activate delivery. inspect_only performs all read-only checks including duplicate inventory and thumbnail bytes, with no writes.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				video_id: z.string().regex(/^\d+$/),
@@ -1135,23 +1178,41 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				...websiteAdCopySchema,
 				ad_schedule_end_time: z.string().max(35).optional(),
 				known_existing_ad_id: z.string().regex(/^\d+$/).optional(),
+				inspect_only: z.boolean().optional(),
 				confirmation: z.literal(META_ECOMMERCE_AD_CREATE_CONFIRMATION),
 			}),
 		},
-		async ({ adset_id, video_id, expected_video_title, page_id, name, primary_text, headline, description, cta_type, destination_url, utm, ad_schedule_end_time, known_existing_ad_id }) => {
+		async ({ adset_id, video_id, expected_video_title, page_id, name, primary_text, headline, description, cta_type, destination_url, utm, ad_schedule_end_time, known_existing_ad_id, inspect_only }) => {
+			let stage = "input", adId = known_existing_ad_id, creativeId: string | undefined;
 			try {
 				if (known_existing_ad_id) throw new Error(`Ad ${known_existing_ad_id} was supplied as existing. Inspect it by ID, not via create.`);
 				const cutoff = ad_schedule_end_time === undefined ? undefined : normalizeMetaAdCutoff(ad_schedule_end_time);
+				stage = "parent_validation";
 				const { campaign } = await assertSalesAdsetForCreation(adset_id, destination_url);
+				stage = "page_ownership";
 				await assertOwnedPage(page_id);
+				stage = "video_ownership";
 				await assertOwnedVideo(video_id, { title: expected_video_title });
+				stage = "destination_validation";
 				const tracking = buildMetaDestination(destination_url, utm);
+				stage = "duplicate_inventory";
 				await refuseDuplicateAdName(name, cutoff ? { adsetId: adset_id, videoIds: [video_id], destination: tracking.destinationUrl } : undefined);
+				stage = "thumbnail_metadata";
+				const thumbnail = await getOwnedVideoThumbnail(video_id);
+				stage = "thumbnail_bytes";
+				const bytes = await readOwnedVideoThumbnailBytes(video_id, thumbnail.uri);
+				if (inspect_only) return textResult({
+					ok: true, created: false, activation_performed: false, read_only_checks_passed: true,
+					video_id, width: thumbnail.width, height: thumbnail.height, cutoff: cutoff ?? null,
+				});
+				stage = "thumbnail_image_registration";
+				const thumbnailHash = await registerOwnedVideoThumbnail(video_id, bytes);
+				stage = "creative_create";
 				const creative = await createWebsiteSalesVideoCreative({
 					name,
 					pageId: page_id,
 					videoId: video_id,
-					thumbnailHash: await registerOwnedVideoThumbnail(video_id),
+					thumbnailHash,
 					primaryText: primary_text,
 					headline,
 					description,
@@ -1159,8 +1220,13 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					destinationUrl: tracking.destinationUrl,
 					urlTags: tracking.urlTags,
 				});
-				if (!creative?.id) throw new Error("Meta did not return a creative ID.");
-				const ad = await createPausedAd(adset_id, name, String(creative.id), cutoff, String(campaign.id));
+				creativeId = String(creative?.id ?? "");
+				if (!/^\d+$/.test(creativeId)) throw new Error("Meta did not return a creative ID.");
+				stage = "ad_create";
+				const ad = await createPausedAd(adset_id, name, creativeId, cutoff, String(campaign.id), (id) => {
+					adId = id;
+					stage = "ad_readback";
+				});
 				if (!collectVideoIds(ad.creative).has(video_id)) {
 					throw new Error(`Ad ${String(ad.id)} did not verify against the intended video. Inspect that exact ID; do not retry or activate it.`);
 				}
@@ -1172,7 +1238,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 					ad,
 				});
 			} catch (error) {
-				return errorResult(error);
+				return pausedCreateFailure(stage, error, adId, creativeId);
 			}
 		},
 	);
