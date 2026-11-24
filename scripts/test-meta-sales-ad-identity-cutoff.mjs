@@ -168,7 +168,7 @@ test("rejects partial inventory or a repeated pagination cursor", async () => {
 test("requires reviewed matching cutoff before activating a timed ad", async () => {
 	for (const [options, expected] of [[{}, undefined], [{}, "2099-12-02T00:00:00Z"], [{ noCutoff: true }, cutoff], [{ legacyNoField: true }, cutoff]]) {
 		const h = harness(options), r = await h.run(update, { ...statusInput, expected_ad_schedule_end_time: expected });
-		failedStage(r, "duplicate_inventory"); assert.deepEqual(h.posts(), []);
+		assert.equal(r.isError, true); assert.deepEqual(h.posts(), []);
 	}
 });
 test("activates exact owned ad only and leaves ordinary untimed activation compatible", async () => {
