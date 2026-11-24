@@ -1567,19 +1567,27 @@ async function stagingPluginDeploymentRequest(body: unknown) {
 	return response.json<any>();
 }
 
+// Workers only support manual or follow. Reject 3xx before using any response body.
+function rejectStagingProductImageRedirect(response: Response) {
+	if (response.status >= 300 && response.status < 400) {
+		throw new Error(`Staging request redirect refused: ${response.status}.`);
+	}
+}
+
 async function productImageWcFetch(environment: ProductImageEnvironment, path: string, noRedirect = false) {
 	if (environment === "live") return wcFetch(path);
 	const access = stagingProductImageAccess();
 	const url = new URL(`${access.baseUrl}/wp-json/wc/v3/${path}`);
 	url.searchParams.set("_blindmotion_read", crypto.randomUUID());
 	const response = await fetch(url.toString(), {
-		...(noRedirect ? { redirect: "error" as const } : {}),
+		...(noRedirect ? { redirect: "manual" as const } : {}),
 		headers: {
 			Authorization: access.auth,
 			Accept: "application/json",
 			"Cache-Control": "no-cache, no-store",
 		},
 	});
+	if (noRedirect) rejectStagingProductImageRedirect(response);
 	if (!response.ok) {
 		throw new Error(`Staging WooCommerce request failed: ${response.status} ${await response.text()}`);
 	}
@@ -1596,7 +1604,7 @@ async function productImageWcWrite(
 	const access = stagingProductImageAccess();
 	const response = await fetch(`${access.baseUrl}/wp-json/wc/v3/${path}`, {
 		method: "PUT",
-		...(noRedirect ? { redirect: "error" as const } : {}),
+		...(noRedirect ? { redirect: "manual" as const } : {}),
 		headers: {
 			Authorization: access.auth,
 			Accept: "application/json",
@@ -1604,6 +1612,7 @@ async function productImageWcWrite(
 		},
 		body: JSON.stringify(body),
 	});
+	if (noRedirect) rejectStagingProductImageRedirect(response);
 	if (!response.ok) {
 		throw new Error(`Staging WooCommerce write failed: ${response.status} ${await response.text()}`);
 	}
@@ -1614,9 +1623,10 @@ async function productImageWpFetch(environment: ProductImageEnvironment, path: s
 	if (environment === "live") return wpFetch(path);
 	const access = stagingProductImageAccess();
 	const response = await fetch(`${access.baseUrl}/wp-json/wp/v2/${path}`, {
-		...(noRedirect ? { redirect: "error" as const } : {}),
+		...(noRedirect ? { redirect: "manual" as const } : {}),
 		headers: { Authorization: access.auth, Accept: "application/json" },
 	});
+	if (noRedirect) rejectStagingProductImageRedirect(response);
 	if (!response.ok) {
 		throw new Error(`Staging WordPress request failed: ${response.status} ${await response.text()}`);
 	}
