@@ -231,14 +231,14 @@ test("does not create creative or ad if Graph returns no usable owned image hash
 });
 
 test("inspect-only resolves exact duplicate inventory, bounded thumbnail bytes and cutoff without POST", async () => {
-	const h = harness(), r = await h.run(create, { ...createInput, inspect_only: true });
+	const h = harness(), r = await h.run(inspect, { campaign_id: campaign, expected_campaign_name: parents[1].name, paused_ad_preflight: createInput });
 	assert.equal(JSON.parse(errorText(r)).read_only_checks_passed, true);
 	assert.match(errorText(r), /2099-11-30T12:59:00Z/);
 	assert.equal(h.calls.filter(c => c.path === "cdn-thumbnail").length, 1);
 	assert.ok(h.calls.some(c => c.path === `act_${account}/ads`));
 	assert.deepEqual(h.posts(), []);
 	const bad = harness({ badDownload: true });
-	failedStage(await bad.run(create, { ...createInput, inspect_only: true }), "thumbnail_bytes");
+	failedStage(await bad.run(inspect, { campaign_id: campaign, expected_campaign_name: parents[1].name, paused_ad_preflight: createInput }), "thumbnail_bytes");
 	assert.deepEqual(bad.posts(), []);
 });
 test("preserves numeric provider errors on each POST without raw message or false certainty", async () => {
