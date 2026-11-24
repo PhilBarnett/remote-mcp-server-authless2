@@ -313,7 +313,48 @@ async function assertAccountObject(
 	return object;
 }
 
-async function assertSalesAdsetForCreation(adsetId: string) {
+const LEGACY_ROLLER_WEBSITE_URL = "https://online.blindmotion.com.au/everyday-roller-blinds/";
+
+// Meta reports UNDEFINED for this existing website setup. Never infer website
+// delivery from that enum alone: require the exact reviewed parent and pixel,
+// plus a current, owned sibling ad whose creative still proves the website.
+async function assertReviewedLegacyRollerWebsiteDestination(adsetId: string, adset: any, campaign: any, destinationUrl: string) {
+	const countries = adset.targeting?.geo_locations?.countries;
+	const promoted = adset.promoted_object;
+	if (
+		adset.destination_type !== "UNDEFINED" ||
+		buildMetaDestination(destinationUrl, {}).destinationUrl !== LEGACY_ROLLER_WEBSITE_URL ||
+		adsetId !== "52667715090600" ||
+		String(adset.campaign_id) !== "52667333206000" ||
+		String(campaign.id) !== "52667333206000" ||
+		adset.status !== "ACTIVE" ||
+		campaign.status !== "ACTIVE" ||
+		String(promoted?.pixel_id) !== "645264952345909" ||
+		promoted?.application_id || promoted?.object_store_url || promoted?.lead_gen_form_id ||
+		!Array.isArray(countries) || countries.length !== 1 || countries[0] !== "AU"
+	) {
+		throw new Error("Parent ad set is not a WEBSITE / OFFSITE_CONVERSIONS sales ad set.");
+	}
+	const sibling = await assertAccountObject(
+		"52667715090400",
+		"ad",
+		"adset_id,campaign_id,status,creative{id,object_story_spec,asset_feed_spec}",
+	);
+	const siblingDestinations = collectDestinationUrls(sibling.creative);
+	const rollerPage = LEGACY_ROLLER_WEBSITE_URL;
+	if (
+		String(sibling.adset_id) !== adsetId ||
+		String(sibling.campaign_id) !== String(campaign.id) ||
+		sibling.status !== "ACTIVE" ||
+		String(sibling.creative?.id) !== "1034570949218456" ||
+		siblingDestinations.length === 0 ||
+		!siblingDestinations.every((candidate) => buildMetaDestination(candidate, {}).destinationUrl === rollerPage)
+	) {
+		throw new Error("Legacy roller website destination evidence changed. Re-review the existing active ad before creating a paused video.");
+	}
+}
+
+async function assertSalesAdsetForCreation(adsetId: string, destinationUrl: string) {
 	const adset = await assertAccountObject(
 		adsetId,
 		"adset",
@@ -322,7 +363,8 @@ async function assertSalesAdsetForCreation(adsetId: string) {
 	if (!["ACTIVE", "PAUSED"].includes(String(adset.status))) {
 		throw new Error("Website-sales ad creation requires an ACTIVE or PAUSED parent ad set.");
 	}
-	if (adset.destination_type !== "WEBSITE" || adset.optimization_goal !== "OFFSITE_CONVERSIONS") {
+	if (adset.optimization_goal !== "OFFSITE_CONVERSIONS" ||
+		!["WEBSITE", "UNDEFINED"].includes(adset.destination_type)) {
 		throw new Error("Parent ad set is not a WEBSITE / OFFSITE_CONVERSIONS sales ad set.");
 	}
 	const campaign = await assertAccountObject(
@@ -335,6 +377,9 @@ async function assertSalesAdsetForCreation(adsetId: string) {
 		campaign.objective !== "OUTCOME_SALES"
 	) {
 		throw new Error("Parent campaign must be an ACTIVE or PAUSED OUTCOME_SALES campaign.");
+	}
+	if (adset.destination_type === "UNDEFINED") {
+		await assertReviewedLegacyRollerWebsiteDestination(adsetId, adset, campaign, destinationUrl);
 	}
 	return { adset, campaign };
 }
@@ -863,7 +908,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"create_meta_website_sales_video_ad_paused",
 		{
 			description:
-				"Create one PAUSED website-sales video ad from an explicitly validated owned Meta video. Parent campaign/ad set may be ACTIVE or PAUSED but must be OUTCOME_SALES / WEBSITE. Supports same-site UTM tracking and cannot activate delivery.",
+				"Create one PAUSED website-sales video ad from an explicitly validated owned Meta video. Parent campaign/ad set may be ACTIVE or PAUSED but must have a verified OUTCOME_SALES website destination. Supports same-site UTM tracking and cannot activate delivery.",
 			inputSchema: z.object({
 				adset_id: z.string().regex(/^\d+$/),
 				video_id: z.string().regex(/^\d+$/),
@@ -874,7 +919,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		},
 		async ({ adset_id, video_id, expected_video_title, page_id, name, primary_text, headline, description, cta_type, destination_url, utm }) => {
 			try {
-				await assertSalesAdsetForCreation(adset_id);
+				await assertSalesAdsetForCreation(adset_id, destination_url);
 				await assertOwnedPage(page_id);
 				await assertOwnedVideo(video_id, { title: expected_video_title });
 				await refuseDuplicateAdName(name);
@@ -933,7 +978,7 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		},
 		async (args) => {
 			try {
-				await assertSalesAdsetForCreation(args.adset_id);
+				await assertSalesAdsetForCreation(args.adset_id, args.destination_url);
 				await assertOwnedPage(args.page_id);
 				await assertOwnedVideo(args.video_4x5_id, {
 					title: args.video_4x5_expected_name,
