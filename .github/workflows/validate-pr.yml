@@ -62,6 +62,9 @@ jobs:
       - name: Test Meta account spending-limit guards
         run: node --test scripts/test-meta-spend-limit.mjs
 
+      - name: Test legacy Meta website destination guard
+        run: node scripts/test-meta-legacy-roller-destination.mjs
+
       - name: Test Google budget diagnostics
         run: node --experimental-strip-types --test scripts/test-google-budget-diagnostics.mjs
 
