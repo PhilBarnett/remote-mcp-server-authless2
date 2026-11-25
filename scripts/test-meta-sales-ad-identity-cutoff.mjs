@@ -227,7 +227,7 @@ test("rejects missing, small or untrusted thumbnail and bad image bytes before a
 		const h = harness(options);
 		const r = await h.run(create, createInput);
 		failedStage(r, options.badThumbnail ? "thumbnail_metadata" : "thumbnail_bytes");
-		assert.doesNotMatch(errorText(r), /signature|fbcdn/);
+		assert.doesNotMatch(errorText(r), /signature=|fbcdn|https:/);
 		assert.deepEqual(h.posts(), []);
 	}
 });
