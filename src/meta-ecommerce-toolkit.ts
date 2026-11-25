@@ -85,6 +85,10 @@ class DuplicateMetaAdError extends Error {
 	constructor(message: string, readonly adId: string) { super(message); }
 }
 
+class MetaThumbnailReadError extends Error {
+	constructor(readonly reason: string, readonly httpStatus?: number) { super(reason); }
+}
+
 function pausedCreateFailure(stage: string, error: unknown, adId?: string, creativeId?: string) {
 	let original = error;
 	while (original instanceof CausedMetaError) original = original.cause;
@@ -100,6 +104,8 @@ function pausedCreateFailure(stage: string, error: unknown, adId?: string, creat
 		provider_http_status: provider?.httpStatus,
 		provider_code: provider?.providerCode,
 		provider_subcode: provider?.providerSubcode,
+		thumbnail_failure: original instanceof MetaThumbnailReadError ? original.reason : undefined,
+		thumbnail_http_status: original instanceof MetaThumbnailReadError ? original.httpStatus : undefined,
 		ad_id: safeId(adId ?? duplicate),
 		creative_id: safeId(creativeId),
 		may_have_created_ad: stage === "ad_create" || stage === "ad_readback",
@@ -642,14 +648,19 @@ async function readOwnedVideoThumbnailBytes(videoId: string, uri: string) {
 	let bytes: Uint8Array;
 	try {
 		// Worker fetch has no cookie jar; send no headers, and explicitly omit credentials on runtimes that support it.
-		const init = { redirect: "error", credentials: "omit", signal: AbortSignal.timeout(10000) } as const;
+		// Workers supports manual/follow only. Never follow a signed CDN URL's redirect.
+		const init = { redirect: "manual", credentials: "omit", signal: AbortSignal.timeout(10000) } as const;
 		const response = await fetch(uri, init);
+		if (response.status >= 300 && response.status < 400) throw new MetaThumbnailReadError("redirect_refused", response.status);
 		const mime = response.headers.get("content-type")?.split(";")[0].trim();
 		const declared = Number(response.headers.get("content-length"));
-		if (!response.ok || !mime || !mimeTypes.has(mime) || declared > maxBytes || !response.body) {
-			await response.body?.cancel();
-			throw new Error("Invalid thumbnail response.");
+		const badResponse = !response.ok ? "http_error" : !mime || !mimeTypes.has(mime) ? "unsupported_mime"
+			: declared > maxBytes ? "size_limit" : !response.body ? "empty_body" : undefined;
+		if (badResponse) {
+			await response.body?.cancel().catch(() => undefined);
+			throw new MetaThumbnailReadError(badResponse, response.status);
 		}
+		if (!response.body) throw new MetaThumbnailReadError("empty_body", response.status);
 		const reader = response.body.getReader();
 		const chunks: Uint8Array[] = [];
 		let length = 0;
@@ -658,11 +669,11 @@ async function readOwnedVideoThumbnailBytes(videoId: string, uri: string) {
 				const { value, done } = await reader.read();
 				if (done) break;
 				length += value.length;
-				if (length > maxBytes) throw new Error("Thumbnail exceeds size limit.");
+				if (length > maxBytes) throw new MetaThumbnailReadError("size_limit");
 				chunks.push(value);
 			}
 		} finally {
-			await reader.cancel();
+			await reader.cancel().catch(() => undefined);
 		}
 		bytes = new Uint8Array(length);
 		let offset = 0;
@@ -673,10 +684,13 @@ async function readOwnedVideoThumbnailBytes(videoId: string, uri: string) {
 		const signature = mime === "image/jpeg"
 			? [255, 216, 255]
 			: [137, 80, 78, 71, 13, 10, 26, 10];
-		if (!signature.every((byte, i) => bytes[i] === byte)) throw new Error("Unexpected thumbnail bytes.");
-	} catch {
+		if (!signature.every((byte, i) => bytes[i] === byte)) throw new MetaThumbnailReadError("signature_mismatch");
+	} catch (error) {
 		// Signed CDN URLs and untrusted response details never appear in diagnostics.
-		throw new Error(`Owned Meta video ${videoId} thumbnail could not be retrieved safely. No image, creative or ad was created.`);
+		throw new CausedMetaError(
+			`Owned Meta video ${videoId} thumbnail could not be retrieved safely. No image, creative or ad was created.`,
+			error instanceof MetaThumbnailReadError ? error : new MetaThumbnailReadError("transport_error"),
+		);
 	}
 	return bytes;
 }
