@@ -18,7 +18,7 @@ const createName = "Scoped sale once";
 const providerAd = (data = {}) => ({ id: ad, account_id: account, name: createName, adset_id: adset, campaign_id: campaign,
 	status: "PAUSED", effective_status: "PAUSED", creative: { id: creative, object_story_spec: { video_data: { video_id: video, call_to_action: { value: { link: landing } } } } }, ...data });
 const parents = [
-	{ id: adset, account_id: account, name: "Warm audience", campaign_id: campaign, status: "ACTIVE", destination_type: "WEBSITE", optimization_goal: "OFFSITE_CONVERSIONS" },
+	{ id: adset, account_id: account, name: "Warm audience", campaign_id: campaign, status: "ACTIVE", destination_type: "WEBSITE", optimization_goal: "OFFSITE_CONVERSIONS", promoted_object: { pixel_id: "876" } },
 	{ id: campaign, account_id: account, name: "Existing sales", status: "ACTIVE", objective: "OUTCOME_SALES" },
 ];
 const createInput = {
@@ -57,6 +57,11 @@ function harness(options = {}) {
 		calls.push({ method, path, params });
 		assert.equal(String(url).startsWith("https://graph.facebook.com/v27.0/"), true);
 		if (method === "POST") {
+			if (options.validationMode && path === `act_${account}/ads`) {
+				assert.deepEqual(JSON.parse(params.execution_options), ["validate_only"]);
+				assert.equal(params.status, "PAUSED");
+				return options.validationMode(params);
+			}
 			if (options.failedPost === path) return Response.json({ error: { message: "signed CDN and token unsafe fixture", code: 100, error_subcode: 1443226 } }, { status: 400 });
 			if (path === `act_${account}/adimages`) return Response.json({ images: options.invalidHash ? {} : { bytes: { hash: thumbnailHash } } });
 			if (path === `act_${account}/adcreatives`) { placements = params.asset_feed_spec ? JSON.parse(params.asset_feed_spec) : undefined; return Response.json({ id: creative }); }
@@ -73,6 +78,12 @@ function harness(options = {}) {
 			: [{ uri: thumbnailUrl, width: 1080, height: 1920, is_preferred: true }] });
 		if (path === page) return Response.json({ instagram_business_account: { id: "876" } });
 		if (path === `act_${account}/ads`) return Response.json(options.inventory?.(params.after) ?? { data: [] });
+		if (options.validationMode && path === creative) {
+			return Response.json({ id: creative, account_id: account, name: createName, ...providerAd().creative, ...options.validationCreative });
+		}
+		if (options.validationMode && path === "987") {
+			return Response.json(providerAd({ id: "987", status: "ACTIVE", conversion_domain: options.siblingDomain ?? "example.test" }));
+		}
 		if (path === ad) {
 			if (created && options.failedReadback) return Response.json({ error: { message: "Forbidden", code: 200 } }, { status: 403 });
 			if (options.invisible) return Response.json({ error: { message: "Unsupported get request", code: 100, error_subcode: 33 } }, { status: 400 });
@@ -284,4 +295,45 @@ test("retains and safely distinguishes MIME, signature and size failures", async
 		assert.doesNotMatch(errorText(r), /signature=|fbcdn|https:/);
 		assert.deepEqual(h.posts(), []);
 	}
+});
+const validateInput = { adset_id: adset, creative_id: creative, video_id: video, name: createName,
+	destination_url: landing, ad_schedule_end_time: cutoff };
+
+test("diagnoses exact existing creative through provider validate_only, with only the verified sibling domain as a variant", async () => {
+	const h = harness({ validationMode: params => params.conversion_domain
+		? Response.json({ success: true })
+		: Response.json({ error: { code: 100, error_subcode: 3858351, message: "signed URL fixture",
+			error_data: { blame_field_specs: [["conversion_domain", "signed URL fixture"]] } } }, { status: 400 }) });
+	const args = { campaign_id: campaign, expected_campaign_name: parents[1].name };
+	const baseline = JSON.parse(errorText(await h.run(inspect, { ...args, validate_existing_paused_ad: validateInput })));
+	assert.equal(baseline.validation_only, true); assert.equal(baseline.validated, false);
+	assert.equal(baseline.provider_subcode, 3858351); assert.deepEqual(baseline.blame_fields, ["conversion_domain"]);
+	assert.doesNotMatch(JSON.stringify(baseline), /signed URL/);
+	const variant = JSON.parse(errorText(await h.run(inspect, { ...args,
+		validate_existing_paused_ad: { ...validateInput, conversion_domain_reference_ad_id: "987" } })));
+	assert.equal(variant.validated, true); assert.equal(variant.conversion_domain, "example.test");
+	assert.deepEqual(h.posts().map(x => x.path), [`act_${account}/ads`, `act_${account}/ads`]);
+	const [a, b] = h.posts().map(x => x.params);
+	assert.deepEqual(b, { ...a, conversion_domain: "example.test" });
+	assert.equal(a.ad_schedule_end_time, canonical);
+	assert.deepEqual(JSON.parse(a.creative), { creative_id: creative });
+});
+
+test("rejects wrong creative, sibling domain and duplicate before any POST, and never falls back after an unexpected response", async () => {
+	const args = { campaign_id: campaign, expected_campaign_name: parents[1].name };
+	for (const [options, extra] of [
+		[{ validationCreative: { account_id: "999" } }, {}],
+		[{ validationCreative: { name: "Wrong creative" } }, {}],
+		[{ siblingDomain: "other.test" }, { conversion_domain_reference_ad_id: "987" }],
+		[{ inventory: () => ({ data: [providerAd()] }) }, {}],
+	]) {
+		const h = harness({ ...options, validationMode: () => assert.fail("No POST expected") });
+		const out = JSON.parse(errorText(await h.run(inspect, { ...args, validate_existing_paused_ad: { ...validateInput, ...extra } })));
+		assert.equal(out.local_scope_check_failed, true);
+		assert.deepEqual(h.posts(), []);
+	}
+	const h = harness({ validationMode: () => Response.json({ id: "123456" }) });
+	const out = JSON.parse(errorText(await h.run(inspect, { ...args, validate_existing_paused_ad: validateInput })));
+	assert.equal(out.unexpected_response, true); assert.equal(out.validated, false);
+	assert.equal(h.posts().length, 1);
 });

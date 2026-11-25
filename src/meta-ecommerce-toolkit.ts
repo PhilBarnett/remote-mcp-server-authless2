@@ -71,7 +71,7 @@ function getToolkitMetaConfig(): MetaConfig {
 
 // Graph error text may include signed URLs or request details. Only typed numeric fields cross the create-result boundary.
 class MetaProviderError extends Error {
-	constructor(message: string, readonly httpStatus: number, readonly providerCode?: number, readonly providerSubcode?: number) {
+	constructor(message: string, readonly httpStatus: number, readonly providerCode?: number, readonly providerSubcode?: number, readonly blameFields: string[] = []) {
 		super(message);
 	}
 }
@@ -112,6 +112,21 @@ function pausedCreateFailure(stage: string, error: unknown, adId?: string, creat
 		do_not_retry: true,
 		next_action: "Inspect the exact ad or target ad-set inventory before any further creation. Do not activate an unverified ad.",
 	});
+}
+
+// Treat Meta's nested blame data as untrusted. Export only known ad fields.
+function metaAdBlameFields(data: unknown): string[] {
+	const allowed = new Set(["name", "adset_id", "status", "creative", "creative_id",
+		"ad_schedule_end_time", "conversion_domain", "execution_options", "object_story_spec", "video_id"]);
+	let value: any = data;
+	if (typeof value === "string" && value.length <= 4096) {
+		try { value = JSON.parse(value); } catch { return []; }
+	}
+	const specs = value?.blame_field_specs;
+	if (!Array.isArray(specs)) return [];
+	const names = specs.slice(0, 10).flatMap((spec: unknown) =>
+		Array.isArray(spec) ? spec.slice(0, 8) : [spec]);
+	return [...new Set(names.filter((field): field is string => typeof field === "string" && allowed.has(field)))];
 }
 
 async function toolkitMetaRequest(
@@ -161,6 +176,7 @@ async function toolkitMetaRequest(
 			response.status,
 			Number.isSafeInteger(metaError?.code) ? metaError.code : undefined,
 			Number.isSafeInteger(metaError?.error_subcode) ? metaError.error_subcode : undefined,
+			metaAdBlameFields(metaError?.error_data),
 		);
 	}
 	return parsed;
@@ -858,6 +874,65 @@ async function createWebsiteSalesPlacementCreative(input: {
 	);
 }
 
+type ValidatePausedAdInput = {
+	adset_id: string; creative_id: string; video_id: string; name: string; destination_url: string;
+	ad_schedule_end_time: string; conversion_domain_reference_ad_id?: string;
+};
+
+async function validateExistingPausedAd(input: ValidatePausedAdInput, campaignId: string, expectedCampaignName: string) {
+	const cutoff = normalizeMetaAdCutoff(input.ad_schedule_end_time);
+	const destination = buildMetaDestination(input.destination_url, {}).destinationUrl;
+	const { campaign, adset } = await assertSalesAdsetForCreation(input.adset_id, destination);
+	if (String(campaign.id) !== campaignId || campaign.name !== expectedCampaignName) {
+		throw new Error("Target ad set does not match the exact requested campaign.");
+	}
+	const creative = await assertAccountObject(input.creative_id, "creative", "object_story_spec,asset_feed_spec");
+	const matches = (item: unknown) => {
+		const urls = collectDestinationUrls(item);
+		return urls.length > 0 && urls.every(url => buildMetaDestination(url, {}).destinationUrl === destination);
+	};
+	const videoIds = collectVideoIds(creative);
+	if (creative.name !== input.name || videoIds.size !== 1 || !videoIds.has(input.video_id) || !matches(creative)) {
+		throw new Error("Existing creative does not match the requested name, video and destination.");
+	}
+	await refuseDuplicateAdName(input.name, { adsetId: input.adset_id, videoIds: [input.video_id], destination });
+	let domain: string | undefined;
+	if (input.conversion_domain_reference_ad_id) {
+		const reference = await assertAccountObject(input.conversion_domain_reference_ad_id, "ad",
+			"adset_id,campaign_id,status,conversion_domain,creative{id,object_story_spec,asset_feed_spec}");
+		const observed = reference.conversion_domain;
+		const host = new URL(destination).hostname;
+		if (!adset.promoted_object?.pixel_id || String(reference.adset_id) !== input.adset_id ||
+			String(reference.campaign_id) !== campaignId || reference.status !== "ACTIVE" || !matches(reference.creative) ||
+			typeof observed !== "string" || !/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(observed) ||
+			!(host === observed || host.endsWith("." + observed))) {
+			throw new Error("The active sibling did not verify a conversion domain for this pixel and destination.");
+		}
+		domain = observed;
+	}
+	const { adAccountId } = getToolkitMetaConfig();
+	try {
+		// Meta enforces validate_only. No fallback POST, creation or status update.
+		const response = await toolkitMetaRequest(`${adAccountId}/ads`, "POST", {
+			name: input.name, adset_id: input.adset_id, status: "PAUSED",
+			creative: JSON.stringify({ creative_id: input.creative_id }),
+			[META_AD_SCHEDULE_FIELD]: cutoff,
+			conversion_domain: domain,
+			execution_options: JSON.stringify(["validate_only"]),
+		});
+		return { validation_only: true, validated: response?.success === true && !response?.id,
+			unexpected_response: response?.success !== true || !!response?.id, creative_id: input.creative_id,
+			cutoff, conversion_domain: domain ?? null };
+	} catch (error) {
+		if (!(error instanceof MetaProviderError)) {
+			return { validation_only: true, validated: false, transport_error: true, creative_id: input.creative_id };
+		}
+		return { validation_only: true, validated: false, creative_id: input.creative_id, cutoff,
+			conversion_domain: domain ?? null, provider_http_status: error.httpStatus,
+			provider_code: error.providerCode, provider_subcode: error.providerSubcode, blame_fields: error.blameFields };
+	}
+}
+
 async function createPausedAd(adsetId: string, name: string, creativeId: string, cutoff?: string, campaignId?: string, onCreated?: (id: string) => void) {
 	const { adAccountId } = getToolkitMetaConfig();
 	const created = await toolkitMetaPost(`${adAccountId}/ads`, {
@@ -1440,13 +1515,19 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"inspect_meta_ecommerce_campaign_prelaunch",
 		{
 			description:
-				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts. Supplying thumbnail_video_id instead verifies owned video and reports thumbnail dimensions without downloading or creating anything. Supplying paused_ad_preflight instead runs the exact ad's bounded thumbnail download and duplicate checks, without POST.",
+				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts. Supplying thumbnail_video_id instead verifies owned video and reports thumbnail dimensions without downloading or creating anything. Supplying paused_ad_preflight instead runs the exact ad's bounded thumbnail download and duplicate checks, without POST. Supplying validate_existing_paused_ad instead posts only to Meta’s provider-enforced validate_only mode with an owned existing creative; it never creates or activates an ad.",
 			inputSchema: z.object({
 				campaign_id: z.string().regex(/^\d+$/),
 				expected_campaign_name: z.string().trim().min(3).max(200),
 				ad_id: z.string().regex(/^\d+$/).optional(),
 				expected_adset_id: z.string().regex(/^\d+$/).optional(),
 				thumbnail_video_id: z.string().regex(/^\d+$/).optional(),
+				validate_existing_paused_ad: z.object({
+					adset_id: z.string().regex(/^\d+$/), creative_id: z.string().regex(/^\d+$/),
+					video_id: z.string().regex(/^\d+$/), name: z.string().trim().min(3).max(200),
+					destination_url: z.string().url(), ad_schedule_end_time: z.string().max(35),
+					conversion_domain_reference_ad_id: z.string().regex(/^\d+$/).optional(),
+				}).optional(),
 				paused_ad_preflight: z.object({
 					adset_id: z.string().regex(/^\d+$/), video_id: z.string().regex(/^\d+$/),
 					expected_video_title: z.string().max(255), page_id: z.string().regex(/^\d+$/),
@@ -1459,8 +1540,16 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				}).optional(),
 			}),
 		},
-		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id, thumbnail_video_id, paused_ad_preflight }) => {
+		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id, thumbnail_video_id, paused_ad_preflight, validate_existing_paused_ad }) => {
 			try {
+				if (validate_existing_paused_ad) {
+					if (paused_ad_preflight || thumbnail_video_id || ad_id || expected_adset_id) throw new Error("Select one inspection mode.");
+					try {
+						return textResult(await validateExistingPausedAd(validate_existing_paused_ad, campaign_id, expected_campaign_name));
+					} catch {
+						return textResult({ validation_only: true, validated: false, local_scope_check_failed: true });
+					}
+				}
 				if (paused_ad_preflight) {
 					let stage = "input";
 					try {
