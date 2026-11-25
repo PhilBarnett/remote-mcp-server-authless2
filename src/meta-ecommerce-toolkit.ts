@@ -879,6 +879,59 @@ type ValidatePausedAdInput = {
 	ad_schedule_end_time: string; conversion_domain_reference_ad_id?: string;
 };
 
+async function inspectExistingCreative(input: {
+	creative_id: string; video_id: string; page_id: string; name: string;
+}, campaignId: string, campaignName: string) {
+	let reason = "campaign_scope_unverified";
+	try {
+		const campaign = await assertAccountObject(campaignId, "campaign", "objective");
+		if (campaign.name !== campaignName) return { reason };
+		reason = "page_scope_unverified";
+		await assertOwnedPage(input.page_id);
+		reason = "owned_video_unverified";
+		await assertOwnedVideo(input.video_id);
+		reason = "creative_read_or_scope_failed";
+		const item = await assertAccountObject(input.creative_id, "creative",
+			"video_id,object_story_spec,asset_feed_spec,effective_object_story_id");
+		const base = input.name + " | Creative";
+		const suffix = typeof item.name === "string" && item.name.startsWith(base) ? item.name.slice(base.length) : null;
+		if (suffix === null || (suffix !== "" && !/^ \d{4}-\d{2}-\d{2}-[a-f0-9]{32}$/.test(suffix))) {
+			return { reason: "creative_name_mismatch" };
+		}
+		const numeric = (value: unknown): value is string => typeof value === "string" && /^\d+$/.test(value);
+		const story = item.object_story_spec;
+		if (story?.page_id && story.page_id !== input.page_id) return { reason: "creative_page_mismatch" };
+		const storyVideo = numeric(story?.video_data?.video_id) ? story.video_data.video_id : null;
+		const feedVideos = [...collectVideoIds(item.asset_feed_spec)].filter(numeric);
+		const topVideo = numeric(item.video_id) ? item.video_id : null;
+		const attachmentVideos: string[] = [];
+		let storyRead = "absent";
+		const post = item.effective_object_story_id;
+		if (post) {
+			if (typeof post !== "string" || !/^\d+_\d+$/.test(post) || post.split("_")[0] !== input.page_id) {
+				return { reason: "effective_story_page_mismatch" };
+			}
+			storyRead = "unavailable";
+			try {
+				const result = await toolkitMetaGet(post, "id,attachments{media_type,target{id}}");
+				if (result.id === post && Array.isArray(result.attachments?.data)) {
+					storyRead = result.attachments.paging?.next ? "partial" : "read";
+					for (const attachment of result.attachments.data) {
+						if (attachment.media_type === "video" && numeric(attachment.target?.id)) attachmentVideos.push(attachment.target.id);
+					}
+				}
+			} catch { /* Return the exact creative evidence even if the post is unreadable. */ }
+		}
+		const sources = [storyVideo, ...feedVideos, ...attachmentVideos].filter(numeric);
+		const ids = new Set([...sources, topVideo].filter(numeric));
+		const evidence = !sources.length ? "missing_source_lineage" : ids.size > 1 ? "conflicting_video_ids"
+			: !ids.has(input.video_id) ? "source_video_mismatch" : "source_video_matches";
+		return { reason: evidence, creative_id: input.creative_id, top_level_video_id: topVideo,
+			story_video_id: storyVideo, asset_feed_video_ids: feedVideos, attachment_video_ids: attachmentVideos,
+			effective_story_read: storyRead };
+	} catch { return { reason }; }
+}
+
 async function validateExistingPausedAd(input: ValidatePausedAdInput, campaignId: string, expectedCampaignName: string) {
 	const cutoff = normalizeMetaAdCutoff(input.ad_schedule_end_time);
 	const destination = buildMetaDestination(input.destination_url, {}).destinationUrl;
@@ -1515,13 +1568,17 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 		"inspect_meta_ecommerce_campaign_prelaunch",
 		{
 			description:
-				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts. Supplying thumbnail_video_id instead verifies owned video and reports thumbnail dimensions without downloading or creating anything. Supplying paused_ad_preflight instead runs the exact ad's bounded thumbnail download and duplicate checks, without POST. Supplying validate_existing_paused_ad instead posts only to Meta’s provider-enforced validate_only mode with an owned existing creative; it never creates or activates an ad.",
+				"Read-only pre-launch inspection of one owned Meta ecommerce sales campaign. Verifies paused state, AU website-sales ad sets, pixels, owned videos, same-site destinations and reports UTM gaps. Returns a hash-locked plan for guarded launch; supplying both ad_id and expected_adset_id instead reads one exact Graph ad, its creative, parents and individual cutoff without publishing UI drafts. Supplying thumbnail_video_id instead verifies owned video and reports thumbnail dimensions without downloading or creating anything. Supplying paused_ad_preflight instead runs the exact ad's bounded thumbnail download and duplicate checks, without POST. Supplying inspect_existing_creative reads video IDs from the owned creative and its owned Page story. Supplying validate_existing_paused_ad instead posts only to Meta’s provider-enforced validate_only mode with an owned existing creative; it never creates or activates an ad.",
 			inputSchema: z.object({
 				campaign_id: z.string().regex(/^\d+$/),
 				expected_campaign_name: z.string().trim().min(3).max(200),
 				ad_id: z.string().regex(/^\d+$/).optional(),
 				expected_adset_id: z.string().regex(/^\d+$/).optional(),
 				thumbnail_video_id: z.string().regex(/^\d+$/).optional(),
+				inspect_existing_creative: z.object({
+					creative_id: z.string().regex(/^\d+$/), video_id: z.string().regex(/^\d+$/),
+					page_id: z.string().regex(/^\d+$/), name: z.string().trim().min(3).max(200),
+				}).optional(),
 				validate_existing_paused_ad: z.object({
 					adset_id: z.string().regex(/^\d+$/), creative_id: z.string().regex(/^\d+$/),
 					video_id: z.string().regex(/^\d+$/), name: z.string().trim().min(3).max(200),
@@ -1540,8 +1597,12 @@ export function registerMetaEcommerceToolkit(server: McpServer) {
 				}).optional(),
 			}),
 		},
-		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id, thumbnail_video_id, paused_ad_preflight, validate_existing_paused_ad }) => {
+		async ({ campaign_id, expected_campaign_name, ad_id, expected_adset_id, thumbnail_video_id, paused_ad_preflight, validate_existing_paused_ad, inspect_existing_creative }) => {
 			try {
+				if (inspect_existing_creative) {
+					if (paused_ad_preflight || thumbnail_video_id || ad_id || expected_adset_id || validate_existing_paused_ad) return textResult({ reason: "mixed_inspection_modes" });
+					return textResult(await inspectExistingCreative(inspect_existing_creative, campaign_id, expected_campaign_name));
+				}
 				if (validate_existing_paused_ad) {
 					if (paused_ad_preflight || thumbnail_video_id || ad_id || expected_adset_id) throw new Error("Select one inspection mode.");
 					try {
