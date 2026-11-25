@@ -37,10 +37,18 @@ function harness(options = {}) {
 		const u = new URL(url);
 		if (u.hostname.endsWith(".fbcdn.net")) {
 			assert.equal(url, thumbnailUrl);
-			assert.equal(opts.redirect, "error");
+			if (opts.redirect === "error") throw new TypeError("Workers does not support redirect error mode");
+			assert.equal(opts.redirect, "manual");
 			assert.equal(opts.credentials, "omit");
 			assert.equal(opts.headers, undefined);
 			calls.push({ method: "GET", path: "cdn-thumbnail" });
+			if (options.cdnRedirect) return {
+				status: options.cdnRedirect, ok: false,
+				get headers() { throw new Error("Must not inspect redirect headers"); },
+				get body() { throw new Error("Must not inspect redirect body"); },
+			};
+			if (options.cdnMime) return new Response(thumbnailBytes, { headers: { "content-type": options.cdnMime } });
+			if (options.cdnOversize) return new Response(thumbnailBytes, { headers: { "content-type": "image/jpeg", "content-length": String(4 * 1024 * 1024 + 1) } });
 			if (options.badDownload) return new Response("not an image", { headers: { "content-type": "image/jpeg" } });
 			return new Response(thumbnailBytes, { headers: { "content-type": "image/jpeg" } });
 		}
@@ -251,5 +259,29 @@ test("preserves numeric provider errors on each POST without raw message or fals
 		assert.equal(result.may_have_created_ad, edge === "ads");
 		assert.equal(h.posts().at(-1).path, `act_${account}/${edge}`);
 		assert.doesNotMatch(errorText(r), /token unsafe fixture|signature|fbcdn/);
+	}
+});
+test("Worker manual mode rejects redirects without reading their headers/body or following them", async () => {
+	for (const status of [301, 302, 303, 304, 307, 308]) {
+		const h = harness({ cdnRedirect: status });
+		const r = await h.run(inspect, { campaign_id: campaign, expected_campaign_name: parents[1].name, paused_ad_preflight: createInput });
+		const result = failedStage(r, "thumbnail_bytes");
+		assert.equal(result.thumbnail_failure, "redirect_refused");
+		assert.equal(result.thumbnail_http_status, status);
+		assert.deepEqual(h.posts(), []);
+		assert.equal(h.calls.filter(c => c.path === "cdn-thumbnail").length, 1);
+	}
+});
+test("retains and safely distinguishes MIME, signature and size failures", async () => {
+	for (const [options, reason] of [
+		[{ cdnMime: "text/html" }, "unsupported_mime"],
+		[{ badDownload: true }, "signature_mismatch"],
+		[{ cdnOversize: true }, "size_limit"],
+	]) {
+		const h = harness(options);
+		const r = await h.run(create, createInput);
+		assert.equal(failedStage(r, "thumbnail_bytes").thumbnail_failure, reason);
+		assert.doesNotMatch(errorText(r), /signature=|fbcdn|https:/);
+		assert.deepEqual(h.posts(), []);
 	}
 });
