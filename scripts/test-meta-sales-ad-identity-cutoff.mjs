@@ -78,6 +78,7 @@ function harness(options = {}) {
 			: [{ uri: thumbnailUrl, width: 1080, height: 1920, is_preferred: true }] });
 		if (path === page) return Response.json({ instagram_business_account: { id: "876" } });
 		if (path === `act_${account}/ads`) return Response.json(options.inventory?.(params.after) ?? { data: [] });
+		if (options.story && path === page + "_123") return Response.json(options.story);
 		if (options.validationMode && path === creative) {
 			return Response.json({ id: creative, account_id: account, name: createName, ...providerAd().creative, ...options.validationCreative });
 		}
@@ -336,4 +337,30 @@ test("rejects wrong creative, sibling domain and duplicate before any POST, and 
 	const out = JSON.parse(errorText(await h.run(inspect, { ...args, validate_existing_paused_ad: validateInput })));
 	assert.equal(out.unexpected_response, true); assert.equal(out.validated, false);
 	assert.equal(h.posts().length, 1);
+});
+
+test("registered exact creative inspection keeps provider IDs distinct and returns sanitized reasons without POST", async () => {
+	const name = "BLKFRI26 | Video 03 | Everyday & Premium Roller Blinds | ROLLER20";
+	const fullName = name + " | Creative 2026-11-25-f826cbeafe567e1dc4032ab2a3c5ea8e";
+	const post = page + "_123";
+	const story = { id: post, attachments: { data: [{ media_type: "video", target: { id: video } }] } };
+	for (const [extra, reason] of [
+		[{}, "source_video_matches"],
+		[{ id: "999" }, "creative_read_or_scope_failed"],
+		[{ name: fullName + " other" }, "creative_name_mismatch"],
+		[{ object_story_spec: {}, video_id: video }, "missing_source_lineage"],
+		[{ video_id: vertical }, "conflicting_video_ids"],
+		[{ object_story_spec: { video_data: { video_id: vertical } } }, "source_video_mismatch"],
+		[{ object_story_spec: {}, effective_object_story_id: post }, "source_video_matches"],
+		[{ effective_object_story_id: "999_123" }, "effective_story_page_mismatch"],
+	]) {
+		const h = harness({ validationMode: () => assert.fail("unexpected POST"), story,
+			validationCreative: { name: fullName, ...extra } });
+		const args = { campaign_id: campaign, expected_campaign_name: parents[1].name,
+			inspect_existing_creative: { creative_id: creative, name, page_id: page, video_id: video } };
+		const output = errorText(await h.run(inspect, args));
+		assert.equal(JSON.parse(output).reason, reason);
+		assert.doesNotMatch(output, /https?:|signature|access_token/);
+		assert.deepEqual(h.posts(), []);
+	}
 });
