@@ -49,6 +49,7 @@ function harness(options = {}) {
 		calls.push({ method, path, params });
 		assert.equal(String(url).startsWith("https://graph.facebook.com/v27.0/"), true);
 		if (method === "POST") {
+			if (options.failedPost === path) return Response.json({ error: { message: "signed CDN and token unsafe fixture", code: 100, error_subcode: 1443226 } }, { status: 400 });
 			if (path === `act_${account}/adimages`) return Response.json({ images: options.invalidHash ? {} : { bytes: { hash: thumbnailHash } } });
 			if (path === `act_${account}/adcreatives`) { placements = params.asset_feed_spec ? JSON.parse(params.asset_feed_spec) : undefined; return Response.json({ id: creative }); }
 			if (path === `act_${account}/ads`) { created = true; return Response.json({ id: ad }); }
@@ -93,6 +94,14 @@ function harness(options = {}) {
 const create = "create_meta_website_sales_video_ad_paused", update = "set_meta_ad_status_guarded", inspect = "inspect_meta_ecommerce_campaign_prelaunch";
 const readArgs = { ad_id: ad, expected_adset_id: adset, campaign_id: campaign, expected_campaign_name: parents[1].name };
 const errorText = (r) => r.content[0].text;
+const failedStage = (r, stage) => {
+	assert.equal(r.isError, undefined);
+	const value = JSON.parse(errorText(r));
+	assert.equal(value.ok, false);
+	assert.equal(value.stage, stage);
+	assert.equal(value.do_not_retry, true);
+	return value;
+};
 
 test("reads exact owned published ad and normalized provider-supplied fields without changes", async () => {
 	const h = harness(), r = await h.run(inspect, readArgs);
@@ -105,7 +114,7 @@ test("unpublished or unavailable id never becomes permission to create", async (
 	const h = harness({ invisible: true }), r = await h.run(inspect, readArgs);
 	assert.equal(r.isError, true); assert.match(errorText(r), /Unsupported get request/);
 	const rr = await h.run(create, { ...createInput, known_existing_ad_id: ad });
-	assert.equal(rr.isError, true); assert.match(errorText(rr), /Inspect it by ID/);
+	assert.equal(failedStage(rr, "input").ad_id, ad);
 	assert.deepEqual(h.posts(), []);
 });
 test("rejects mismatched parent and ownership before any write", async () => {
@@ -119,7 +128,7 @@ test("rejects mismatched parent and ownership before any write", async () => {
 test("validates dates before any provider calls", async () => {
 	for (const date of ["2099-11-30T23:59:00", "2099-02-31T23:59:00Z", "2020-01-01T00:00:00Z"]) {
 		const h = harness();
-		assert.equal((await h.run(create, { ...createInput, ad_schedule_end_time: date })).isError, true);
+		failedStage(await h.run(create, { ...createInput, ad_schedule_end_time: date }), "input");
 		assert.deepEqual(h.calls, []);
 	}
 });
@@ -136,7 +145,7 @@ test("creates and verifies exactly one paused ad with equivalent cutoff", async 
 });
 test("reports exact created id and forbids activation/retry when provider drops cutoff", async () => {
 	const h = harness({ noCutoff: true }), r = await h.run(create, createInput);
-	assert.equal(r.isError, true); assert.match(errorText(r), /Ad 567 was created PAUSED/);
+	assert.equal(failedStage(r, "ad_readback").ad_id, ad);
 	assert.equal(h.posts().length, 3); assert.equal(h.posts().some(p => p.params.status === "ACTIVE"), false);
 });
 test("refuses renamed same video on later page even with new UTM; no creation", async () => {
@@ -144,7 +153,7 @@ test("refuses renamed same video on later page even with new UTM; no creation", 
 		? { data: [], paging: { next: "https://ignored.invalid/?sensitive=fixture", cursors: { after: "page2" } } }
 		: { data: [providerAd({ name: "Other title", status: "ACTIVE" })] } });
 	const r = await h.run(create, { ...createInput, destination_url: landing + "?utm_source=facebook" });
-	assert.equal(r.isError, true); assert.match(errorText(r), /Potential duplicate/);
+	assert.equal(failedStage(r, "duplicate_inventory").ad_id, ad);
 	assert.deepEqual(h.posts(), []);
 });
 test("rejects partial inventory or a repeated pagination cursor", async () => {
@@ -153,7 +162,7 @@ test("rejects partial inventory or a repeated pagination cursor", async () => {
 		() => ({ data: [{ id: "999", name: "unreadable", adset_id: adset }] }),
 	]) {
 		const h = harness({ inventory }), r = await h.run(create, createInput);
-		assert.equal(r.isError, true); assert.deepEqual(h.posts(), []);
+		failedStage(r, "duplicate_inventory"); assert.deepEqual(h.posts(), []);
 	}
 });
 test("requires reviewed matching cutoff before activating a timed ad", async () => {
@@ -192,7 +201,9 @@ test("timed placement exact campaign, cutoff and source videos verify; swapped I
 });
 test("after successful POST, even when GET is forbidden preserve created ID in error", async () => {
 	const h = harness({ failedReadback: true }), r = await h.run(create, createInput);
-	assert.equal(r.isError, true); assert.match(errorText(r), /created ad ID 567.*do not retry/);
+	const failure = failedStage(r, "ad_readback");
+	assert.equal(failure.ad_id, ad); assert.equal(failure.creative_id, creative); assert.equal(failure.created, null);
+	assert.equal(failure.provider_http_status, 403); assert.equal(failure.provider_code, 200);
 	assert.deepEqual(h.posts().map(p => p.path), [`act_${account}/adimages`, `act_${account}/adcreatives`, `act_${account}/ads`]);
 });
 
@@ -207,8 +218,7 @@ test("rejects missing, small or untrusted thumbnail and bad image bytes before a
 	for (const options of [{ badThumbnail: true }, { badDownload: true }]) {
 		const h = harness(options);
 		const r = await h.run(create, createInput);
-		assert.equal(r.isError, true);
-		assert.match(errorText(r), /thumbnail/);
+		failedStage(r, options.badThumbnail ? "thumbnail_metadata" : "thumbnail_bytes");
 		assert.doesNotMatch(errorText(r), /signature|fbcdn/);
 		assert.deepEqual(h.posts(), []);
 	}
@@ -216,6 +226,30 @@ test("rejects missing, small or untrusted thumbnail and bad image bytes before a
 test("does not create creative or ad if Graph returns no usable owned image hash", async () => {
 	const h = harness({ invalidHash: true });
 	const r = await h.run(create, createInput);
-	assert.match(errorText(r), /did not return one valid thumbnail hash/);
+	failedStage(r, "thumbnail_image_registration");
 	assert.deepEqual(h.posts().map(c => c.path), [`act_${account}/adimages`]);
+});
+
+test("inspect-only resolves exact duplicate inventory, bounded thumbnail bytes and cutoff without POST", async () => {
+	const h = harness(), r = await h.run(inspect, { campaign_id: campaign, expected_campaign_name: parents[1].name, paused_ad_preflight: createInput });
+	assert.equal(JSON.parse(errorText(r)).read_only_checks_passed, true);
+	assert.match(errorText(r), /2099-11-30T12:59:00Z/);
+	assert.equal(h.calls.filter(c => c.path === "cdn-thumbnail").length, 1);
+	assert.ok(h.calls.some(c => c.path === `act_${account}/ads`));
+	assert.deepEqual(h.posts(), []);
+	const bad = harness({ badDownload: true });
+	failedStage(await bad.run(inspect, { campaign_id: campaign, expected_campaign_name: parents[1].name, paused_ad_preflight: createInput }), "thumbnail_bytes");
+	assert.deepEqual(bad.posts(), []);
+});
+test("preserves numeric provider errors on each POST without raw message or false certainty", async () => {
+	for (const [edge, stage] of [["adimages", "thumbnail_image_registration"], ["adcreatives", "creative_create"], ["ads", "ad_create"]]) {
+		const h = harness({ failedPost: `act_${account}/${edge}` });
+		const r = await h.run(create, createInput);
+		const result = failedStage(r, stage);
+		assert.equal(result.provider_code, 100);
+		assert.equal(result.provider_subcode, 1443226);
+		assert.equal(result.may_have_created_ad, edge === "ads");
+		assert.equal(h.posts().at(-1).path, `act_${account}/${edge}`);
+		assert.doesNotMatch(errorText(r), /token unsafe fixture|signature|fbcdn/);
+	}
 });
